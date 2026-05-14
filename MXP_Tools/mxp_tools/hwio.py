@@ -119,6 +119,22 @@ def default_banks_split_rows(n_banks):
     return mapping
 
 
+def interleaved_row_major_16bank(bank_idx, word_offset, M, N):
+    """C[m,n] = SRAM[bank=flat%16, word=flat//16] where flat = m*N+n.
+
+    32 col GEMM 결과를 row-major flat 으로 SRAM 에 쌓고
+    sram_1rw_banked 의 INTERLEAVED 매핑 (LSB 4비트가 bank_sel) 으로
+    16 bank 에 분산되는 layout 의 역매핑.
+
+    Used by: gemm_sram integration testbench
+    Spec   : docs/superpowers/specs/2026-05-14-integration-design.md §3
+    """
+    flat = word_offset * 16 + bank_idx
+    if flat >= M * N:
+        return None
+    return divmod(flat, N)
+
+
 def gather_banks(bank_paths, M, N, mapping, reader=read_writememh_fp32):
     """Reconstruct C_hw (M, N) from per-bank .mem files via `mapping`.
 

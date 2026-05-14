@@ -112,6 +112,8 @@ def _resolve_mapping(args, M, N):
         return hwio.default_single_bank_row_major
     if args.layout == "split-rows":
         return hwio.default_banks_split_rows(args.n_banks)
+    if args.layout == "interleaved_row_major_16bank":
+        return hwio.interleaved_row_major_16bank
     raise ValueError(f"unknown layout {args.layout}")
 
 
@@ -177,7 +179,7 @@ def main(argv=None):
     g.add_argument("--ref", required=True, help="path to C_sw_*.npz from `ref`")
     g.add_argument("--hw-banks", nargs="+", required=True,
                    help="one or more $writememh files (one per bank)")
-    g.add_argument("--layout", choices=("single", "split-rows"), default="single")
+    g.add_argument("--layout", choices=("single", "split-rows", "interleaved_row_major_16bank"), default="single")
     g.add_argument("--n-banks", type=int, default=1)
     g.add_argument("--save", default=None, help="dump .npz of result")
     g.set_defaults(func=cmd_compare)
