@@ -18,6 +18,7 @@ sim/work/
 sim/*.log
 sim/*.jou
 sim/*.pb
+sim/*.vcd
 sim/xsim.dir/
 sim/webtalk*.jou
 sim/webtalk*.log
