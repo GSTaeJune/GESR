@@ -1,0 +1,47 @@
+# Vivado scratch / generated dirs
+gemm_sram.cache/
+gemm_sram.hw/
+gemm_sram.ip_user_files/
+gemm_sram.sim/
+gemm_sram.runs/
+gemm_sram.gen/
+*.jou
+*.log
+*.str
+*.pb
+*.wdb
+*.wcfg
+.Xil/
+
+# XSim batch outputs
+sim/work/
+sim/*.log
+sim/*.jou
+sim/*.pb
+sim/xsim.dir/
+sim/webtalk*.jou
+sim/webtalk*.log
+
+# HardFloat build artifacts (sbt / Chisel)
+third_party/berkeley-hardfloat/target/
+third_party/berkeley-hardfloat/project/target/
+third_party/berkeley-hardfloat/project/project/
+third_party/berkeley-hardfloat/build/
+third_party/berkeley-hardfloat/generated/
+
+# MXP_Tools Python scratch
+MXP_Tools/work/
+MXP_Tools/__pycache__/
+MXP_Tools/**/__pycache__/
+*.pyc
+
+# Reference papers / PDFs (not source)
+References/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+.DS_Store

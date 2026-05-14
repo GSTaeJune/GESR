@@ -1,0 +1,75 @@
+"""Golden-reference FP32 MXINT GEMM. Pure numpy; matches MXP_Soft mxint_gemm.
+
+Per OCP MX Spec §6.3.2:
+
+    for each K=32 block:
+        int32 block sum = a_int (int8) @ b_int (int8)
+        FP32 partial    = int32 block sum
+                          * 2^(e_a - 127) * 2^(e_b - 127)
+                          * 2^-(implicit_a + implicit_b)
+        FP32 accumulator += FP32 partial
+
+Per-block scale application is mandatory — scales differ per block, so an
+int32 accumulation across blocks followed by a single scale would be wrong.
+"""
+import numpy as np
+
+from .const import BLOCK_SIZE, IMPLICIT_SCALE_EXP
+
+
+def _e8m0_to_fp32(scale_e8m0):
+    """E8M0 (uint8 biased exponent) → FP32 scale factor 2^(e - 127)."""
+    return (2.0 ** (scale_e8m0.astype(np.float64) - 127.0)).astype(np.float32)
+
+
+def mxint_gemm_golden(int_A, scale_A, prec_A, int_B, scale_B, prec_B):
+    """Block-wise int32→FP32 accumulator GEMM. Inputs are pre-quantized.
+
+    Args:
+      int_A:   int8,  (M, K)
+      scale_A: uint8, (M, K // 32)
+      prec_A:  int in {2, 4, 8}
+      int_B:   int8,  (K, N)
+      scale_B: uint8, (K // 32, N)
+      prec_B:  int in {2, 4, 8}
+
+    Returns:
+      C_fp32: float32, (M, N). HW that is bit-correct produces the same matrix.
+    """
+    if int_A.dtype != np.int8 or int_B.dtype != np.int8:
+        raise TypeError(f"int_A, int_B must be int8 (got {int_A.dtype}, {int_B.dtype})")
+    if scale_A.dtype != np.uint8 or scale_B.dtype != np.uint8:
+        raise TypeError(f"scale_A, scale_B must be uint8 (got {scale_A.dtype}, {scale_B.dtype})")
+    if prec_A not in IMPLICIT_SCALE_EXP or prec_B not in IMPLICIT_SCALE_EXP:
+        raise ValueError(f"prec must be in {sorted(IMPLICIT_SCALE_EXP)}")
+
+    M, K = int_A.shape
+    K2, N = int_B.shape
+    if K != K2:
+        raise ValueError(f"shape mismatch: int_A={int_A.shape}, int_B={int_B.shape}")
+    if K % BLOCK_SIZE != 0:
+        raise ValueError(f"K={K} must be a multiple of {BLOCK_SIZE}")
+    n_blocks = K // BLOCK_SIZE
+    if scale_A.shape != (M, n_blocks):
+        raise ValueError(f"scale_A shape {scale_A.shape} != ({M}, {n_blocks})")
+    if scale_B.shape != (n_blocks, N):
+        raise ValueError(f"scale_B shape {scale_B.shape} != ({n_blocks}, {N})")
+
+    a_scale_fp = _e8m0_to_fp32(scale_A)
+    b_scale_fp = _e8m0_to_fp32(scale_B)
+    implicit_scale = np.float32(
+        2.0 ** -(IMPLICIT_SCALE_EXP[prec_A] + IMPLICIT_SCALE_EXP[prec_B])
+    )
+
+    C = np.zeros((M, N), dtype=np.float32)
+    for blk in range(n_blocks):
+        sl = slice(blk * BLOCK_SIZE, (blk + 1) * BLOCK_SIZE)
+        block_int = int_A[:, sl].astype(np.int32) @ int_B[sl, :].astype(np.int32)
+        block_fp = (
+            block_int.astype(np.float32)
+            * a_scale_fp[:, blk:blk + 1]
+            * b_scale_fp[blk:blk + 1, :]
+            * implicit_scale
+        )
+        C += block_fp
+    return C
