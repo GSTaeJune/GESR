@@ -2,18 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Next session kickoff (2026-05-14, RMW unit done — system integration up next)
+## Next session kickoff (2026-05-15, integration done — synthesis / future scope 단계로)
 
-RMW unit (Tasks 1–9, see git history / `docs/superpowers/`) is **complete and standalone-verified** (`bash sim/run_rmw.sh` → 71/71 PASS). Next phase: **GEMM ↔ RMW ↔ sram_1rw_banked 시스템 통합**.
+GEMM ↔ RMW ↔ sram_1rw_banked **시스템 통합 완성 및 검증**됨 — `bash sim/run_integration_sweep.sh` → `ALL 9 MODES PASSED` (9 precision combinations A,B ∈ {2,4,8}, 각각 128×128 = 16384 element 모두 bit-exact 일치 vs MXP_Tools golden). 단위 검증도 그대로 유효: `bash sim/run_rmw.sh` → 71/71 PASS.
 
-다음 세션 시작 protocol — 사용자가 "통합 설계 시작" / "다음 단계 시작" / "brainstorming 시작" 등으로 시작하면:
+다음 세션 시작 protocol — `docs/next-session-kickoff.md` 를 먼저 읽고, 사용자가 어떤 방향으로 가고 싶은지에 따라:
 
-1. **`docs/next-session-kickoff.md` 를 먼저 읽는다** — 통합 단계의 4가지 열린 설계 질문과 브레인스토밍 시작 컨텍스트가 정리돼 있음.
-2. `superpowers:brainstorming` 스킬을 호출해서 그 4개 질문(아래 "What's NOT settled" 섹션 항목 2/3/4/6)을 같이 정리한다. 결정된 답들을 `docs/superpowers/specs/2026-MM-DD-integration-design.md`로 저장.
-3. spec이 끝나면 `superpowers:writing-plans` → `docs/superpowers/plans/2026-MM-DD-integration-implementation.md`.
-4. plan이 끝나면 implementation 진행.
+1. **잠정값 재검토** (throughput / area) — 통합 spec § 9 의 잠정 결정값 표 (RMW instance 수 1개 / loop order K-outermost / 워크로드 128³ / INTERLEAVED bank) 의 재검토 트리거가 발생한 시점. 새 spec 필요.
+2. **Timing closure / 합성** — Vivado 합성, 250 MHz wrapper / xc7vx485 target. MXP standalone 의 closure 패턴 답습.
+3. **Future scope: SRAM weight storage** — 통합 spec § 1 "Future scope" 항목. 별도 spec 필요.
+4. **9-mode 자동 회귀 CI** — `sim/run_integration_sweep.sh` 를 CI 로 묶기.
 
-이전 단계(RMW unit)가 어떻게 굴러갔는지 보고 싶으면 `docs/superpowers/specs/2026-05-14-rmw-design.md` + `docs/superpowers/plans/2026-05-14-rmw-implementation.md` 참고. 같은 흐름을 답습하면 됨.
+이전 단계 흐름:
+- RMW unit: `docs/superpowers/specs/2026-05-14-rmw-design.md` + `docs/superpowers/plans/2026-05-14-rmw-implementation.md`
+- 통합: `docs/superpowers/specs/2026-05-14-integration-design.md` + `docs/superpowers/plans/2026-05-14-integration-implementation.md`
 
 ---
 
@@ -33,17 +35,19 @@ This is a Vivado 2024.1 project (`gemm_sram.xpr`, target `xc7vx485tffg1157-1`) t
 
 Vivado's import keeps copies under `gemm_sram.srcs/sources_1/imports/Desktop/{MXP,sram}/...`. If you change algorithm/microarchitecture, fix it upstream (`../MXP/` or `../sram/`) and re-import; do not patch the local copy and forget. Refer to `../MXP/CLAUDE.md` and `../sram/CLAUDE.md` for upstream conventions and gotchas (Verilog-2001 only in SRAM, `in_a`=weight/`in_b`=activation naming gotcha in MXP, etc.).
 
-## Top-level wiring (current state vs target)
+## Top-level wiring
 
-Top module is `GEMM` (set in `gemm_sram.xpr`). At present `GEMM.v` is the unmodified MXP `TOP` — it exposes `out_accumulate[32*60-1:0]` / `out_scale[32*4*9-1:0]` / `out_fire[31:0]` to module ports. SRAM is sitting in the project but is **not yet instantiated** anywhere. `RMW.v` is the standalone FP32 RMW unit (`int_to_fp32` + `L_CONV`-cycle SRAM delay + `fp32_adder`, total latency `L_CONV + L_ADD = 5`); it's verified standalone (71/71 vectors via `sim/run_rmw.sh`) but **not yet wired** between GEMM and the SRAM banks.
+Top module is `gemm_sram_top` (set in `gemm_sram.xpr`; sim target is `gemm_sram_top_tb`). The wrapper is **pure structural** — GEMM + RMW + sram_1rw_banked instantiated with just two glue lines (Q→RMW.in_SRAM hardwire, sram_D_use_zero mux between zero and RMW.out_RMW). All controller responsibility lives in the TB (`tb/gemm_sram_top_tb.v`) — no synthesizable FSM in the wrapper.
 
-Target end-state, conceptually:
+Datapath:
 
 ```
 GEMM (INT psum + 9-bit scale) ──► RMW (INT→FP32, FP32 add) ──► sram_1rw_banked (FP32)
                                        ▲                              │
                                        └────── FP32 prior psum ◄──────┘
 ```
+
+Verified end-to-end via `bash sim/run_integration_sweep.sh` (9/9 modes bit-exact PASS vs MXP_Tools golden, 128×128 = 16384 elements per mode).
 
 ### RMW contract (from `RMW.v` header — committed decisions)
 
@@ -69,14 +73,13 @@ The RMW controller (whether inside RMW or wrapping it) must still:
 3. Wait for the read return (1 cycle if leaf `PIPELINE=0`, 2 cycles if `PIPELINE=1`).
 4. Convert INT→FP32 (using `scale`), add to `in_SRAM`, write back.
 
-### Open questions specific to RMW
+### Resolved (during integration) — committed values
 
-- **Granularity**: one RMW per column (32 instances) or per lane (128 instances)? `in_GEMM[31:0]` is a single 32-bit word, but `out_accumulate` is 60 bits per column packed as A8/A4/A2 layouts (see "MXP control surface" below). For A4 (two 18-bit) and A2 (four 15-bit), one column produces multiple independent psums each with its own scale sub-word → likely per-lane RMW with mode-aware muxing on the input side. For A8 there is only one effective lane, so 3 of 4 RMWs idle.
-- **Latency budget**: INT→FP32 dequant + FP32 add is multi-cycle (DSP48-based FP add IP is typically 3–6 cycles). Decide whether RMW is pipelined or single-cycle multi-stage; the controller's read-issue timing depends on this.
-- **FP32 adder implementation**: Vivado Floating-Point IP vs hand-written unpack/align/add/normalize/repack. The skeleton doesn't commit.
-- **Saturation / NaN handling**: behavior when `in_SRAM` is uninitialized (NaN bit pattern). The first K-tile RMW must either read a guaranteed-zero FP32 (`32'h00000000`) or be gated to skip the read and write the dequant result directly.
-
-Bank addressing is also open: `sram_1rw_banked` defaults to `NUM_BANKS=16, BANK_DEPTH=32768` (2 MB total). Map 32 GEMM columns onto banks. Note `BANK_STRATEGY="INTERLEAVED"` (LSB bank-select) vs `"SEQUENTIAL"` (MSB bank-select) — see `../sram/docs/banking-wrapper-decisions.md`.
+- **Granularity**: **1 RMW instance** (jointly serves all 32 cols / all lanes via TB-side mode-aware dispatch). Lane decode (A8 = 1, A4 = 2, A2 = 4 RMW dispatches per col fire) lives in `tb/gemm_sram_top_tb.v` capture-block per `docs/superpowers/notes/lane-to-c-mapping.md`. Re-visit trigger: throughput / area / sim-time bottleneck.
+- **Latency budget**: `L_CONV = 2`, `L_ADD = 3`, total = **5 cycles**. Hand-written via vendored HardFloat (`third_party/berkeley-hardfloat/`).
+- **FP32 adder implementation**: **HardFloat-based** (`fp32_adder.v` wraps `addRecFN`). Not Vivado FP IP.
+- **First-tile init**: **SRAM zero-prime via TB loop** at sim start (16384 words written through the `sram_D_use_zero=1` mux), then `sram_D_use_zero=0` for the rest. No NaN risk.
+- **Bank addressing**: `NUM_BANKS = 16`, `BANK_DEPTH = 32768`, `BANK_STRATEGY = "INTERLEAVED"`, `PIPELINE = 0`. `C[m,n] → flat=m*N+n → bank=flat%16, word=flat//16`. Mapping callable in `MXP_Tools/mxp_tools/hwio.py::interleaved_row_major_16bank`. 16384 / 16 = 1024 words/bank for the 128×128 workload.
 
 ## MXP control surface (you will need this)
 
@@ -109,14 +112,22 @@ The banked wrapper additionally has a 1-cycle `bank_sel_d1` register inside, so 
 
 Two ways to run sim:
 
-1. **Vivado GUI** — open `gemm_sram.xpr`, set the testbench as simulation top, Run Behavioral Simulation. Top synth module is `GEMM`.
-2. **XSim batch** — `sim/run_*.sh` scripts already exist for the RMW unit and its sub-modules:
+1. **Vivado GUI** — open `gemm_sram.xpr`. Synth top = `gemm_sram_top`; sim top = `gemm_sram_top_tb`. Run Behavioral Simulation.
+2. **XSim batch** — `sim/run_*.sh` scripts:
 
    ```bash
-   bash sim/run_rmw_smoke.sh      # HardFloat round-trip smoke (no DUT logic)
-   bash sim/run_int_to_fp32.sh    # int_to_fp32 unit TB (6 directed cases)
-   bash sim/run_fp32_adder.sh     # fp32_adder unit TB (4 directed cases)
-   bash sim/run_rmw.sh            # full RMW vector TB (71 cases — see below)
+   # Unit-level
+   bash sim/run_rmw_smoke.sh         # HardFloat round-trip smoke (no DUT logic)
+   bash sim/run_int_to_fp32.sh       # int_to_fp32 unit TB (6 directed cases)
+   bash sim/run_fp32_adder.sh        # fp32_adder unit TB (4 directed cases)
+   bash sim/run_rmw.sh               # full RMW vector TB (71 cases)
+   bash sim/run_top_elab.sh          # gemm_sram_top elab-only smoke
+   bash sim/run_integration_smoke.sh # TB zero-prime + dump (no GEMM driving)
+
+   # Integration (end-to-end vs MXP_Tools golden)
+   bash sim/run_integration_one.sh <LABEL> <A_PREC> <B_PREC>   # 1 mode (e.g. "A8_B8" 8 8)
+   bash sim/run_integration_sweep.sh                            # all 9 modes serial
+   bash sim/run_integration_parallel.sh                         # print parallel dispatch guide
    ```
 
    **Full RMW vector test** requires `MXP_Tools` to generate the vector files first:
@@ -126,7 +137,11 @@ Two ways to run sim:
    bash sim/run_rmw.sh             # expect: rmw_tb: ALL 71 TESTS PASSED
    ```
 
+   **Integration sweep** is self-contained — invokes `gen / emit / ref` internally then `run_integration_one.sh` + `compare`. Last line on success: `ALL 9 MODES PASSED`. Runtime ~20–25 min for the full 9-mode sweep.
+
    To author a new TB, copy the pattern from any existing `sim/run_*.sh`. Required directive that **must** appear in both RTL and TB or XSim errors out: `` `timescale 1ns/1ps ``.
+
+   **Gotcha — `-testplusarg "K=V"` under Git Bash**: the `=` is stripped before xsim sees it. Wrap with `cmd //c "xsim ... -testplusarg \"K=V\""` — the integration scripts already do this.
 
 When parameter overrides are needed at sim time, **do not use `xelab -generic_top "P=V"`** — there's a cmd.exe quoting bug under Git Bash on Windows that strips the `=`. Use `` `ifdef `` in the source + `xvlog -d FLAG` instead. The SRAM TBs already use this pattern:
 
@@ -135,64 +150,85 @@ When parameter overrides are needed at sim time, **do not use `xelab -generic_to
 
 **TB sizing convention.** Use a small config for fast sim (banked TB uses 4 banks × 64 depth × 32-bit), full-size parameters only via the elab sweep (`../sram/sim/run_wrapper_elab.sh`). When writing this project's TBs, follow the same pattern — do not run a 2 MB sim by default.
 
-## Verification helper: `../MXP_Tools/` (Python)
+## Verification helper: `MXP_Tools/` (Python, local subdir)
 
-Generates HW inputs and SW golden GEMM. From `../MXP_Tools/README.md`:
+Generates HW inputs and SW golden GEMM. Typical invocation (the sweep script already wraps these):
 
 ```bash
-cd ../MXP_Tools
-python -m mxp_tools gen     --out work/ -M 128 -K 128 -N 128 --seed 0
-python -m mxp_tools emit    --out work/                    # all 9 precision modes
-python -m mxp_tools ref     --out work/                    # SW golden
-# run HW → produces work/hw_out/bank*.mem ($writememh)
-python -m mxp_tools compare --ref work/sw_ref/C_sw_mxint8_mxint8.npz \
-                            --hw-banks work/hw_out/bank0.mem \
-                            --layout single
+cd MXP_Tools
+python -m mxp_tools gen   --out ../work/A8_B8 -M 128 -K 128 -N 128 --seed 0
+python -m mxp_tools emit  --out ../work/A8_B8                        # emits all 3 precs
+python -m mxp_tools ref   --out ../work/A8_B8 --prec-a 8 --prec-b 8   # SW golden
+# run HW → produces work/A8_B8/hw_out/bank{0..15}.mem ($writememh)
+BANKS=$(printf "../work/A8_B8/hw_out/bank%d.mem " {0..15})
+python -m mxp_tools compare --ref ../work/A8_B8/sw_ref/C_sw_mxint8_mxint8.npz \
+                            --hw-banks ${BANKS} \
+                            --layout interleaved_row_major_16bank
 ```
 
-For this project the HW dump is one `$writememh` file **per SRAM bank**. The Python side's bank → `(m, n)` mapping is plug-in (`hwio.gather_banks(..., mapping)`); the mapping for our RMW layout must match what the testbench dumps. Once you finalize bank-column mapping, write a custom mapping callable rather than relying on `default_single_bank_row_major` / `default_banks_split_rows`. Numerical contract: HW output words are interpreted as IEEE-754 FP32 bit patterns (so the RMW path must dequantize before writing).
+**Naming gotcha (was a Task 8 silent-bug source)**: MXP_Tools' `--prec-a` = WEIGHT precision = our plusarg `B_PREC` (weight is the bit-serial first operand in `mxint_gemm_golden(A, ..., prec_A=weight)`). `--prec-b` = ACTIVATION precision = our `A_PREC`. The resulting `.npz` filename slot order is `C_sw_mxint{prec_a}_mxint{prec_b}.npz` = `C_sw_mxint{B_PREC}_mxint{A_PREC}.npz`. Symmetric modes (A2_B2, A4_B4, A8_B8) hide the bug; asymmetric modes catch it as all-zero HW dumps. The sweep + per-mode scripts already use the corrected convention.
 
-## What's NOT settled (open design questions)
+HW dump = one `$writememh` file per SRAM bank (16 files). Mapping callable: `MXP_Tools/mxp_tools/hwio.py::interleaved_row_major_16bank`. Numerical contract: HW output words are interpreted as IEEE-754 FP32 bit patterns (RMW dequantizes INT→FP32 before storing).
 
-These are explicit unknowns — do not invent answers without asking. They are the work this project exists to do. (Items previously open but **now resolved** by the `RMW.v` contract are noted below.)
+## Settled — with re-visit triggers
 
-1. ~~**GEMM-output → SRAM word mapping.**~~ **Resolved**: dequantize to FP32 at RMW, store FP32 in SRAM, 32-bit `DATA_WIDTH`.
-2. **Bank-to-column assignment.** 32 columns into N banks. Interleaved vs sequential. Per-column FIFO vs 32 parallel RMW engines vs serialized arbiter.
-3. **Fire-timing aware scheduling.** Per-column `out_fire` skew across the chain — the RMW controller must not collide two columns onto the same bank in the same cycle. Made harder by RMW's multi-cycle FP32 add.
-4. **First-tile init.** First RMW for a given output tile must not read garbage from uninitialized FP32 SRAM. Either zero-prime the SRAM image via a `do_write` loop at the start of sim (banked wrapper has no `INIT_FILE`), or gate the first read out and write the dequant result directly.
-5. ~~**Scale storage.**~~ **Resolved**: scale is consumed during INT→FP32 conversion in RMW, not stored.
-6. **RMW granularity (new).** Per-column (32 instances) vs per-lane (128 instances) — driven by A8/A4/A2 multi-lane packing.
-7. **RMW latency / impl (new).** FP IP vs hand-written; pipelined latency budget; how the read-issue cadence aligns with it.
+All design questions from the original spec § 9 are now committed with concrete values (see "Resolved" subsection above + the integration spec at `docs/superpowers/specs/2026-05-14-integration-design.md` § 9). Trigger list for re-opening any of them:
 
-When implementing, write the decision into the `modify.v` header and (if architectural) into a short doc under a future `docs/` folder. Mirror the `../sram/docs/` pattern.
+| Decision | Committed value | Re-visit trigger |
+|---|---|---|
+| RMW instance count | 1 (TB-side mode-aware dispatch) | throughput / area goal; sim time too long |
+| Loop order | K-outermost | dataflow re-optimization phase |
+| Workload (M, K, N) | (128, 128, 128) | sim time > 10 min |
+| Bank strategy | INTERLEAVED | bank-conflict measurement; SEQUENTIAL comparison needed |
+| SRAM PIPELINE | 0 | timing closure phase |
+| RMW (L_CONV, L_ADD) | (2, 3), total 5 cyc | timing closure phase |
+| First-tile init | TB zero-prime via mux | future hardware controller |
+| Bank-to-column mapping | row-major flat → bank=flat%16, word=flat//16 | non-128² workload |
+
+Future scope (not in current spec): use SRAM also as **B/weight input storage** (currently TB drives `in_b` directly via `$readmemh`). Separate spec needed.
 
 ## File layout
 
 ```
 gemm_sram.xpr                          # Vivado 2024.1 project (target xc7vx485tffg1157-1)
+                                       # synth top = gemm_sram_top; sim top = gemm_sram_top_tb
 gemm_sram.srcs/sources_1/
     new/
-        GEMM.v                         # Top — currently the unmodified MXP TOP
+        gemm_sram_top.v                # Integration wrapper (GEMM + RMW + SRAM, pure structural)
+        GEMM.v                         # MXP TOP wrapper (instantiated inside gemm_sram_top)
         RMW.v                          # FP32 RMW unit (int_to_fp32 + delay + fp32_adder)
         int_to_fp32.v                  # INT32 + 9-bit signed scale -> IEEE-754 FP32
+                                       # (Task 7 fix: zero-passthrough for in_int=0 + scale≠127)
         fp32_adder.v                   # IEEE-754 FP32 adder (HardFloat-based)
-    imports/Desktop/MXP/...            # MXP compute RTL (mirrored from ../MXP/);
-                                       # Accumulator_Col.v has IMPLICIT_total patch
-    imports/Desktop/sram/rtl/...       # SRAM RTL (mirrored from ../sram/)
-tb/                                    # Unit testbenches (rmw_tb, int_to_fp32_tb,
-                                       # fp32_adder_tb, rmw_smoke_tb, accumulator_col_elab)
-sim/                                   # XSim batch run scripts (run_*.sh + clean.sh)
-third_party/berkeley-hardfloat/        # Vendored HardFloat Verilog (Chisel→Verilog
-                                       # via sbt). One file: HardFloatBundle.v
-                                       # See VENDORING.md for module names + ports.
-docs/superpowers/                      # Specs + plans for completed RMW unit work
-docs/hardfloat-setup.md                # HardFloat re-vendoring guide (sbt + Chisel)
+    imports/Desktop/MXP/...            # MXP compute RTL (Accumulator_Col.v has IMPLICIT_total patch)
+    imports/Desktop/sram/rtl/...       # SRAM RTL (sram_1rw + sram_1rw_banked)
+tb/
+    gemm_sram_top_tb.v                 # Integration TB (9-mode plusarg-driven)
+    rmw_tb.v, int_to_fp32_tb.v,
+    fp32_adder_tb.v, rmw_smoke_tb.v,
+    accumulator_col_elab.v             # Unit testbenches
+sim/
+    run_top_elab.sh                    # gemm_sram_top elab smoke
+    run_integration_smoke.sh           # TB zero-prime + dump (no GEMM driving)
+    run_integration_one.sh             # 1 mode end-to-end (<LABEL> <A_PREC> <B_PREC>)
+    run_integration_sweep.sh           # 9-mode serial sweep + compare gate
+    run_integration_parallel.sh        # 9-mode parallel dispatch guide (print template)
+    run_rmw*.sh, run_int_to_fp32.sh, run_fp32_adder.sh, clean.sh
+third_party/berkeley-hardfloat/        # Vendored HardFloat (HardFloatBundle.v + VENDORING.md)
+MXP_Tools/                             # Python verification toolkit (golden GEMM + compare + viz)
+    mxp_tools/                         # gen / emit / ref / compare / viz / rmw-gen subcommands
+    tests/test_hwio_interleaved.py     # pytest for interleaved_row_major_16bank mapping
+docs/
+    next-session-kickoff.md            # Phase-handoff doc (updated each major phase end)
+    hardfloat-setup.md                 # HardFloat re-vendoring guide (sbt + Chisel)
+    superpowers/
+        specs/2026-05-14-rmw-design.md
+        specs/2026-05-14-integration-design.md
+        plans/2026-05-14-rmw-implementation.md
+        plans/2026-05-14-integration-implementation.md
+        notes/mxp-driving-sequence.md         # Task 5 — gemm_sram TB perspective on driving
+        notes/lane-to-c-mapping.md            # Task 6 — A4/A2 lane → C[m,n] dispatch table
+precision_modes_protocol.md            # MXP driving protocol (v1.0, validated 2026-05-11)
 gemm_sram.{sim,cache,hw,ip_user_files} # Vivado scratch — generated, do not edit
-```
-
-Adjacent projects (used as references, do not edit from here):
-```
-../MXP/         — MXP standalone (250 MHz wrapper closure, area/power numbers)
-../sram/        — SRAM standalone (leaf + banked, both with full TB)
-../MXP_Tools/   — Python verification toolkit (golden GEMM + 3-way diff + viz)
+work/<LABEL>/                          # Integration sim work dirs (gitignored, generated by sweep)
 ```

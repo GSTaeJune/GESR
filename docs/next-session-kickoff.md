@@ -1,111 +1,80 @@
-# 다음 세션 kickoff — 시스템 통합 (GEMM ↔ RMW ↔ SRAM)
+# 다음 세션 kickoff — 통합 후 단계
 
-작성: 2026-05-14, RMW unit 완성 직후.
-용도: 다음 세션이 brainstorming 부터 바로 들어갈 수 있게 컨텍스트 미리 정리.
+작성: 2026-05-15, GEMM ↔ RMW ↔ SRAM 통합 완료 직후.
 
 ---
 
 ## 지금 어디까지 왔나
 
-**완성 (이전 세션):**
+**완성 — phase 1 (RMW unit, 2026-05-14)**
 - HardFloat vendoring (`third_party/berkeley-hardfloat/`)
-- `int_to_fp32.v`, `fp32_adder.v`, `RMW.v` (FP32 단위 연산기, L_CONV+L_ADD=5 cyc latency)
-- `Accumulator_Col.v` IMPLICIT_total 보정 패치
-- `MXP_Tools/mxp_tools/rmw_gen.py` (RMW unit 검증용 골든 벡터 생성)
-- 전부 standalone 검증 끝 — `bash sim/run_rmw.sh` → 71/71 PASS
+- `int_to_fp32.v`, `fp32_adder.v`, `RMW.v` 단위 산술기 (latency 5 cyc)
+- `Accumulator_Col.v` IMPLICIT_total 패치
+- `MXP_Tools/mxp_tools/rmw_gen.py` 골든 벡터 생성
+- 검증: `bash sim/run_rmw.sh` → 71/71 PASS
 
-**아직 안 한 것 (이번 세션 목표):**
-- `RMW.v`는 unit으로만 존재. `GEMM.v` 내부에 instantiate 되지 않았고, SRAM (`sram_1rw_banked.v`)도 instantiate 되지 않음.
-- 이걸 하나의 datapath로 연결하는 게 다음 단계.
+**완성 — phase 2 (시스템 통합, 2026-05-15)**
+- `gemm_sram_top.v` (pure structural wrapper, GEMM + RMW + sram_1rw_banked + 1-bit zero-prime mux)
+- `tb/gemm_sram_top_tb.v` (단일 9-mode plusarg-driven TB, 857 lines)
+- `sim/run_integration_one.sh` / `sweep.sh` / `parallel.sh`
+- `MXP_Tools/mxp_tools/hwio.py::interleaved_row_major_16bank` 매핑 + `compare --layout` 분기
+- `int_to_fp32.v` zero-passthrough 버그 fix (in_int=0 + scale≠127 케이스)
+- TOGGLE_VAL 확정값 (A8W4=22, A4W8=23 — `precision_modes_protocol.md` §3 의 TBD 해결)
+- 검증: `bash sim/run_integration_sweep.sh` → **9/9 PASS** (A,B ∈ {2,4,8}, 각 128×128 bit-exact)
 
----
-
-## 통합에서 결정해야 할 4가지 열린 질문
-
-CLAUDE.md "## What's NOT settled" 섹션의 항목 2, 3, 4, 6. 여기 다시 정리:
-
-### Q1. RMW granularity — column당 1개(32) vs lane당 1개(128)?
-
-배경:
-- `in_GEMM[31:0]`는 한 lane의 INT32 부분합. 하지만 column 1개의 `out_accumulate`는 60비트인데 모드별로 다르게 패킹됨:
-  - **A8**: 1개 21-bit signed (1 lane만 유효)
-  - **A4**: 2개 18-bit signed (2 lane)
-  - **A2**: 4개 15-bit (4 lane 다 유효)
-- `out_scale`도 같은 식으로 4개의 9-bit sub-word로 쪼개져 있음 (`Accumulator_Col.v` 참고).
-
-선택지:
-- **per-lane (128 instance)**: 자연스럽게 A2까지 처리됨. A8 모드에선 3/4 instance 놀음. 면적/전력 큼.
-- **per-column (32 instance)**: 각 instance가 모드별로 lane을 시간 분할(time-mux)해서 처리. 면적은 1/4지만 컨트롤러 복잡도+throughput 감소.
-- 하이브리드 등.
-
-### Q2. Bank ↔ column 매핑
-
-배경:
-- `sram_1rw_banked` 기본값: `NUM_BANKS=16`, `BANK_DEPTH=32768` (총 2 MB).
-- 32 column을 16 bank에 어떻게 매핑할지. 한 cycle에 한 bank 1 RW만 가능하니 충돌 회피 필수.
-- `BANK_STRATEGY="INTERLEAVED"` (LSB로 bank select) vs `"SEQUENTIAL"` (MSB) — `../sram/docs/banking-wrapper-decisions.md` 참고.
-
-### Q3. Fire-timing 스케줄링
-
-배경:
-- `out_fire`는 column별로 시점이 다름 (station/accumulator 체인의 chain delay 때문).
-- RMW unit latency = 5 cyc, SRAM read 1~2 cyc. 같은 bank로 두 column이 충돌하면 안 됨.
-- 옵션: per-column FIFO, 32 parallel RMW + arbiter, serialized scheduler 등.
-- Q1 (granularity)이 결정되면 자연스럽게 좁혀짐.
-
-### Q4. First-tile 초기화
-
-배경:
-- 어떤 출력 주소에 대한 첫 RMW는 SRAM에 있는 쓰레기값(initialization 안 된 NaN 등)을 읽으면 안 됨.
-- 옵션:
-  - sim 시작 시 zero-prime (banked wrapper는 INIT_FILE 없음 — `do_write` 루프로 초기화)
-  - 첫 read를 게이트해서 dequant 결과를 그대로 write
-  - K-tile 카운터로 첫 tile만 특수 처리
+**잠정 결정값** (재검토 트리거는 `CLAUDE.md` "Settled — with re-visit triggers" 표 참고)
+- RMW instance: **1개** (TB-side mode-aware dispatch)
+- Loop order: **K-outermost** (`n_t → k_t → m_t → o`)
+- 워크로드: **M=K=N=128**
+- Bank strategy: **INTERLEAVED** (16 banks × 1024 word 사용 = 16384 elements)
+- SRAM PIPELINE: **0** (read latency 1 cyc)
 
 ---
 
-## 브레인스토밍 진입 시 먼저 읽을 파일
+## 다음 단계 후보 (사용자 선택)
 
-순서대로:
+### 1. Throughput 확장 — RMW 다중 instance
 
-1. `CLAUDE.md` — 특히:
-   - "## Top-level wiring (current state vs target)" — 현재 상태와 타깃 그림
-   - "## MXP control surface" — out_fire가 column별로 시점 다른 이유, A8/A4/A2 패킹
-   - "## SRAM control surface" — read latency, 활성화 polarity, banked wrapper 동작
-   - "## What's NOT settled" — 위 4개 질문의 원래 위치
-2. `gemm_sram.srcs/sources_1/new/RMW.v` — 헤더 주석에 데이터패스 다이어그램 + 호출자 책임 명시.
-3. `gemm_sram.srcs/sources_1/new/GEMM.v` — 현재 unmodified MXP TOP. 어디에 RMW를 끼워넣을지 보려면 필수.
-4. `gemm_sram.srcs/sources_1/imports/Desktop/sram/rtl/sram_1rw_banked.v` — banked wrapper 인터페이스.
-5. `gemm_sram.srcs/sources_1/imports/Desktop/MXP/MXP.srcs/sources_1/new/Accumulator_Col.v` — `out_accumulate`/`out_scale` 패킹 + 새로 추가된 IMPLICIT_total 보정.
+현재 RMW 1개로 65536 fire 를 직렬 dispatch. K-tile / m-tile 별 fire 가 burst 로 몰리는 구간에서 SRAM bank-level 병목 발생 가능. 후보 변경:
+
+- RMW 2개로 늘려서 A2 mode 의 4-lane × 32-col fire 를 두 갈래로 분산
+- RMW 4개 + per-col 가벼운 arbiter
+- 각 옵션의 sim 시간 / 합성 후 cycle count 비교
+
+(영향 파일: `gemm_sram_top.v` 구조 변경, `tb/gemm_sram_top_tb.v` dispatcher 분기, 그리고 spec § 9 "RMW instance 수" 항목 갱신)
+
+### 2. Timing closure — Vivado 합성
+
+- target: 250 MHz @ xc7vx485 (MXP standalone 의 closure 결과 답습)
+- 합성 진입 전 readiness check: `gemm_sram.xpr` open → "Run Synthesis" 무에러
+- 잠재적 critical path: HardFloat `addRecFN`, GEMM 의 station chain, SRAM 의 1RW write
+- 새 spec/plan 필요 (timing closure 는 별도 workflow)
+
+### 3. Future scope — SRAM 을 weight (B input) 저장소로
+
+현재 `tb/gemm_sram_top_tb.v` 는 `$readmemh` 로 `in_b` 를 직접 driving. HW deployment 시 B 도 SRAM 에서 읽도록 변경하려면:
+
+- SRAM 한 bank 를 weight 영역으로 reserve (또는 별도 SRAM instance)
+- TB 의 LOAD 단계에서 weight 를 SRAM 에 prime (zero-prime mux 와 같은 구조 활용)
+- DRIVE 단계는 매 cycle SRAM read → `in_b` 라우팅
+
+별도 spec 작성 필요. 통합 spec § 1 "Future scope" 에 명시.
+
+### 4. 9-mode 자동 회귀 CI
+
+`sim/run_integration_sweep.sh` 를 CI (GitHub Actions / 로컬 cron) 로 묶음. 변경 사항이 RTL / TB / MXP_Tools 어디든 닿을 때마다 9/9 PASS 자동 회귀.
+
+- 20-25 min sweep — nightly 가 자연스러움
+- 또는 modes={A8_B8, A2_B2} 만 빠르게 PR-time 에 돌리고, 나머지 7 modes 는 nightly
 
 ---
 
-## 브레인스토밍 산출물
+## 새 spec/plan 작성 흐름
 
-`superpowers:brainstorming` 끝나면 다음을 결정해서 spec으로 저장:
+위 4가지 중 하나로 진행 결정 시:
 
-| 결정사항 | 어디에 영향 |
-|---|---|
-| RMW granularity (per-column / per-lane / 하이브리드) | RMW instance 수, 컨트롤러 복잡도 |
-| 모드별 lane → RMW 매핑 (특히 A4/A2의 sub-word 디스패치) | RMW 입력 mux + scale sub-word 선택 |
-| Bank-column 매핑 + bank strategy | SRAM 주소 생성 로직 |
-| 충돌 회피 메커니즘 (FIFO / arbiter / scheduler) | RMW 컨트롤러 FSM |
-| First-tile 처리 방식 | 컨트롤러 + 시뮬레이션 init |
-| 컨트롤러 위치 (`GEMM.v` 내부 vs 별도 모듈) | 파일 구조 |
-| 검증 전략 (unit TB 추가 / 기존 MXP_Tools `compare`로 end-to-end / 둘 다) | TB + run script 추가 분량 |
+1. `superpowers:brainstorming` → 결정 사항 정리 → `docs/superpowers/specs/2026-MM-DD-<topic>.md`
+2. `superpowers:writing-plans` → `docs/superpowers/plans/2026-MM-DD-<topic>.md`
+3. `superpowers:executing-plans` (혹은 `superpowers:subagent-driven-development`) 로 진행
 
-저장 위치: `docs/superpowers/specs/2026-MM-DD-integration-design.md`
-(같은 패턴으로 plan은 `docs/superpowers/plans/2026-MM-DD-integration-implementation.md`)
-
----
-
-## 진행 흐름 (이전 단계 답습)
-
-1. `superpowers:brainstorming` → spec 작성
-2. `superpowers:writing-plans` → plan 작성 (작업을 N개 task로 쪼갬)
-3. plan 내부에 "resume protocol" 섹션 명시 (이전엔 CLAUDE.md "Build state"가 그 역할)
-4. 구현 시작 — 독립 task는 병렬 dispatch, 종속 task는 sequential
-5. 각 task 끝날 때마다 `superpowers:requesting-code-review`로 리뷰
-6. 마지막에 CLAUDE.md 정리 + kickoff 문서 다시 갱신 (또는 삭제)
-
-이번 RMW unit이 위 패턴 그대로 했고 잘 굴러갔음. 같은 식으로 가면 됨.
+이전 두 phase (RMW unit, 통합) 가 같은 흐름으로 굴러갔음. 답습하면 됨.
