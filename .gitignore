@@ -15,6 +15,7 @@ gemm_sram.gen/
 
 # XSim batch outputs
 sim/work/
+sim/build/
 sim/*.log
 sim/*.jou
 sim/*.pb
