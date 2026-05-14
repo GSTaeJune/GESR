@@ -37,6 +37,9 @@ MXP_Tools/__pycache__/
 MXP_Tools/**/__pycache__/
 *.pyc
 
+# Integration sim work/ — MXP_Tools generated inputs + HW dumps
+work/
+
 # Reference papers / PDFs (not source)
 References/
 

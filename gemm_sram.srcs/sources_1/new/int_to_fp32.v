@@ -70,7 +70,13 @@ module int_to_fp32 #(
     wire signed [9:0] new_exp10 = exp_ext + scale_ext - 10'sd127;
     wire [8:0]        new_exp   = new_exp10[8:0];           // 9비트로 잘라서 사용
 
-    wire [REC_W-1:0] recFN_scaled = {sign_bit, new_exp, sig_field};
+    // Zero passthrough: when in_int=0, the recoded representation has exp=0
+    // (special "zero" encoding). Adding (scale-127) to exp would corrupt this
+    // into a non-zero normal/subnormal/overflow value. Detect in_int=0 and
+    // skip the exp manipulation entirely.
+    wire int_is_zero = (in_int == 32'h00000000);
+    wire [REC_W-1:0] recFN_scaled = int_is_zero ? recFN_int
+                                                 : {sign_bit, new_exp, sig_field};
 
     // 3) L_CONV단 파이프라인 레지스터 체인 (스케일 보정 끝난 recoded 신호 위에)
     reg [REC_W-1:0] recFN_dly [0:L_CONV-1];
