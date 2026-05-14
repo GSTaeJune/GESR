@@ -733,6 +733,12 @@ module gemm_sram_top_tb;
         // Source: precision_modes_protocol.md §1 Mode Matrix (v1.0, validated 2026-05-11).
         // Notation: A∈{8,4,2} → A_INT8/4/2 (Mode_oh in Accumulator_Col),
         //           W∈{8,4,2} → cnt rollover threshold (Accumulator internal).
+        //
+        // !!! KEEP IN SYNC: any change to these per-mode values must also update
+        // precision_modes_protocol.md §1 / §3. Drift between this case and the
+        // protocol doc was the source of Task 8's TOGGLE_VAL (A8W4, A4W8) bug.
+        // Re-run `bash sim/run_integration_sweep.sh` after any edit — 9/9 PASS
+        // is the regression gate.
         case ({A_PREC[3:0], B_PREC[3:0]})
             // A8 row: A_FIRE_DELAY=2, N_T_LOGICAL=4, FIRES_PER_COL=2048
             {4'd8, 4'd8}: begin

@@ -150,16 +150,15 @@ protocol doc 은 MXP standalone 기준이다. 통합 TB 는 다음이 더 붙는
 
 ---
 
-## 5. Open uncertainties (Task 7 에서 sim 으로 확정할 것)
+## 5. Resolved during integration (Tasks 7–8, 2026-05-15)
 
-- **파일명 suffix**: plan 의 `_{P}` vs protocol doc 의 `_mxint{P}` — 실제 MXP_Tools
-  output 파일명 확인 후 통일.
-- **TOGGLE 값 검증**: protocol doc §3 Stage 3+4 #3 의 A8W4 / A4W8 TOGGLE 은 "TBD
-  verify". A8W2 / A4W4 / A4W2 / A2*  는 실측 PASS. Task 7 A8W8 → A8W4 확장 시 sim
-  돌려서 TOGGLE 정확값 확정.
-- **scale_weight 인덱싱**: protocol doc §3 #6 의 `m_idx % (K_T × M_T × TILE_SIZE)`
-  modulo — A8W8 에서 PASS 검증됐지만 N_T_logical > 1 (A4 / A2) 에서 wrap behavior
-  재확인 필요.
+- ~~**파일명 suffix**~~ — Resolved: actual MXP_Tools output is `_mxint{P}` (e.g.
+  `a_input_BS_mxint8.hex`). plan 의 `_{P}` 는 오타였음. TB 가 이 suffix 로 읽음.
+- ~~**TOGGLE 값 검증**~~ — Resolved by Task 8 9-mode sweep: **A8W4 = 22, A4W8 = 23**
+  (protocol doc 의 TBD-24 값은 잘못, `precision_modes_protocol.md §3` 갱신됨).
+  나머지 7 mode 의 측정값은 protocol doc 그대로 유효.
+- ~~**scale_weight 인덱싱**~~ — Resolved: `m_idx % (K_T × M_T × TILE_SIZE)` modulo
+  는 A2/A4 모드 (N_T_logical > 1 포함) 에서 모두 정확함. 9 mode 전부 bit-exact PASS.
 
 ---
 

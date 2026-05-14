@@ -36,9 +36,10 @@ module gemm_sram_top #(
     output wire [31:0]                       rmw_out_RMW,        // probe
 
     // ───── SRAM control (TB 가 직접 발사) ─────
+    // sram_A width tracks NUM_BANKS / BANK_DEPTH (default: clog2(16)+clog2(32768)=19).
     input  wire                              sram_CEB,
     input  wire                              sram_WEB,
-    input  wire [18:0]                       sram_A,             // clog2(16)+clog2(32768)=19
+    input  wire [$clog2(NUM_BANKS)+$clog2(BANK_DEPTH)-1:0] sram_A,
     input  wire [31:0]                       sram_WMASK,
     input  wire                              sram_D_use_zero,    // 1=D 강제 0, 0=RMW 출력
     output wire [31:0]                       sram_Q              // probe

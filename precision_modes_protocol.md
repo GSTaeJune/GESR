@@ -127,7 +127,7 @@ in_start_accumulate + in_Wcontrol + in_scale_weight (accumulator chain)
      ```
      TOGGLE = W_CYC × M_T × TILE_SIZE + first_fire − (W_CYC × M_T × TILE_SIZE) ≈ varies by mode
      ```
-   - **Measured values**: A8W8=24, A8W4=24 (TBD verify), A8W2=21, A4W8=24 (TBD), A4W4=21, A4W2=20, A2W8=22, A2W4=20, A2W2=19.
+   - **Measured values** (validated 2026-05-15 against `tb/gemm_sram_top_tb.v` 9-mode sweep): A8W8=24, A8W4=22, A8W2=21, A4W8=23, A4W4=21, A4W2=20, A2W8=22, A2W4=20, A2W2=19.
 4. **start_accumulate**: 1 cycle pulse at `cyc_global == 17` (only once for first K-tile of first n_t).
 5. **Wcontrol**: `cyc_global < 17` → W_IDLE, else W_INT{8,4,2} per mode. Hold throughout the entire 16 K-tile × N_T sweep.
 6. **scale_weight drive**: at `cyc_global == FIRST_FIRE + W_CYC × m`, m = 0..(FIRES_PER_COL−1):

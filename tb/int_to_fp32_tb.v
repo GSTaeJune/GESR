@@ -72,6 +72,30 @@ module int_to_fp32_tb;
         for (i = 0; i < L_CONV; i = i + 1) @(posedge clk);
         check(32'h3F800000, "int=4 scale=125 -> 1.0");
 
+        // Zero-passthrough regression cases.
+        // Pre-fix bug: int=0 + scale!=127 corrupted the HardFloat recoded-zero
+        // encoding and produced bogus normal/subnormal/inf instead of +0.0.
+        // These cover the gap the original test suite missed.
+        // Case 7: int=0, scale=125 → 0.0
+        @(negedge clk); in_int = 32'sd0;   scale = 9'sd125;
+        for (i = 0; i < L_CONV; i = i + 1) @(posedge clk);
+        check(32'h00000000, "int=0 scale=125 -> 0.0");
+
+        // Case 8: int=0, scale=128 → 0.0
+        @(negedge clk); in_int = 32'sd0;   scale = 9'sd128;
+        for (i = 0; i < L_CONV; i = i + 1) @(posedge clk);
+        check(32'h00000000, "int=0 scale=128 -> 0.0");
+
+        // Case 9: int=0, scale=0 → 0.0
+        @(negedge clk); in_int = 32'sd0;   scale = 9'sd0;
+        for (i = 0; i < L_CONV; i = i + 1) @(posedge clk);
+        check(32'h00000000, "int=0 scale=0 -> 0.0");
+
+        // Case 10: int=0, scale=255 → 0.0
+        @(negedge clk); in_int = 32'sd0;   scale = 9'sd255;
+        for (i = 0; i < L_CONV; i = i + 1) @(posedge clk);
+        check(32'h00000000, "int=0 scale=255 -> 0.0");
+
         if (errors == 0) $display("int_to_fp32_tb: ALL TESTS PASSED");
         else              $display("int_to_fp32_tb: %0d FAILURES", errors);
         $finish;
