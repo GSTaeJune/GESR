@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 GEMM ↔ RMW ↔ sram_1rw_banked **시스템 통합 완성 및 검증**됨 — `bash sim/run_integration_sweep.sh` → `ALL 9 MODES PASSED` (9 precision combinations A,B ∈ {2,4,8}, 각각 128×128 = 16384 element 모두 bit-exact 일치 vs MXP_Tools golden). 단위 검증도 그대로 유효: `bash sim/run_rmw.sh` → 71/71 PASS.
 
-**MXP_Tools 업스트림 동기화 (2026-05-15)** — `MXP_Tools/` 는 `~/Desktop/Desktop/MXP_Tools` 의 fork. 업스트림 버그 픽스 (NaN/Inf-aware compare, `@addr` writememh 파서, gather_banks duplicate-write detection, `_require_block_multiple` enforcement, LF-only newline) 가 머지된 상태. 프로젝트 전용 추가분 (`rmw_gen.py`, cli 의 `rmw-gen`, hwio 의 `interleaved_row_major_16bank` + `interleaved_row_major_32bank`) 은 그대로 보존. pytest 슈트 (43 cases) 도 함께 도입 — `cd MXP_Tools && python -m pytest tests/ -q` 로 0.3 초 만에 단위 검증 가능. 메모리 `reference_mxp_tools_upstream.md` 에 동기화 절차 명시.
+**MXP_Tools 업스트림 동기화 (2026-05-15)** — `MXP_Tools/` 는 `~/Desktop/Desktop/MXP_Tools` 의 fork. 업스트림 버그 픽스 (NaN/Inf-aware compare, `@addr` writememh 파서, gather_banks duplicate-write detection, `_require_block_multiple` enforcement, LF-only newline) 가 머지된 상태. 프로젝트 전용 추가분 (`rmw_gen.py`, cli 의 `rmw-gen`, hwio 의 `interleaved_row_major_16bank` + `interleaved_row_major_32bank`) 은 그대로 보존. pytest 슈트 (45 cases) 도 함께 도입 — `cd MXP_Tools && python -m pytest tests/ -q` 로 0.3 초 만에 단위 검증 가능. 메모리 `reference_mxp_tools_upstream.md` 에 동기화 절차 명시.
 
 TB 6 개 (`tb/*.v`) 는 한글 헤더에 **검증 목적 / 검증 내용 / 동작 의도**를 명시한 상태 (commit `92d6b1e`). 새 TB 작성 시에도 동일 컨벤션 유지 — 헤더만 봐도 그 TB 가 뭘 검증하는지 즉시 파악 가능해야 함.
 
@@ -131,7 +131,7 @@ Two ways to run sim:
    bash sim/run_integration_smoke.sh # TB zero-prime + dump (no GEMM driving)
 
    # MXP_Tools Python 단위 검증 (compare / hwio / quant / gemm)
-   cd MXP_Tools && python -m pytest tests/ -q   # 43 cases, ~0.3 s
+   cd MXP_Tools && python -m pytest tests/ -q   # 45 cases, ~0.3 s
 
    # Integration (end-to-end vs MXP_Tools golden)
    bash sim/run_integration_one.sh <LABEL> <A_PREC> <B_PREC>   # 1 mode (e.g. "A8_B8" 8 8)
@@ -163,7 +163,7 @@ When parameter overrides are needed at sim time, **do not use `xelab -generic_to
 
 **Provenance**: fork of upstream `~/Desktop/Desktop/MXP_Tools`. 사용자가 업스트림에서 버그 픽스를 하면 프로젝트 사본으로 옮겨야 함 (절차는 메모리 `reference_mxp_tools_upstream.md` 참고). 프로젝트 전용 추가분 — `mxp_tools/rmw_gen.py`, cli 의 `rmw-gen` 서브커맨드, hwio 의 `interleaved_row_major_16bank` + `interleaved_row_major_32bank` mapping, `tests/test_hwio_interleaved.py` — 는 머지 시 반드시 보존.
 
-**pytest 슈트** (`tests/`, 43 cases) 는 단위 동작 (NaN/Inf 처리, `@addr` 파싱, gather_banks duplicate detection, emit shape validation, MX quant edge cases) 을 0.3 초 만에 검증. RTL sim 전에 Python tool 변경 검증용으로 우선 돌릴 것.
+**pytest 슈트** (`tests/`, 45 cases) 는 단위 동작 (NaN/Inf 처리, `@addr` 파싱, gather_banks duplicate detection, emit shape validation, MX quant edge cases) 을 0.3 초 만에 검증. RTL sim 전에 Python tool 변경 검증용으로 우선 돌릴 것.
 
 Generates HW inputs and SW golden GEMM. Typical invocation (the sweep script already wraps these):
 
@@ -232,12 +232,12 @@ third_party/berkeley-hardfloat/        # Vendored HardFloat (HardFloatBundle.v +
 MXP_Tools/                             # Python verification toolkit (fork of ~/Desktop/Desktop/MXP_Tools)
     pyproject.toml                     # mxp-tools entry point + pytest config
     mxp_tools/                         # gen / emit / ref / compare / viz / rmw-gen subcommands
-    tests/                             # 43 pytest cases (compare/gemm/hwio/quant + interleaved)
+    tests/                             # 45 pytest cases (compare/gemm/hwio/quant + interleaved 16/32)
         test_compare.py                # NaN/Inf-aware diff_3way (upstream)
         test_gemm.py                   # mxint_gemm_golden (upstream)
         test_hwio.py                   # @addr writememh, dup-write, emit shape, LF-only (upstream)
         test_quant.py                  # MX quant edge cases + NaN/Inf rejection (upstream)
-        test_hwio_interleaved.py       # interleaved_row_major_16bank round-trip (project-only)
+        test_hwio_interleaved.py       # interleaved_row_major_{16,32}bank round-trip (project-only)
 docs/
     next-session-kickoff.md            # Phase-handoff doc (updated each major phase end)
     hardfloat-setup.md                 # HardFloat re-vendoring guide (sbt + Chisel)

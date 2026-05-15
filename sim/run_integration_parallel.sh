@@ -31,11 +31,11 @@ Per-subagent steps:
   4. cd .. && bash sim/run_integration_one.sh \
        "A${A_PREC}_B${B_PREC}" ${A_PREC} ${B_PREC}
   5. cd MXP_Tools && \
-       BANKS=$(printf "../work/A${A_PREC}_B${B_PREC}/hw_out/bank%d.mem " {0..15}) && \
+       BANKS=$(printf "../work/A${A_PREC}_B${B_PREC}/hw_out/bank%d.mem " {0..31}) && \
        python -m mxp_tools compare \
          --ref ../work/A${A_PREC}_B${B_PREC}/sw_ref/C_sw_mxint${B_PREC}_mxint${A_PREC}.npz \
          --hw-banks ${BANKS} \
-         --layout interleaved_row_major_16bank
+         --layout interleaved_row_major_32bank
      (compare exit code 0 = PASS; non-zero = FAIL.
       .npz filename slot 1 = WEIGHT prec = B_PREC; slot 2 = ACT prec = A_PREC.)
 
