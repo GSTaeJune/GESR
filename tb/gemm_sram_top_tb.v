@@ -687,7 +687,12 @@ module gemm_sram_top_tb;
         end
     end
 
-    // RMW pipeline wait = L_CONV(2) + L_ADD(3) + slack(3) = 8 cy
+    // RMW pipeline 대기. FSM cycle budget:
+    //   state2 (in_GEMM/scale 드라이브) → state5 (WRITE 발사) 까지 실측 = 10 cy
+    //   = 1 (state2→3) + 1 (state3→4) + DRAIN_RMW_WAIT (state4 루프).
+    // RMW latency L_CONV(2)+L_ADD(3) = 5 cy 이므로 DRAIN_RMW_WAIT=8 은 약 5 cy
+    // slack. 단순화하려면 state3 (degenerate reset) 을 state2 로 합쳐서 9 cy
+    // 로 줄일 수 있으나 plan 호환 위해 state3 유지.
     localparam integer DRAIN_RMW_WAIT = 8;
 
     genvar dc;
@@ -697,6 +702,7 @@ module gemm_sram_top_tb;
                 if (rst) begin
                     drain_state[dc] <= 4'd0;
                     drain_wait [dc] <= 4'd0;
+                    drain_addr [dc] <= 19'd0;
                 end else if (drain_enable) begin
                     case (drain_state[dc])
                         4'd0: begin
