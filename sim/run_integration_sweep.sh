@@ -36,20 +36,20 @@ for A_P in 2 4 8; do
         continue
       }
 
-    # 2) HW sim — produces work/<LABEL>/hw_out/bank{0..15}.mem
+    # 2) HW sim — produces work/<LABEL>/hw_out/bank{0..31}.mem (32-RMW phase)
     bash sim/run_integration_one.sh "${LABEL}" "${A_P}" "${B_P}" || {
         echo "${LABEL}: HW sim FAILED"
         FAILED+=("${LABEL}")
         continue
       }
 
-    # 3) compare gate (note npz filename slot order = B_P then A_P)
-    BANKS=$(printf "../work/${LABEL}/hw_out/bank%d.mem " {0..15})
+    # 3) compare gate (32-bank layout). npz filename slot order = B_P then A_P
+    BANKS=$(printf "../work/${LABEL}/hw_out/bank%d.mem " {0..31})
     if (cd MXP_Tools && \
         python -m mxp_tools compare \
             --ref ../work/${LABEL}/sw_ref/C_sw_mxint${B_P}_mxint${A_P}.npz \
             --hw-banks ${BANKS} \
-            --layout interleaved_row_major_16bank); then
+            --layout interleaved_row_major_32bank); then
       PASSED+=("${LABEL}")
       echo "${LABEL}: PASS"
     else
