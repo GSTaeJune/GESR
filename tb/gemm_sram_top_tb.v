@@ -1,39 +1,29 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////
-// gemm_sram_top_tb — gemm_sram_top 통합 검증 TB (9 모드 전부).
+// gemm_sram_top_tb — gemm_sram_top (32-RMW col-parallel) 통합 검증 TB.
 //
 // 검증 목적:
-//   GEMM (MXP 32×32 bit-serial systolic) + RMW (INT→FP32 + FP32 add) +
-//   sram_1rw_banked (16 bank INTERLEAVED, FP32 저장) 의 end-to-end 데이터
-//   패스가 9 가지 정밀도 조합 (A∈{2,4,8} × W∈{2,4,8}) 모두에서 MXP_Tools
-//   골든 GEMM 과 bit-exact 일치하는지 확인. 128×128×128 행렬 누적 결과
-//   16384 element 를 16 bank .mem dump 로 뱉어서 외부 Python (`compare`)
-//   이 FP32 비트 단위 비교.
+//   GEMM (MXP 32×32 bit-serial systolic) + RMW[32] (col-parallel) +
+//   sram_1rw_banked_mp (32 bank, per-bank port) 의 end-to-end 데이터
+//   패스가 9 가지 정밀도 조합 (A∈{2,4,8} × W∈{2,4,8}) 모두에서
+//   MXP_Tools 골든 GEMM 과 bit-exact 일치하는지 확인. col j → bank j
+//   매핑 (충돌 0) 의 RTL 검증을 겸함.
 //
 // Plusargs (xsim -testplusarg "KEY=VAL"):
 //   A_PREC    : 2 / 4 / 8 (Activation 정밀도)
 //   B_PREC    : 2 / 4 / 8 (Weight 정밀도, MXP 의 "in_a" 라인)
 //   WORK_DIR  : MXP_Tools hex 입력 디렉토리 (필수)
-//   DUMP_DIR  : SRAM .mem dump 출력 디렉토리 (필수)
+//   DUMP_DIR  : SRAM .mem dump 출력 디렉토리 (필수, 32 파일 출력)
 //
-// 모드별 상수 (W_CYC, A_FIRE_DELAY, FIRST_FIRE_GLOBAL, TOGGLE_VAL,
-// FIRES_PER_COL, N_T_LOGICAL, A_CTRL, W_CTRL) 는 CONFIG 단계의 case() 로
-// {A_PREC,B_PREC} 에 따라 TB reg 에 디스패치 (plusarg 의존이라 localparam X).
-//
-// 전체 흐름 (single-RMW 직렬 디스패치 방식, drive→replay 후 처리):
-//   1) INIT     — 리셋 + SRAM 16384 워드 0 초기화 (do_write 루프).
+// 전체 흐름 (32-RMW 병렬 디스패치):
+//   1) INIT     — 리셋 + 32 bank parallel zero-prime (1024 cycle).
 //   2) LOAD     — $readmemh (a_input_BS, b_input, a_scale, b_scale).
 //   3) CONFIG   — {A_PREC,B_PREC} 으로 모드별 상수/제어 코드 세팅.
-//   4) DRIVE    — Stage 2-A, 2-B, 3+4 (MAC), 5 (tail) 을 named task 로 발사.
-//                 발사 중 `always @(posedge clk)` 캡처 블록이 매 out_fire[c]
-//                 rising 을 잡아서 FIFO (fifo_int/scale/addr) 로 적재.
-//                 lane 디코딩은 모드 의존 (A8 → 1 RMW/fire, A4 → 2,
-//                 A2 → 4). 자세한 슬라이스는 docs/superpowers/notes/
-//                 lane-to-c-mapping.md.
-//   5) DRAIN    — FIFO 를 순차로 한 개씩 RMW 로 흘림. 매 entry 마다:
-//                 SRAM read 발사 → L_CONV 대기 → rmw 입력 드라이브 →
-//                 L_ADD 대기 → write-back.
-//   6) DUMP     — $writememh 로 16 bank 각각 0..1023 워드를 .mem 파일로.
+//   4) DRIVE    — Stage 2-A, 2-B, 3+4 (MAC), 5 (tail). 캡처 블록이
+//                 매 out_fire[c] rising 마다 per-col FIFO[c] 에 push.
+//   5) DRAIN    — 32 col 동시 진행. col c 의 always 블록이 자기 FIFO[c]
+//                 를 자기 RMW[c] + 자기 bank[c] port 로 흘림 (R→conv→add→W).
+//   6) DUMP     — $writememh 로 32 bank 각각 0..511 워드를 .mem 파일로.
 //                 외부 compare 가 MXP_Tools golden npz 와 비트 단위 비교.
 //
 // 회귀 게이트: `bash sim/run_integration_sweep.sh` → "ALL 9 MODES PASSED".
@@ -107,23 +97,27 @@ module gemm_sram_top_tb;
     wire [32*36-1:0]          out_scale;
     wire [32-1:0]             out_fire;
 
-    // RMW
-    reg [31:0]                rmw_in_GEMM       = 0;
-    reg [8:0]                 rmw_scale         = 0;
-    wire [31:0]               rmw_out_RMW;
+    // RMW (32 col)
+    reg  [32*32-1:0]          rmw_in_GEMM       = 0;
+    reg  [32*9-1:0]           rmw_scale         = 0;
+    wire [32*32-1:0]          rmw_out_RMW;
 
-    // SRAM
-    reg                       sram_CEB          = 1;
-    reg                       sram_WEB          = 1;
-    reg [18:0]                sram_A            = 0;
-    reg [31:0]                sram_WMASK        = 32'hFFFFFFFF;
-    reg                       sram_D_use_zero   = 1;
-    wire [31:0]               sram_Q;
+    // SRAM (32 bank, depth=1024 → AW=10)
+    localparam integer NB        = 32;
+    localparam integer BD        = 1024;
+    localparam integer AW        = 10;       // clog2(1024)
+
+    reg  [NB-1:0]             sram_CEB        = {NB{1'b1}};
+    reg  [NB-1:0]             sram_WEB        = {NB{1'b1}};
+    reg  [NB*AW-1:0]          sram_A          = 0;
+    reg  [NB*32-1:0]          sram_WMASK      = {NB*32{1'b1}};
+    reg                       sram_D_use_zero = 1'b1;
+    wire [NB*32-1:0]          sram_Q;
 
     // ─── DUT 인스턴스 ──────────────────────────────────────────────
     gemm_sram_top #(
-        .NUM_BANKS  (16),
-        .BANK_DEPTH (32768)
+        .NUM_BANKS  (NB),
+        .BANK_DEPTH (BD)
     ) u_top (
         .clk(clk), .rst(rst),
         .in_a(in_a), .in_b(in_b),
@@ -141,31 +135,11 @@ module gemm_sram_top_tb;
         .rmw_in_GEMM(rmw_in_GEMM),
         .rmw_scale(rmw_scale),
         .rmw_out_RMW(rmw_out_RMW),
-        .sram_CEB(sram_CEB), .sram_WEB(sram_WEB),
-        .sram_A(sram_A), .sram_WMASK(sram_WMASK),
+        .CEB(sram_CEB), .WEB(sram_WEB),
+        .A(sram_A), .WMASK(sram_WMASK),
         .sram_D_use_zero(sram_D_use_zero),
-        .sram_Q(sram_Q)
+        .Q(sram_Q)
     );
-
-    // ─── SRAM 보조 task ────────────────────────────────────────────
-    task sram_write_zero(input [18:0] addr);
-        begin
-            @(posedge clk);
-            sram_CEB        <= 1'b0;
-            sram_WEB        <= 1'b0;
-            sram_A          <= addr;
-            sram_WMASK      <= 32'hFFFFFFFF;
-            sram_D_use_zero <= 1'b1;
-        end
-    endtask
-
-    task sram_idle;
-        begin
-            @(posedge clk);
-            sram_CEB <= 1'b1;
-            sram_WEB <= 1'b1;
-        end
-    endtask
 
     // ─── 입력 hex 메모리 ───────────────────────────────────────────
     // 크기 산정 (A8 worst case 기준):
@@ -178,16 +152,22 @@ module gemm_sram_top_tb;
     reg [7:0]    a_scale [0:511];
     reg [7:0]    b_scale [0:511];
 
-    // ─── Fire 캡처 FIFO ────────────────────────────────────────────
-    // 총 RMW entry 수 (모드 무관, 32 col × 2048 RMW/col = 65536):
-    //   A8: 2048 fires × 1 RMW = 2048/col
-    //   A4: 1024 fires × 2 RMW = 2048/col
-    //   A2:  512 fires × 4 RMW = 2048/col
-    reg [31:0]   fifo_int   [0:65535];
-    reg [8:0]    fifo_scale [0:65535];
-    reg [18:0]   fifo_addr  [0:65535];
-    integer      fifo_wp;          // write pointer (capture 시 증가)
-    integer      fifo_rp;          // read pointer  (drain 시 증가)
+    // ─── Fire 캡처 per-col FIFO ────────────────────────────────────
+    // col 당 최대 2048 entry (모든 모드 공통: A8=2048×1, A4=1024×2, A2=512×4).
+    localparam integer FIFO_DEPTH = 2048;
+    reg [31:0]   fifo_int   [0:31][0:FIFO_DEPTH-1];
+    reg [8:0]    fifo_scale [0:31][0:FIFO_DEPTH-1];
+    reg [18:0]   fifo_addr  [0:31][0:FIFO_DEPTH-1];
+    integer      fifo_wp [0:31];
+    integer      fifo_rp [0:31];
+
+    integer init_i;
+    initial begin
+        for (init_i = 0; init_i < 32; init_i = init_i + 1) begin
+            fifo_wp[init_i] = 0;
+            fifo_rp[init_i] = 0;
+        end
+    end
 
     // col 별 누적 fire 카운터 (col 안에서 몇 번째 fire 인지 → m_t/m_in/k_t/n_t 디코딩에 사용)
     reg [11:0]   fire_cnt_per_col [0:31];
@@ -248,10 +228,14 @@ module gemm_sram_top_tb;
                             sc_lane     = out_scale[36*ci +: 9];
                             ng_dec      = n_t_dec * 32 + ci;
                             flat_dec    = m_g * N_DIM + ng_dec;
-                            fifo_int  [fifo_wp] <= acc_int32;
-                            fifo_scale[fifo_wp] <= sc_lane;
-                            fifo_addr [fifo_wp] <= flat_dec[18:0];
-                            fifo_wp = fifo_wp + 1;
+                            if ((flat_dec & 5'h1F) != ci[4:0]) begin
+                                $display("FATAL: bank-col mismatch col=%0d flat=%0d at lane A8", ci, flat_dec);
+                                $finish;
+                            end
+                            fifo_int  [ci][fifo_wp[ci]] <= acc_int32;
+                            fifo_scale[ci][fifo_wp[ci]] <= sc_lane;
+                            fifo_addr [ci][fifo_wp[ci]] <= flat_dec[18:0];
+                            fifo_wp[ci] = fifo_wp[ci] + 1;
                         end
                         // ─── A4: col 당 2 lane (top/bot) ────────────────
                         4: begin
@@ -262,10 +246,14 @@ module gemm_sram_top_tb;
                             sc_lane      = out_scale[36*ci+9 +: 9];
                             ng_dec       = n_t_dec * 64 + 32 + ci;
                             flat_dec     = m_g * N_DIM + ng_dec;
-                            fifo_int  [fifo_wp] <= acc_int32;
-                            fifo_scale[fifo_wp] <= sc_lane;
-                            fifo_addr [fifo_wp] <= flat_dec[18:0];
-                            fifo_wp = fifo_wp + 1;
+                            if ((flat_dec & 5'h1F) != ci[4:0]) begin
+                                $display("FATAL: bank-col mismatch col=%0d flat=%0d at lane A4t", ci, flat_dec);
+                                $finish;
+                            end
+                            fifo_int  [ci][fifo_wp[ci]] <= acc_int32;
+                            fifo_scale[ci][fifo_wp[ci]] <= sc_lane;
+                            fifo_addr [ci][fifo_wp[ci]] <= flat_dec[18:0];
+                            fifo_wp[ci] = fifo_wp[ci] + 1;
 
                             // bot lane (s1_b): acc[60c+17:60c+0], scale[36c+8:36c+0]
                             //   n 위치 = n_pair*64 + 0 + col_idx
@@ -274,10 +262,14 @@ module gemm_sram_top_tb;
                             sc_lane      = out_scale[36*ci +: 9];
                             ng_dec       = n_t_dec * 64 + 0 + ci;
                             flat_dec     = m_g * N_DIM + ng_dec;
-                            fifo_int  [fifo_wp] <= acc_int32;
-                            fifo_scale[fifo_wp] <= sc_lane;
-                            fifo_addr [fifo_wp] <= flat_dec[18:0];
-                            fifo_wp = fifo_wp + 1;
+                            if ((flat_dec & 5'h1F) != ci[4:0]) begin
+                                $display("FATAL: bank-col mismatch col=%0d flat=%0d at lane A4b", ci, flat_dec);
+                                $finish;
+                            end
+                            fifo_int  [ci][fifo_wp[ci]] <= acc_int32;
+                            fifo_scale[ci][fifo_wp[ci]] <= sc_lane;
+                            fifo_addr [ci][fifo_wp[ci]] <= flat_dec[18:0];
+                            fifo_wp[ci] = fifo_wp[ci] + 1;
                         end
                         // ─── A2: col 당 4 lane ──────────────────────────
                         2: begin
@@ -287,10 +279,14 @@ module gemm_sram_top_tb;
                             sc_lane       = out_scale[36*ci+27 +: 9];
                             ng_dec        = 96 + ci;
                             flat_dec      = m_g * N_DIM + ng_dec;
-                            fifo_int  [fifo_wp] <= acc_int32;
-                            fifo_scale[fifo_wp] <= sc_lane;
-                            fifo_addr [fifo_wp] <= flat_dec[18:0];
-                            fifo_wp = fifo_wp + 1;
+                            if ((flat_dec & 5'h1F) != ci[4:0]) begin
+                                $display("FATAL: bank-col mismatch col=%0d flat=%0d at lane A2_0", ci, flat_dec);
+                                $finish;
+                            end
+                            fifo_int  [ci][fifo_wp[ci]] <= acc_int32;
+                            fifo_scale[ci][fifo_wp[ci]] <= sc_lane;
+                            fifo_addr [ci][fifo_wp[ci]] <= flat_dec[18:0];
+                            fifo_wp[ci] = fifo_wp[ci] + 1;
 
                             // lane1: acc[60c+44:60c+30], scale[36c+26:36c+18], n 위치 = 64+col_idx
                             acc_lane_a2_1 = $signed(out_accumulate[60*ci+30 +: 15]);
@@ -298,10 +294,14 @@ module gemm_sram_top_tb;
                             sc_lane       = out_scale[36*ci+18 +: 9];
                             ng_dec        = 64 + ci;
                             flat_dec      = m_g * N_DIM + ng_dec;
-                            fifo_int  [fifo_wp] <= acc_int32;
-                            fifo_scale[fifo_wp] <= sc_lane;
-                            fifo_addr [fifo_wp] <= flat_dec[18:0];
-                            fifo_wp = fifo_wp + 1;
+                            if ((flat_dec & 5'h1F) != ci[4:0]) begin
+                                $display("FATAL: bank-col mismatch col=%0d flat=%0d at lane A2_1", ci, flat_dec);
+                                $finish;
+                            end
+                            fifo_int  [ci][fifo_wp[ci]] <= acc_int32;
+                            fifo_scale[ci][fifo_wp[ci]] <= sc_lane;
+                            fifo_addr [ci][fifo_wp[ci]] <= flat_dec[18:0];
+                            fifo_wp[ci] = fifo_wp[ci] + 1;
 
                             // lane2: acc[60c+29:60c+15], scale[36c+17:36c+9], n 위치 = 32+col_idx
                             acc_lane_a2_2 = $signed(out_accumulate[60*ci+15 +: 15]);
@@ -309,10 +309,14 @@ module gemm_sram_top_tb;
                             sc_lane       = out_scale[36*ci+9 +: 9];
                             ng_dec        = 32 + ci;
                             flat_dec      = m_g * N_DIM + ng_dec;
-                            fifo_int  [fifo_wp] <= acc_int32;
-                            fifo_scale[fifo_wp] <= sc_lane;
-                            fifo_addr [fifo_wp] <= flat_dec[18:0];
-                            fifo_wp = fifo_wp + 1;
+                            if ((flat_dec & 5'h1F) != ci[4:0]) begin
+                                $display("FATAL: bank-col mismatch col=%0d flat=%0d at lane A2_2", ci, flat_dec);
+                                $finish;
+                            end
+                            fifo_int  [ci][fifo_wp[ci]] <= acc_int32;
+                            fifo_scale[ci][fifo_wp[ci]] <= sc_lane;
+                            fifo_addr [ci][fifo_wp[ci]] <= flat_dec[18:0];
+                            fifo_wp[ci] = fifo_wp[ci] + 1;
 
                             // lane3: acc[60c+14:60c+0], scale[36c+8:36c+0], n 위치 = col_idx
                             acc_lane_a2_3 = $signed(out_accumulate[60*ci +: 15]);
@@ -320,10 +324,14 @@ module gemm_sram_top_tb;
                             sc_lane       = out_scale[36*ci +: 9];
                             ng_dec        = 0 + ci;
                             flat_dec      = m_g * N_DIM + ng_dec;
-                            fifo_int  [fifo_wp] <= acc_int32;
-                            fifo_scale[fifo_wp] <= sc_lane;
-                            fifo_addr [fifo_wp] <= flat_dec[18:0];
-                            fifo_wp = fifo_wp + 1;
+                            if ((flat_dec & 5'h1F) != ci[4:0]) begin
+                                $display("FATAL: bank-col mismatch col=%0d flat=%0d at lane A2_3", ci, flat_dec);
+                                $finish;
+                            end
+                            fifo_int  [ci][fifo_wp[ci]] <= acc_int32;
+                            fifo_scale[ci][fifo_wp[ci]] <= sc_lane;
+                            fifo_addr [ci][fifo_wp[ci]] <= flat_dec[18:0];
+                            fifo_wp[ci] = fifo_wp[ci] + 1;
                         end
                     endcase
 
@@ -642,88 +650,174 @@ module gemm_sram_top_tb;
         end
     endtask
 
-    // ─── DRAIN 보조: 실제 entry 전 RMW + SRAM 파이프라인 X 채움 ────
-    // 이걸 안 하면 첫 RMW 의 rmw_out_RMW 가 X. DRIVE 중에는 RMW.sram_dly 와
-    // fp32_adder.recFN_b_dly 가 한 번도 알려진 값으로 채워진 적이 없기 때문.
-    task drain_prime;
-        integer i;
+    // ─── INIT: 32 bank parallel zero-prime (1024 cycle) ────────────
+    task init_zero_prime;
+        integer w, bi;
         begin
-            rmw_in_GEMM <= 32'h00000000;
-            rmw_scale   <= 9'd127;          // scale=127 → 2^0=1 → 0 dequant 결과 = 0
-            for (i = 0; i < PRIME_CYC; i = i + 1) begin
+            sram_D_use_zero <= 1'b1;
+            sram_WMASK      <= {NB*32{1'b1}};
+            for (w = 0; w < BD; w = w + 1) begin
                 @(posedge clk);
-                sram_CEB <= 1'b0;
-                sram_WEB <= 1'b1;
-                sram_A   <= 19'd0;
+                sram_CEB <= {NB{1'b0}};
+                sram_WEB <= {NB{1'b0}};
+                for (bi = 0; bi < NB; bi = bi + 1)
+                    sram_A[bi*AW +: AW] <= w[AW-1:0];
             end
             @(posedge clk);
-            sram_CEB <= 1'b1;
-            sram_WEB <= 1'b1;
+            sram_CEB <= {NB{1'b1}};
+            sram_WEB <= {NB{1'b1}};
         end
     endtask
 
-    // ─── DRAIN 본체: FIFO 를 한 entry 씩 순차 RMW 디스패치 ─────────
-    task drain_fifo;
-        integer i;
-        begin
-            sram_D_use_zero <= 1'b0;
-            for (fifo_rp = 0; fifo_rp < fifo_wp; fifo_rp = fifo_rp + 1) begin
-                // Step 1: SRAM READ 발사
-                @(posedge clk);
-                sram_CEB        <= 1'b0;
-                sram_WEB        <= 1'b1;
-                sram_A          <= fifo_addr[fifo_rp];
-                sram_D_use_zero <= 1'b0;
+    // ─── per-col drain FSM (32 stream parallel) ────────────────────
+    // State: 0=IDLE, 1=READ, 2=WAIT_R, 3=DRIVE_RMW, 4=WAIT_RMW,
+    //        5=WRITE, 6=WRITE_SETTLE
+    reg drain_enable;
+    initial drain_enable = 1'b0;
 
-                // Step 2: 다음 cycle 에 RMW 입력 드라이브 (sram_Q 가 유효해진 시점)
-                @(posedge clk);
-                sram_CEB        <= 1'b1;
-                rmw_in_GEMM     <= fifo_int  [fifo_rp];
-                rmw_scale       <= fifo_scale[fifo_rp];
-                // Step 3: RMW 파이프라인 대기 (L_CONV+L_ADD+slack = 8 cy)
-                for (i = 0; i < RMW_WAIT_CYC; i = i + 1) @(posedge clk);
+    reg [3:0]  drain_state [0:31];
+    reg [3:0]  drain_wait  [0:31];
+    reg [18:0] drain_addr  [0:31];
 
-                // Step 4: WRITE 발사 (rmw_out_w → sram_D 경로로 그대로 들어감)
-                @(posedge clk);
-                sram_CEB        <= 1'b0;
-                sram_WEB        <= 1'b0;
-                sram_A          <= fifo_addr[fifo_rp];
-                sram_WMASK      <= 32'hFFFFFFFF;
-                sram_D_use_zero <= 1'b0;
+    initial begin
+        for (init_i = 0; init_i < 32; init_i = init_i + 1) begin
+            drain_state[init_i] = 4'd0;
+            drain_wait [init_i] = 4'd0;
+            drain_addr [init_i] = 19'd0;
+        end
+    end
 
-                // Step 5: deassert + SRAM write settle 용 idle cy 1 개
-                @(posedge clk);
-                sram_CEB        <= 1'b1;
-                sram_WEB        <= 1'b1;
-                @(posedge clk);
+    // RMW pipeline wait = L_CONV(2) + L_ADD(3) + slack(3) = 8 cy
+    localparam integer DRAIN_RMW_WAIT = 8;
+
+    genvar dc;
+    generate
+        for (dc = 0; dc < 32; dc = dc + 1) begin : g_drain
+            always @(posedge clk) begin
+                if (rst) begin
+                    drain_state[dc] <= 4'd0;
+                    drain_wait [dc] <= 4'd0;
+                end else if (drain_enable) begin
+                    case (drain_state[dc])
+                        4'd0: begin
+                            if (fifo_rp[dc] < fifo_wp[dc]) begin
+                                drain_addr[dc]                      <= fifo_addr[dc][fifo_rp[dc]];
+                                sram_CEB[dc]                        <= 1'b0;
+                                sram_WEB[dc]                        <= 1'b1;
+                                sram_A[dc*AW +: AW]                 <= fifo_addr[dc][fifo_rp[dc]] >> 5;
+                                drain_state[dc]                     <= 4'd1;
+                            end else begin
+                                sram_CEB[dc]                        <= 1'b1;
+                                sram_WEB[dc]                        <= 1'b1;
+                            end
+                        end
+                        4'd1: begin
+                            sram_CEB[dc] <= 1'b1;
+                            drain_state[dc] <= 4'd2;
+                        end
+                        4'd2: begin
+                            rmw_in_GEMM[dc*32 +: 32] <= fifo_int  [dc][fifo_rp[dc]];
+                            rmw_scale  [dc*9  +: 9 ] <= fifo_scale[dc][fifo_rp[dc]];
+                            drain_state[dc] <= 4'd3;
+                        end
+                        4'd3: begin
+                            drain_wait [dc] <= 4'd0;
+                            drain_state[dc] <= 4'd4;
+                        end
+                        4'd4: begin
+                            if (drain_wait[dc] == DRAIN_RMW_WAIT[3:0] - 1) begin
+                                drain_state[dc] <= 4'd5;
+                            end else begin
+                                drain_wait[dc] <= drain_wait[dc] + 1;
+                            end
+                        end
+                        4'd5: begin
+                            sram_CEB[dc]                        <= 1'b0;
+                            sram_WEB[dc]                        <= 1'b0;
+                            sram_A[dc*AW +: AW]                 <= drain_addr[dc] >> 5;
+                            sram_WMASK[dc*32 +: 32]             <= 32'hFFFFFFFF;
+                            // sram_D_use_zero 은 단일 reg 라 multi-driver 회피 위해
+                            // 메인 시퀀스에서 drain 시작 전에 한 번 0 으로 설정함.
+                            drain_state[dc]                     <= 4'd6;
+                        end
+                        4'd6: begin
+                            sram_CEB[dc] <= 1'b1;
+                            sram_WEB[dc] <= 1'b1;
+                            fifo_rp[dc]  <= fifo_rp[dc] + 1;
+                            drain_state[dc] <= 4'd0;
+                        end
+                        default: drain_state[dc] <= 4'd0;
+                    endcase
+                end
             end
-            sram_idle;
-            sram_idle;
+        end
+    endgenerate
+
+    task wait_drain_complete;
+        integer wc, idle_count, all_idle;
+        begin
+            idle_count = 0;
+            while (idle_count < 10) begin
+                @(posedge clk);
+                all_idle = 1;
+                for (wc = 0; wc < 32; wc = wc + 1) begin
+                    if (fifo_rp[wc] < fifo_wp[wc] || drain_state[wc] != 4'd0)
+                        all_idle = 0;
+                end
+                if (all_idle) idle_count = idle_count + 1;
+                else          idle_count = 0;
+            end
+        end
+    endtask
+
+    // ─── DUMP: 32 bank × 512 words, port-based read → $fwrite ──────
+    task dump_banks;
+        integer bi, w, fd;
+        reg [8*512-1:0] path_str;
+        reg [31:0] q_word;
+        begin
+            for (bi = 0; bi < NB; bi = bi + 1) begin
+                $sformat(path_str, "%0s/bank%0d.mem", DUMP_DIR, bi);
+                fd = $fopen(path_str, "w");
+                if (fd == 0) begin
+                    $display("FATAL: cannot open dump file %0s", path_str);
+                    $finish;
+                end
+                for (w = 0; w < 512; w = w + 1) begin
+                    @(posedge clk);
+                    sram_CEB[bi]                    <= 1'b0;
+                    sram_WEB[bi]                    <= 1'b1;
+                    sram_A[bi*AW +: AW]             <= w[AW-1:0];
+                    @(posedge clk);
+                    sram_CEB[bi]                    <= 1'b1;
+                    @(posedge clk);
+                    q_word = sram_Q[bi*32 +: 32];
+                    $fwrite(fd, "%08x\n", q_word);
+                end
+                $fclose(fd);
+            end
         end
     endtask
 
     // ─── 메인 시퀀스 (INIT → LOAD → CONFIG → DRIVE → DRAIN → DUMP) ──
-    integer i, b;
-    reg [8*512-1:0] dump_path;
     reg [8*512-1:0] in_path_a_bs, in_path_b, in_path_a_sc, in_path_b_sc;
 
     initial begin
-        fifo_wp = 0;
-        fifo_rp = 0;
         cur_pp     = 1'b0;
         cur_st_pp  = 1'b0;
 
         // ───── INIT ─────
+        $display("[INIT] reset + 32-bank parallel zero-prime");
         #20;
         rst = 0;
-        sram_D_use_zero = 1'b1;
-        for (i = 0; i < 16384; i = i + 1) begin
-            sram_write_zero(i[18:0]);
-        end
-        sram_idle;
-        sram_idle;
+        @(posedge clk);
+        @(posedge clk);
+        init_zero_prime;
+        @(posedge clk);
+        @(posedge clk);
 
         // ───── LOAD ─────
+        $display("[LOAD] $readmemh inputs");
         // 파일명 규칙 (MXP_Tools emit + MXP 레퍼런스 TB 와 일치):
         //   - mem_a (TB 내) = WEIGHT (bit-serial, SA `in_a` 라인).
         //     파일 `a_input_BS_mxint{P}.hex`, P = WEIGHT 정밀도 = B_PREC.
@@ -743,6 +837,7 @@ module gemm_sram_top_tb;
                  a_bs[0], b_bp[0], a_scale[0], b_scale[0]);
 
         // ───── CONFIG: {A_PREC, B_PREC} 으로 모드별 상수 디스패치 ─────
+        $display("[CONFIG] dispatching mode constants");
         //
         // 출처: precision_modes_protocol.md §1 Mode Matrix (v1.0, 2026-05-11 검증).
         // 기호: A∈{8,4,2} → A_INT8/4/2 (Accumulator_Col 의 Mode_oh),
@@ -827,43 +922,48 @@ module gemm_sram_top_tb;
         @(posedge clk); @(posedge clk); @(posedge clk); @(posedge clk);
 
         // ───── DRIVE ─────
+        $display("[DRIVE] stage 2-A / 2-B / 3+4 / 5-tail");
         drive_stage_2a(0, 0);          // Stage 2-A: 초기 B load (n_t=0, k_t=0)
         drive_stage_2b;                // Stage 2-B: settle + Buf1 toggle
         drive_stage_3_4;               // Stage 3+4: MAC sweep (capture_en 도 켬)
         drive_stage_5_tail;            // Stage 5: tail + capture 종료
 
-        $display("DRIVE DONE: captured %0d fires (expected up to 65536)", fifo_wp);
-
-        // ───── DRAIN ─────
-        drain_prime;
-        drain_fifo;
-
-        $display("DRAIN DONE: %0d entries processed", fifo_wp);
-
-        // ───── DUMP ─────
-        for (b = 0; b < 16; b = b + 1) begin
-            $sformat(dump_path, "%0s/bank%0d.mem", DUMP_DIR, b);
-            case (b)
-                0:  $writememh(dump_path, u_top.u_sram.g_bank[0].u_bank.mem,  0, 1023);
-                1:  $writememh(dump_path, u_top.u_sram.g_bank[1].u_bank.mem,  0, 1023);
-                2:  $writememh(dump_path, u_top.u_sram.g_bank[2].u_bank.mem,  0, 1023);
-                3:  $writememh(dump_path, u_top.u_sram.g_bank[3].u_bank.mem,  0, 1023);
-                4:  $writememh(dump_path, u_top.u_sram.g_bank[4].u_bank.mem,  0, 1023);
-                5:  $writememh(dump_path, u_top.u_sram.g_bank[5].u_bank.mem,  0, 1023);
-                6:  $writememh(dump_path, u_top.u_sram.g_bank[6].u_bank.mem,  0, 1023);
-                7:  $writememh(dump_path, u_top.u_sram.g_bank[7].u_bank.mem,  0, 1023);
-                8:  $writememh(dump_path, u_top.u_sram.g_bank[8].u_bank.mem,  0, 1023);
-                9:  $writememh(dump_path, u_top.u_sram.g_bank[9].u_bank.mem,  0, 1023);
-                10: $writememh(dump_path, u_top.u_sram.g_bank[10].u_bank.mem, 0, 1023);
-                11: $writememh(dump_path, u_top.u_sram.g_bank[11].u_bank.mem, 0, 1023);
-                12: $writememh(dump_path, u_top.u_sram.g_bank[12].u_bank.mem, 0, 1023);
-                13: $writememh(dump_path, u_top.u_sram.g_bank[13].u_bank.mem, 0, 1023);
-                14: $writememh(dump_path, u_top.u_sram.g_bank[14].u_bank.mem, 0, 1023);
-                15: $writememh(dump_path, u_top.u_sram.g_bank[15].u_bank.mem, 0, 1023);
-            endcase
+        // capture FIFO 의 총 push 수 (per-col 합) 를 진단용으로 출력
+        begin : dbg_drive_count
+            integer dbg_c, dbg_total;
+            dbg_total = 0;
+            for (dbg_c = 0; dbg_c < 32; dbg_c = dbg_c + 1)
+                dbg_total = dbg_total + fifo_wp[dbg_c];
+            $display("DRIVE DONE: captured %0d fires (expected up to 65536)", dbg_total);
         end
 
-        $display("INTEGRATION TB: A%0d_B%0d DONE", A_PREC, B_PREC);
+        // ───── PRIME: drain 시작 전 in-flight fire 들이 reg 에 들어올 여유 ─────
+        repeat (PRIME_CYC) @(posedge clk);
+
+        // ───── DRAIN: 32 col 동시 진행 ─────
+        // drain 시작 전 sram_D_use_zero 를 0 으로 (RMW.out_RMW 가 D 로 mux 되도록).
+        // generate-for 내부에서 32 always 가 같은 단일 reg 를 driving 하면
+        // multi-driver 가 되므로 여기서 한 번만 설정.
+        sram_D_use_zero <= 1'b0;
+        @(posedge clk);
+        $display("[DRAIN] 32-stream per-col R-M-W");
+        drain_enable <= 1'b1;
+        wait_drain_complete;
+        drain_enable <= 1'b0;
+
+        begin : dbg_drain_count
+            integer dbg_c, dbg_total;
+            dbg_total = 0;
+            for (dbg_c = 0; dbg_c < 32; dbg_c = dbg_c + 1)
+                dbg_total = dbg_total + fifo_rp[dbg_c];
+            $display("DRAIN DONE: %0d entries processed", dbg_total);
+        end
+
+        // ───── DUMP: 32 bank × 512 words via port-based read → $fwrite ─────
+        $display("[DUMP] writing 32 bank .mem files to %0s", DUMP_DIR);
+        dump_banks;
+
+        $display("[DONE] INTEGRATION TB: A%0d_B%0d", A_PREC, B_PREC);
         $finish;
     end
 
