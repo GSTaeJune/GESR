@@ -1,32 +1,42 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////
-// gemm_sram_top_tb — Task 8: end-to-end GEMM + RMW + SRAM TB, all 9 modes.
+// gemm_sram_top_tb — gemm_sram_top 통합 검증 TB (9 모드 전부).
 //
-// Supports A_PREC ∈ {2,4,8} × B_PREC ∈ {2,4,8} via plusargs. Per-mode
-// constants (W_CYC, A_FIRE_DELAY, FIRST_FIRE_GLOBAL, TOGGLE_VAL, FIRES_PER_COL,
-// N_T_LOGICAL, A_CTRL, W_CTRL) are dispatched from a CONFIG-time `case()` on
-// {A_PREC,B_PREC} into TB regs (no longer localparam — plusarg-dependent).
-//
-// Strategy (single-RMW-at-a-time, post-drive replay):
-//   1) INIT     — reset + SRAM zero-prime via TB-driven do_write loop.
-//   2) LOAD     — $readmemh hex files (a_input_BS, b_input, a_scale, b_scale).
-//   3) CONFIG   — set per-mode constants + control codes from {A_PREC,B_PREC}.
-//   4) DRIVE    — Stages 2-A, 2-B, 3+4 (MAC), 5 (tail) via named tasks.
-//                 During driving an `always @(posedge clk)` capture-block
-//                 records every out_fire[c] rising edge into FIFO arrays:
-//                 fifo_int[i], fifo_scale[i], fifo_addr[i] (15-bit flat).
-//                 Capture decode is mode-aware: A8 → 1 RMW/fire,
-//                 A4 → 2 RMW/fire, A2 → 4 RMW/fire (lane-to-c-mapping.md).
-//   5) DRAIN    — sequential RMW dispatch over the captured FIFO. For each
-//                 entry: issue SRAM read → wait L_CONV cyc → drive rmw inputs
-//                 → wait L_ADD cyc → write back.
-//   6) DUMP     — $writememh all 16 banks (0..1023 word range).
+// 검증 목적:
+//   GEMM (MXP 32×32 bit-serial systolic) + RMW (INT→FP32 + FP32 add) +
+//   sram_1rw_banked (16 bank INTERLEAVED, FP32 저장) 의 end-to-end 데이터
+//   패스가 9 가지 정밀도 조합 (A∈{2,4,8} × W∈{2,4,8}) 모두에서 MXP_Tools
+//   골든 GEMM 과 bit-exact 일치하는지 확인. 128×128×128 행렬 누적 결과
+//   16384 element 를 16 bank .mem dump 로 뱉어서 외부 Python (`compare`)
+//   이 FP32 비트 단위 비교.
 //
 // Plusargs (xsim -testplusarg "KEY=VAL"):
-//   A_PREC    : 2 / 4 / 8
-//   B_PREC    : 2 / 4 / 8
-//   WORK_DIR  : MXP_Tools .hex input directory (REQUIRED)
-//   DUMP_DIR  : SRAM .mem dump output dir       (REQUIRED)
+//   A_PREC    : 2 / 4 / 8 (Activation 정밀도)
+//   B_PREC    : 2 / 4 / 8 (Weight 정밀도, MXP 의 "in_a" 라인)
+//   WORK_DIR  : MXP_Tools hex 입력 디렉토리 (필수)
+//   DUMP_DIR  : SRAM .mem dump 출력 디렉토리 (필수)
+//
+// 모드별 상수 (W_CYC, A_FIRE_DELAY, FIRST_FIRE_GLOBAL, TOGGLE_VAL,
+// FIRES_PER_COL, N_T_LOGICAL, A_CTRL, W_CTRL) 는 CONFIG 단계의 case() 로
+// {A_PREC,B_PREC} 에 따라 TB reg 에 디스패치 (plusarg 의존이라 localparam X).
+//
+// 전체 흐름 (single-RMW 직렬 디스패치 방식, drive→replay 후 처리):
+//   1) INIT     — 리셋 + SRAM 16384 워드 0 초기화 (do_write 루프).
+//   2) LOAD     — $readmemh (a_input_BS, b_input, a_scale, b_scale).
+//   3) CONFIG   — {A_PREC,B_PREC} 으로 모드별 상수/제어 코드 세팅.
+//   4) DRIVE    — Stage 2-A, 2-B, 3+4 (MAC), 5 (tail) 을 named task 로 발사.
+//                 발사 중 `always @(posedge clk)` 캡처 블록이 매 out_fire[c]
+//                 rising 을 잡아서 FIFO (fifo_int/scale/addr) 로 적재.
+//                 lane 디코딩은 모드 의존 (A8 → 1 RMW/fire, A4 → 2,
+//                 A2 → 4). 자세한 슬라이스는 docs/superpowers/notes/
+//                 lane-to-c-mapping.md.
+//   5) DRAIN    — FIFO 를 순차로 한 개씩 RMW 로 흘림. 매 entry 마다:
+//                 SRAM read 발사 → L_CONV 대기 → rmw 입력 드라이브 →
+//                 L_ADD 대기 → write-back.
+//   6) DUMP     — $writememh 로 16 bank 각각 0..1023 워드를 .mem 파일로.
+//                 외부 compare 가 MXP_Tools golden npz 와 비트 단위 비교.
+//
+// 회귀 게이트: `bash sim/run_integration_sweep.sh` → "ALL 9 MODES PASSED".
 //////////////////////////////////////////////////////////////////////////////
 
 module gemm_sram_top_tb;
@@ -49,38 +59,38 @@ module gemm_sram_top_tb;
     localparam integer M_T = M_DIM / TILE_SIZE;     // 4
     localparam integer K_T = K_DIM / TILE_SIZE;     // 4
 
-    // Encodings — match precision_modes_protocol.md §1
+    // 제어 코드 인코딩 — precision_modes_protocol.md §1 과 일치.
     //   A_INT8 = 2'b00, A_INT4 = 2'b01, A_INT2 = 2'b10, A_IDLE = 2'b11
     //   W_INT8 = 2'b11, W_INT4 = 2'b10, W_INT2 = 2'b01, W_IDLE = 2'b00
     localparam [1:0] A_INT8 = 2'b00, A_INT4 = 2'b01, A_INT2 = 2'b10, A_IDLE = 2'b11;
     localparam [1:0] W_INT8 = 2'b11, W_INT4 = 2'b10, W_INT2 = 2'b01, W_IDLE = 2'b00;
 
-    // ─── Per-mode constants (assigned at CONFIG from {A_PREC,B_PREC}) ─
+    // ─── 모드별 상수 (CONFIG 에서 {A_PREC,B_PREC} 으로 case 디스패치) ─
     integer W_CYC, A_FIRE_DELAY, FIRST_FIRE_GLOBAL, TOGGLE_VAL;
     integer FIRES_PER_COL, N_T_LOGICAL;
     reg [1:0] A_CTRL_CODE, W_CTRL_CODE;
 
-    // ─── RMW pipeline timing helpers ───────────────────────────────
-    // RMW latency = L_CONV + L_ADD = 2 + 3 = 5 cy. We wait 8 cy between
-    // driving rmw inputs and the write-back @(posedge clk):
-    //   = L_CONV + L_ADD + 3 cy slack (covers any signal-prop quirks).
+    // ─── RMW 파이프라인 타이밍 보조 상수 ──────────────────────────
+    // RMW latency = L_CONV + L_ADD = 2 + 3 = 5 cy. RMW 입력 드라이브 후
+    // write-back 까지 8 cy 대기:
+    //   = L_CONV + L_ADD + 3 cy slack (신호 전파 여유분).
     localparam integer RMW_WAIT_CYC = 8;
-    // X-prime: number of pipeline-flush cycles before draining the FIFO. Must
-    // exceed the deepest pipeline (RMW's sram_dly + fp32_adder's recFN_b_dly).
+    // X-prime: drain 시작 전 파이프라인 X 채움 cycle. 가장 깊은 파이프라인
+    // (RMW.sram_dly + fp32_adder.recFN_b_dly) 보다 길어야 함.
     localparam integer PRIME_CYC    = 16;
-    // Tail length (Stage 5): hold W_INTn long enough to flush in-flight fires.
-    // Worst case = symmetric chain delay (15 cy max at col 0/31) +
-    // A_fire_delay (≤2) + W_CYC (≤8). 45 cy is generous for all 9 modes.
+    // Stage 5 tail 길이: in-flight fire 들을 모두 캡처할 때까지 W_INTn 유지.
+    // 최악 = symmetric chain delay (col 0/31 에서 15 cy 최대) +
+    // A_fire_delay (≤2) + W_CYC (≤8). 45 cy 면 9 모드 모두 여유 있음.
     localparam integer TAIL_CYC     = 45;
-    // Post-tail capture window: lets last col 0/31 fires register through.
+    // Stage 5 후 capture 유지 cycle: 마지막 col 0/31 fire 가 reg 에 들어올 때까지.
     localparam integer POST_TAIL    = 20;
 
-    // ─── clock / reset ─────────────────────────────────────────────
+    // ─── 클록 / 리셋 ───────────────────────────────────────────────
     reg clk = 0;
-    always #5 clk = ~clk;        // 100 MHz nominal (10 ns period)
+    always #5 clk = ~clk;        // 100 MHz 기준 (10 ns 주기)
     reg rst = 1;
 
-    // ─── DUT stimuli registers ─────────────────────────────────────
+    // ─── DUT 자극 레지스터 ─────────────────────────────────────────
     reg [32-1:0]              in_a              = 0;
     reg signed [32*8-1:0]     in_b              = 0;
     reg [32-1:0]              in_control        = 0;
@@ -110,7 +120,7 @@ module gemm_sram_top_tb;
     reg                       sram_D_use_zero   = 1;
     wire [31:0]               sram_Q;
 
-    // ─── DUT instance ──────────────────────────────────────────────
+    // ─── DUT 인스턴스 ──────────────────────────────────────────────
     gemm_sram_top #(
         .NUM_BANKS  (16),
         .BANK_DEPTH (32768)
@@ -137,7 +147,7 @@ module gemm_sram_top_tb;
         .sram_Q(sram_Q)
     );
 
-    // ─── helper tasks (SRAM) ───────────────────────────────────────
+    // ─── SRAM 보조 task ────────────────────────────────────────────
     task sram_write_zero(input [18:0] addr);
         begin
             @(posedge clk);
@@ -157,44 +167,45 @@ module gemm_sram_top_tb;
         end
     endtask
 
-    // ─── Input memories ────────────────────────────────────────────
-    // sizes: K_T*M_T*TILE*W_CYC_MAX = 4*4*32*8 = 4096 lines for a_bs (A8 worst)
-    //        N_T_MAX*K_T*TILE       = 4*4*32   = 512  lines for b_bp (A8 worst)
-    //        K_T*M_T*TILE           = 4*4*32   = 512  lines for a_scale
-    //        N_T_MAX*K_T*TILE       = 4*4*32   = 512  lines for b_scale (A8 worst)
+    // ─── 입력 hex 메모리 ───────────────────────────────────────────
+    // 크기 산정 (A8 worst case 기준):
+    //   K_T*M_T*TILE*W_CYC_MAX = 4*4*32*8 = 4096 lines  → a_bs   (weight bit-serial)
+    //   N_T_MAX*K_T*TILE       = 4*4*32   = 512  lines  → b_bp   (activation, 256-bit)
+    //   K_T*M_T*TILE           = 4*4*32   = 512  lines  → a_scale (weight scale, E8M0)
+    //   N_T_MAX*K_T*TILE       = 4*4*32   = 512  lines  → b_scale (activation scale, E8M0)
     reg [31:0]   a_bs    [0:4095];
     reg [255:0]  b_bp    [0:511];
     reg [7:0]    a_scale [0:511];
     reg [7:0]    b_scale [0:511];
 
-    // ─── Fire capture FIFO ──────────────────────────────────────────
-    // Total RMW entries (mode-independent): 32 col × 2048 RMW/col = 65536
+    // ─── Fire 캡처 FIFO ────────────────────────────────────────────
+    // 총 RMW entry 수 (모드 무관, 32 col × 2048 RMW/col = 65536):
     //   A8: 2048 fires × 1 RMW = 2048/col
     //   A4: 1024 fires × 2 RMW = 2048/col
     //   A2:  512 fires × 4 RMW = 2048/col
     reg [31:0]   fifo_int   [0:65535];
     reg [8:0]    fifo_scale [0:65535];
     reg [18:0]   fifo_addr  [0:65535];
-    integer      fifo_wp;          // write pointer
-    integer      fifo_rp;          // read pointer (for drain)
+    integer      fifo_wp;          // write pointer (capture 시 증가)
+    integer      fifo_rp;          // read pointer  (drain 시 증가)
 
-    // Per-col fire counter (tracks which fire# within column → decodes m_t, m_in, k_t, n_t)
+    // col 별 누적 fire 카운터 (col 안에서 몇 번째 fire 인지 → m_t/m_in/k_t/n_t 디코딩에 사용)
     reg [11:0]   fire_cnt_per_col [0:31];
 
-    // ─── Fire-capture always block ─────────────────────────────────
+    // ─── Fire 캡처 always 블록 ─────────────────────────────────────
     //
-    // Decode fire_cnt[c] (linear count of fires on col c) → (n_t, k_t, m_t, m_in):
-    //   inner loop order in driving:  n_t → k_t → m_t → o (W_CYC × TILE_SIZE inner)
-    //   one fire per col per (n_t, k_t, m_t, m_in), m_in ∈ [0, TILE_SIZE)
-    //   so fc = n_t*K_T*M_T*TILE + k_t*M_T*TILE + m_t*TILE + m_in
+    // fire_cnt[c] (col c 에서의 누적 fire 번호) → (n_t, k_t, m_t, m_in) 디코딩:
+    //   driving 의 inner 루프 순서:  n_t → k_t → m_t → o (W_CYC × TILE_SIZE)
+    //   col 별 fire 는 (n_t, k_t, m_t, m_in) 한 조합당 1 회 발생, m_in ∈ [0, TILE_SIZE)
+    //   따라서 fc = n_t*K_T*M_T*TILE + k_t*M_T*TILE + m_t*TILE + m_in
     //
     // m_global = m_t * TILE_SIZE + m_in
-    // n_global depends on A_PREC:
+    // n_global 은 A_PREC 의존:
     //   A8: n_g = n_t * 32 + col_idx           (1 lane)
     //   A4: n_g_top = n_pair*64 + 32 + col,    (2 lanes, n_pair = n_t)
     //       n_g_bot = n_pair*64 +  0 + col
     //   A2: n_g_l0 = 96 + col, n_g_l1 = 64 + col, n_g_l2 = 32 + col, n_g_l3 = col
-    // flat = m_global * N_DIM + n_global
+    // flat = m_global * N_DIM + n_global   (FP32 word 의 SRAM 평탄 주소)
     integer fc, n_t_dec, k_t_dec, m_t_dec, m_in_dec, m_g;
     integer ci;
     reg signed [20:0] acc_lane_a8;
@@ -204,7 +215,7 @@ module gemm_sram_top_tb;
     reg [8:0]         sc_lane;
     integer ng_dec, flat_dec;
 
-    reg capture_en;     // 1 during DRIVE stage
+    reg capture_en;     // DRIVE stage 동안만 1
     initial capture_en = 0;
 
     always @(posedge clk) begin
@@ -212,16 +223,17 @@ module gemm_sram_top_tb;
             for (ci = 0; ci < 32; ci = ci + 1) fire_cnt_per_col[ci] <= 0;
         end else if (capture_en) begin
             for (ci = 0; ci < 32; ci = ci + 1) begin
-                // Ignore spurious fires beyond FIRES_PER_COL (extra Accumulator
-                // counter rollovers in Stage 5 tail before W_IDLE propagates).
-                // FIRES_PER_COL is mode-dependent (A8=2048, A4=1024, A2=512).
+                // FIRES_PER_COL 초과 fire 는 무시. Stage 5 tail 에서 W_IDLE 이
+                // 전파되기 전 Accumulator 의 counter 가 한두 번 더 rollover 해서
+                // 가짜 fire 가 뜨는 경우가 있음. FIRES_PER_COL 은 모드 의존
+                // (A8=2048, A4=1024, A2=512).
                 if (out_fire[ci] && (fire_cnt_per_col[ci] < FIRES_PER_COL)) begin
                     fc = fire_cnt_per_col[ci];
 
-                    // Inner counter wraps mod (K_T*M_T*TILE) = 512.
-                    // Above that, the "n_t" index advances. For A8 N_T=4 → fc∈[0,2048).
-                    // For A4 N_T=2 → fires_per_col=1024, fc∈[0,1024).
-                    // For A2 N_T=1 → fires_per_col=512,  fc∈[0,512).
+                    // 내부 카운터는 mod (K_T*M_T*TILE) = 512 로 wrap.
+                    // 그 이상부터 "n_t" 가 증가. A8 (N_T=4) 에서 fc ∈ [0,2048),
+                    // A4 (N_T=2) 에서 fires_per_col=1024 → fc ∈ [0,1024),
+                    // A2 (N_T=1) 에서 fires_per_col=512  → fc ∈ [0,512).
                     n_t_dec  = fc / (K_T * M_T * TILE_SIZE);                 // /512
                     k_t_dec  = (fc / (M_T * TILE_SIZE)) % K_T;               // /128 %4
                     m_t_dec  = (fc / TILE_SIZE) % M_T;                       // /32  %4
@@ -229,7 +241,7 @@ module gemm_sram_top_tb;
                     m_g      = m_t_dec * TILE_SIZE + m_in_dec;
 
                     case (A_PREC)
-                        // ─── A8: 1 lane / col ─────────────────────────
+                        // ─── A8: col 당 1 lane ──────────────────────────
                         8: begin
                             acc_lane_a8 = $signed(out_accumulate[60*ci +: 21]);
                             acc_int32   = {{11{acc_lane_a8[20]}}, acc_lane_a8};
@@ -241,10 +253,10 @@ module gemm_sram_top_tb;
                             fifo_addr [fifo_wp] <= flat_dec[18:0];
                             fifo_wp = fifo_wp + 1;
                         end
-                        // ─── A4: 2 lanes / col (top/bot) ──────────────
+                        // ─── A4: col 당 2 lane (top/bot) ────────────────
                         4: begin
-                            // top (s1_a): acc[60c+35:60c+18], scale[36c+17:36c+9]
-                            //   n = n_pair*64 + 32 + j
+                            // top lane (s1_a): acc[60c+35:60c+18], scale[36c+17:36c+9]
+                            //   n 위치 = n_pair*64 + 32 + col_idx
                             acc_lane_a4t = $signed(out_accumulate[60*ci+18 +: 18]);
                             acc_int32    = {{14{acc_lane_a4t[17]}}, acc_lane_a4t};
                             sc_lane      = out_scale[36*ci+9 +: 9];
@@ -255,8 +267,8 @@ module gemm_sram_top_tb;
                             fifo_addr [fifo_wp] <= flat_dec[18:0];
                             fifo_wp = fifo_wp + 1;
 
-                            // bot (s1_b): acc[60c+17:60c+0], scale[36c+8:36c+0]
-                            //   n = n_pair*64 + 0 + j
+                            // bot lane (s1_b): acc[60c+17:60c+0], scale[36c+8:36c+0]
+                            //   n 위치 = n_pair*64 + 0 + col_idx
                             acc_lane_a4b = $signed(out_accumulate[60*ci +: 18]);
                             acc_int32    = {{14{acc_lane_a4b[17]}}, acc_lane_a4b};
                             sc_lane      = out_scale[36*ci +: 9];
@@ -267,9 +279,9 @@ module gemm_sram_top_tb;
                             fifo_addr [fifo_wp] <= flat_dec[18:0];
                             fifo_wp = fifo_wp + 1;
                         end
-                        // ─── A2: 4 lanes / col ────────────────────────
+                        // ─── A2: col 당 4 lane ──────────────────────────
                         2: begin
-                            // lane0 (out_INT2_0): acc[60c+59:60c+45], scale[36c+35:36c+27], n = 96+j
+                            // lane0 (out_INT2_0): acc[60c+59:60c+45], scale[36c+35:36c+27], n 위치 = 96+col_idx
                             acc_lane_a2_0 = $signed(out_accumulate[60*ci+45 +: 15]);
                             acc_int32     = {{17{acc_lane_a2_0[14]}}, acc_lane_a2_0};
                             sc_lane       = out_scale[36*ci+27 +: 9];
@@ -280,7 +292,7 @@ module gemm_sram_top_tb;
                             fifo_addr [fifo_wp] <= flat_dec[18:0];
                             fifo_wp = fifo_wp + 1;
 
-                            // lane1: acc[60c+44:60c+30], scale[36c+26:36c+18], n = 64+j
+                            // lane1: acc[60c+44:60c+30], scale[36c+26:36c+18], n 위치 = 64+col_idx
                             acc_lane_a2_1 = $signed(out_accumulate[60*ci+30 +: 15]);
                             acc_int32     = {{17{acc_lane_a2_1[14]}}, acc_lane_a2_1};
                             sc_lane       = out_scale[36*ci+18 +: 9];
@@ -291,7 +303,7 @@ module gemm_sram_top_tb;
                             fifo_addr [fifo_wp] <= flat_dec[18:0];
                             fifo_wp = fifo_wp + 1;
 
-                            // lane2: acc[60c+29:60c+15], scale[36c+17:36c+9], n = 32+j
+                            // lane2: acc[60c+29:60c+15], scale[36c+17:36c+9], n 위치 = 32+col_idx
                             acc_lane_a2_2 = $signed(out_accumulate[60*ci+15 +: 15]);
                             acc_int32     = {{17{acc_lane_a2_2[14]}}, acc_lane_a2_2};
                             sc_lane       = out_scale[36*ci+9 +: 9];
@@ -302,7 +314,7 @@ module gemm_sram_top_tb;
                             fifo_addr [fifo_wp] <= flat_dec[18:0];
                             fifo_wp = fifo_wp + 1;
 
-                            // lane3: acc[60c+14:60c+0], scale[36c+8:36c+0], n = j
+                            // lane3: acc[60c+14:60c+0], scale[36c+8:36c+0], n 위치 = col_idx
                             acc_lane_a2_3 = $signed(out_accumulate[60*ci +: 15]);
                             acc_int32     = {{17{acc_lane_a2_3[14]}}, acc_lane_a2_3};
                             sc_lane       = out_scale[36*ci +: 9];
@@ -321,13 +333,13 @@ module gemm_sram_top_tb;
         end
     end
 
-    // ─── DRIVE-stage scratch regs ──────────────────────────────────
+    // ─── DRIVE 스크래치 reg ────────────────────────────────────────
     integer n_t, k_t, m_t, o;
     integer cyc_in_K, cyc_global, m_idx_scale;
-    reg     cur_pp;       // PE in_control toggle state (Buf1/Buf2)
-    reg     cur_st_pp;    // Station selector toggle state
+    reg     cur_pp;       // PE in_control 토글 상태 (Buf1/Buf2)
+    reg     cur_st_pp;    // Station selector 토글 상태
 
-    // Compute address into a_bs[] for k_t, m_t, o (o = bit-serial cycle within m-row)
+    // a_bs[] 에서 (k_t, m_t, o) 위치 워드 추출 (o = m-row 안의 bit-serial cycle)
     function [31:0] a_bs_word;
         input integer k_t_i, m_t_i, o_i;
         begin
@@ -335,7 +347,7 @@ module gemm_sram_top_tb;
         end
     endfunction
 
-    // Pack a 32-bit word with the same byte 4 times (for A8 mode in_Scale_Activation)
+    // 32-bit 워드에 같은 바이트를 4 번 복제 (A8 모드의 in_Scale_Activation 용)
     function [31:0] pack_scale_4x;
         input [7:0] sc;
         begin
@@ -343,9 +355,9 @@ module gemm_sram_top_tb;
         end
     endfunction
 
-    // V3 pack helper: combine 2 file 256-bit blocks (top + bot INT4 N-cols)
-    //   into 1 station 256-bit. Per row r:  byte[r] = {top[r][3:0], bot[r][3:0]}
-    // (mirrors MXP/sim_1/new/tb_A4W8.v::pack_int4_n_pair)
+    // V3 pack: file 256-bit 블록 2 개 (top + bot INT4 N-col) 를 station 256-bit
+    // 1 개로 합침. row r 당: byte[r] = {top[r][3:0], bot[r][3:0]}
+    // (MXP/sim_1/new/tb_A4W8.v::pack_int4_n_pair 와 동일 동작)
     function [255:0] pack_int4_n_pair;
         input [255:0] top_data;   // file (n_t = 2*n_pair+1) col c
         input [255:0] bot_data;   // file (n_t = 2*n_pair+0) col c
@@ -359,12 +371,12 @@ module gemm_sram_top_tb;
         end
     endfunction
 
-    // V3 pack helper: combine 4 file 256-bit blocks (n_t=0..3) into 1 station 256-bit.
-    //   Per row r: byte[r] = {n3[r][1:0], n2[r][1:0], n1[r][1:0], n0[r][1:0]}
+    // V3 pack: file 256-bit 블록 4 개 (n_t=0..3) 를 station 256-bit 1 개로 합침.
+    //   row r 당: byte[r] = {n3[r][1:0], n2[r][1:0], n1[r][1:0], n0[r][1:0]}
     //   bit pos:  [7:6] [5:4] [3:2] [1:0]
     //   lane:     lane0 lane1 lane2 lane3
     //   N-pos:    N+96  N+64  N+32  N+0   (per SA col c)
-    // (mirrors MXP/sim_1/new/tb_A2W8.v::pack_int2_n_quad)
+    // (MXP/sim_1/new/tb_A2W8.v::pack_int2_n_quad 와 동일 동작)
     function [255:0] pack_int2_n_quad;
         input [255:0] data_n3;   // file n_t=3 → lane0 [7:6]
         input [255:0] data_n2;   // file n_t=2 → lane1 [5:4]
@@ -382,11 +394,11 @@ module gemm_sram_top_tb;
         end
     endfunction
 
-    // Per-mode in_b builder. n_pair is the LOGICAL n-tile index in driving
-    // (0..N_T_LOGICAL-1). Maps to file (file_n_t) indices internally:
-    //   A8: file_n_t = n_pair (1:1).
-    //   A4: file_n_t ∈ {2*n_pair+1, 2*n_pair} (top, bot pair).
-    //   A2: file_n_t ∈ {0,1,2,3} (all four, regardless of n_pair which is 0 only).
+    // 모드별 in_b 빌더. n_pair 는 driving 의 LOGICAL n-tile 인덱스
+    // (0..N_T_LOGICAL-1). 내부에서 file (file_n_t) 인덱스로 매핑:
+    //   A8: file_n_t = n_pair (1:1)
+    //   A4: file_n_t ∈ {2*n_pair+1, 2*n_pair} (top, bot pair 묶음)
+    //   A2: file_n_t ∈ {0,1,2,3} (n_pair=0 만 있고, 4 lane 모두 채움)
     function [255:0] build_in_b;
         input integer n_pair;
         input integer k_t_arg;
@@ -414,8 +426,8 @@ module gemm_sram_top_tb;
         end
     endfunction
 
-    // Per-mode in_Scale_Activation builder.
-    //   A8: {sc, sc, sc, sc} (broadcast same byte to all 4 lanes).
+    // 모드별 in_Scale_Activation 빌더.
+    //   A8: {sc, sc, sc, sc} (4 lane 모두에 같은 바이트 broadcast)
     //   A4: {16'b0, scale[2*n_pair+0], scale[2*n_pair+1]}
     //        — byte[7:0]=top (file_n_t=2*n_pair+1, lane0/1 → comb_s0)
     //          byte[15:8]=bot (file_n_t=2*n_pair+0, lane2/3 → comb_s1)
@@ -455,31 +467,31 @@ module gemm_sram_top_tb;
         end
     endfunction
 
-    // ─── DRIVE-helper tasks ─────────────────────────────────────────
+    // ─── DRIVE 보조 task ────────────────────────────────────────────
 
-    // Stage 2-A initial B load (32 cy): drive col c on TB cy c so that, after
-    // station chain leftward propagation, each station's Buf1 holds its own col's
-    // activation. Same logic for all A modes — file layout (per b_input_mxint{A})
-    // already encodes the lane packing in the 256-bit word.
+    // Stage 2-A 초기 B load (32 cy): TB cy c 에 col c 를 드라이브.
+    // station chain 이 왼쪽으로 전파되므로, 끝나면 각 col 의 station Buf1 에
+    // 자기 col 의 activation 이 들어가 있게 됨. A 모드별 차이는 file layout
+    // (b_input_mxint{A_PREC}.hex) 의 256-bit lane packing 으로 흡수됨.
     task drive_stage_2a;
         input integer n_t_arg, k_t_arg;
         integer tt, col_target;
         begin
             for (tt = 0; tt < TILE_SIZE; tt = tt + 1) begin
-                col_target = tt;             // col 0 first, col 31 last
+                col_target = tt;             // col 0 먼저, col 31 마지막
                 in_b                <= build_in_b(n_t_arg, k_t_arg, col_target);
                 in_Scale_Activation <= build_in_scale_act(n_t_arg, k_t_arg, col_target);
                 in_Station_control  <= A_CTRL_CODE;
                 in_loadEN           <= 32'hFFFFFFFF;
                 in_station_loadEN   <= 1'b1;
-                in_station_control  <= 1'b0;       // target Buf1
+                in_station_control  <= 1'b0;       // Buf1 타겟
                 @(posedge clk);
             end
         end
     endtask
 
-    // Stage 2-B settle (16 cy idle + flip station selector to 1 + 16 cy settle).
-    // After this, broadcast = Buf1 on all 32 cols (sym chain delay ≤15 cy).
+    // Stage 2-B settle (16 cy idle + station selector 를 1 로 flip + 16 cy settle).
+    // 끝나면 32 col 모두 Buf1 broadcast 상태 (sym chain delay ≤ 15 cy 흡수).
     task drive_stage_2b;
         integer i;
         begin
@@ -495,13 +507,13 @@ module gemm_sram_top_tb;
         end
     endtask
 
-    // Stage 3+4: MAC sweep (n_t → k_t → m_t → o). Per-cycle drive of 6 signals
+    // Stage 3+4: MAC sweep (n_t → k_t → m_t → o). 매 사이클 6 개 신호 드라이브
     // (weight bit / PE pp / Station pp / start_acc / Wcontrol / scale_weight) +
-    // prefetch of next tile during m_t==1, o<32.
+    // m_t==1, o<32 구간에서 다음 tile B/scale prefetch.
     task drive_stage_3_4;
         begin
             cyc_global = 0;
-            cur_pp = 1'b1;       // Flip PE in_control so MAC reads station1
+            cur_pp = 1'b1;       // PE in_control flip → MAC 이 station1 을 읽도록
             capture_en <= 1'b1;
 
             for (n_t = 0; n_t < N_T_LOGICAL; n_t = n_t + 1) begin
@@ -510,37 +522,38 @@ module gemm_sram_top_tb;
                         for (o = 0; o < TILE_SIZE * W_CYC; o = o + 1) begin
                             cyc_in_K = m_t * TILE_SIZE * W_CYC + o;
 
-                            // Weight bit-serial: 32 rows × 1 bit per cycle
+                            // Weight bit-serial: 매 cycle 32 row × 1 bit
                             in_a <= a_bs_word(k_t, m_t, o);
 
-                            // start_accumulate pulse (only once at cyc_global==17)
+                            // start_accumulate 펄스 (cyc_global==17 에서 단 1 번)
                             if (n_t == 0 && k_t == 0 && cyc_global == 17) begin
                                 in_start_accumulate <= 1'b1;
                             end else begin
                                 in_start_accumulate <= 1'b0;
                             end
 
-                            // Wcontrol: W_IDLE before cyc_global=17, then W_CTRL_CODE
+                            // Wcontrol: cyc_global=17 전엔 W_IDLE, 이후 W_CTRL_CODE
                             if (n_t == 0 && k_t == 0 && cyc_global < 17) begin
                                 in_Wcontrol <= W_IDLE;
                             end else begin
                                 in_Wcontrol <= W_CTRL_CODE;
                             end
 
-                            // PE in_control toggle at K-tile boundary (cyc_in_K==0,
-                            // not first tile)
+                            // PE in_control toggle: K-tile 경계 (cyc_in_K==0) 에서 flip.
+                            // 단, 첫 K-tile 은 제외.
                             if (cyc_in_K == 0 && !(n_t == 0 && k_t == 0)) begin
                                 cur_pp = ~cur_pp;
                             end
                             in_control <= {32{cur_pp}};
 
-                            // Station selector toggle at cyc_in_K == TOGGLE_VAL, not first K-tile
+                            // Station selector toggle: cyc_in_K == TOGGLE_VAL 에서 flip
+                            // (첫 K-tile 은 이미 Stage 2-B 에서 설정했으므로 제외).
                             if (cyc_in_K == TOGGLE_VAL && !(n_t == 0 && k_t == 0)) begin
                                 cur_st_pp = ~cur_st_pp;
                             end
                             in_station_control <= cur_st_pp;
 
-                            // scale_weight drive at cyc_global == FIRST_FIRE + W_CYC*m
+                            // scale_weight 드라이브: cyc_global == FIRST_FIRE + W_CYC*m 인 cycle 마다
                             if (cyc_global >= FIRST_FIRE_GLOBAL &&
                                 ((cyc_global - FIRST_FIRE_GLOBAL) % W_CYC) == 0) begin
                                 m_idx_scale = ((cyc_global - FIRST_FIRE_GLOBAL) / W_CYC)
@@ -548,8 +561,8 @@ module gemm_sram_top_tb;
                                 in_scale_weight <= a_scale[m_idx_scale];
                             end
 
-                            // Prefetch (m_t == 1, o < 32): load next tile into
-                            // opposite station buffer.
+                            // Prefetch (m_t == 1, o < 32 구간): 다음 tile B/scale 을
+                            // 반대편 station buffer 로 미리 load.
                             if (m_t == 1 && o < TILE_SIZE) begin
                                 if (k_t < K_T - 1) begin
                                     drive_prefetch(n_t, k_t + 1, o);
@@ -579,10 +592,11 @@ module gemm_sram_top_tb;
         end
     endtask
 
-    // Stage 5 tail: hold W_CTRL_CODE for TAIL_CYC cy to flush last in-flight
-    // fires (col 0/31 last fires arrive ~|c-16|=15 cy after MAC end + W_CYC
-    // + A_fire_delay). Then drop to W_IDLE; capture stays open POST_TAIL cy
-    // to register the trailing fires before we close it.
+    // Stage 5 tail: W_CTRL_CODE 를 TAIL_CYC cy 동안 유지해서 마지막 in-flight
+    // fire 들을 모두 비워냄 (col 0/31 의 마지막 fire 는 MAC 종료 후
+    // ~|c-16|=15 cy + W_CYC + A_fire_delay 뒤에 도착).
+    // 그 다음 W_IDLE 로 떨어뜨리고, capture 는 POST_TAIL cy 더 열어둬서
+    // 마지막 trailing fire 들을 reg 에 들어오게 함.
     task drive_stage_5_tail;
         integer i;
         begin
@@ -610,9 +624,9 @@ module gemm_sram_top_tb;
         end
     endtask
 
-    // ─── prefetch — drive one cycle of the next tile's B / scale ───
-    // Called inside MAC loop at m_t==1, o<32. The chain target is determined by
-    // current selector state — opposite of in_station_control.
+    // ─── prefetch — 다음 tile B/scale 의 한 cycle 분 드라이브 ───────
+    // MAC 루프의 m_t==1, o<32 구간에서 호출. 타겟 chain 은 현재 selector
+    // 상태와 반대편 (in_station_control 반대편) buffer.
     task drive_prefetch;
         input integer n_t_next;
         input integer k_t_next;
@@ -628,14 +642,14 @@ module gemm_sram_top_tb;
         end
     endtask
 
-    // ─── DRAIN helper: prime the RMW + SRAM pipelines before real entries ──
-    // Without this, the first RMW's rmw_out_RMW is X because RMW's sram_dly
-    // and fp32_adder's recFN_b_dly were never driven to a known value during DRIVE.
+    // ─── DRAIN 보조: 실제 entry 전 RMW + SRAM 파이프라인 X 채움 ────
+    // 이걸 안 하면 첫 RMW 의 rmw_out_RMW 가 X. DRIVE 중에는 RMW.sram_dly 와
+    // fp32_adder.recFN_b_dly 가 한 번도 알려진 값으로 채워진 적이 없기 때문.
     task drain_prime;
         integer i;
         begin
             rmw_in_GEMM <= 32'h00000000;
-            rmw_scale   <= 9'd127;          // scale=127 → 2^0=1, so 0 dequant = 0
+            rmw_scale   <= 9'd127;          // scale=127 → 2^0=1 → 0 dequant 결과 = 0
             for (i = 0; i < PRIME_CYC; i = i + 1) begin
                 @(posedge clk);
                 sram_CEB <= 1'b0;
@@ -648,28 +662,28 @@ module gemm_sram_top_tb;
         end
     endtask
 
-    // ─── DRAIN body: sequential RMW dispatch over the captured FIFO. ──
+    // ─── DRAIN 본체: FIFO 를 한 entry 씩 순차 RMW 디스패치 ─────────
     task drain_fifo;
         integer i;
         begin
             sram_D_use_zero <= 1'b0;
             for (fifo_rp = 0; fifo_rp < fifo_wp; fifo_rp = fifo_rp + 1) begin
-                // Step 1: Issue SRAM READ
+                // Step 1: SRAM READ 발사
                 @(posedge clk);
                 sram_CEB        <= 1'b0;
                 sram_WEB        <= 1'b1;
                 sram_A          <= fifo_addr[fifo_rp];
                 sram_D_use_zero <= 1'b0;
 
-                // Step 2: Drive RMW inputs the next cycle (sram_Q valid).
+                // Step 2: 다음 cycle 에 RMW 입력 드라이브 (sram_Q 가 유효해진 시점)
                 @(posedge clk);
                 sram_CEB        <= 1'b1;
                 rmw_in_GEMM     <= fifo_int  [fifo_rp];
                 rmw_scale       <= fifo_scale[fifo_rp];
-                // Step 3: wait for RMW pipeline (= L_CONV+L_ADD+slack=8 cy)
+                // Step 3: RMW 파이프라인 대기 (L_CONV+L_ADD+slack = 8 cy)
                 for (i = 0; i < RMW_WAIT_CYC; i = i + 1) @(posedge clk);
 
-                // Step 4: issue WRITE
+                // Step 4: WRITE 발사 (rmw_out_w → sram_D 경로로 그대로 들어감)
                 @(posedge clk);
                 sram_CEB        <= 1'b0;
                 sram_WEB        <= 1'b0;
@@ -677,7 +691,7 @@ module gemm_sram_top_tb;
                 sram_WMASK      <= 32'hFFFFFFFF;
                 sram_D_use_zero <= 1'b0;
 
-                // Step 5: deassert + 1 extra idle cy for SRAM write to settle
+                // Step 5: deassert + SRAM write settle 용 idle cy 1 개
                 @(posedge clk);
                 sram_CEB        <= 1'b1;
                 sram_WEB        <= 1'b1;
@@ -688,7 +702,7 @@ module gemm_sram_top_tb;
         end
     endtask
 
-    // ─── main sequence ─────────────────────────────────────────────
+    // ─── 메인 시퀀스 (INIT → LOAD → CONFIG → DRIVE → DRAIN → DUMP) ──
     integer i, b;
     reg [8*512-1:0] dump_path;
     reg [8*512-1:0] in_path_a_bs, in_path_b, in_path_a_sc, in_path_b_sc;
@@ -710,13 +724,13 @@ module gemm_sram_top_tb;
         sram_idle;
 
         // ───── LOAD ─────
-        // Naming convention (matches MXP_Tools emit + MXP reference TBs):
-        //   - mem_a (in TB) = WEIGHT (bit-serial, fed to SA `in_a`).
-        //     File `a_input_BS_mxint{P}.hex` where P = WEIGHT precision = B_PREC.
-        //   - mem_b (in TB) = ACTIVATION (byte-parallel, fed to SA `in_b`).
-        //     File `b_input_mxint{P}.hex` where P = ACTIVATION precision = A_PREC.
-        //   - a_scale, b_scale follow same convention.
-        // (Task 7 worked only because A_PREC == B_PREC == 8 made the swap invisible.)
+        // 파일명 규칙 (MXP_Tools emit + MXP 레퍼런스 TB 와 일치):
+        //   - mem_a (TB 내) = WEIGHT (bit-serial, SA `in_a` 라인).
+        //     파일 `a_input_BS_mxint{P}.hex`, P = WEIGHT 정밀도 = B_PREC.
+        //   - mem_b (TB 내) = ACTIVATION (byte-parallel, SA `in_b` 라인).
+        //     파일 `b_input_mxint{P}.hex`, P = ACTIVATION 정밀도 = A_PREC.
+        //   - a_scale, b_scale 도 같은 컨벤션.
+        // (Task 7 시 A_PREC == B_PREC == 8 라서 swap 버그가 보이지 않았던 부분.)
         $sformat(in_path_a_bs, "%0s/hw_input/a_input_BS_mxint%0d.hex", WORK_DIR, B_PREC);
         $sformat(in_path_b,    "%0s/hw_input/b_input_mxint%0d.hex",    WORK_DIR, A_PREC);
         $sformat(in_path_a_sc, "%0s/hw_input/a_scale_mxint%0d.hex",    WORK_DIR, B_PREC);
@@ -728,19 +742,19 @@ module gemm_sram_top_tb;
         $display("LOAD OK: a_bs[0]=%h b_bp[0]=%h a_scale[0]=%h b_scale[0]=%h",
                  a_bs[0], b_bp[0], a_scale[0], b_scale[0]);
 
-        // ───── CONFIG: per-mode constants from {A_PREC, B_PREC} ─────
+        // ───── CONFIG: {A_PREC, B_PREC} 으로 모드별 상수 디스패치 ─────
         //
-        // Source: precision_modes_protocol.md §1 Mode Matrix (v1.0, validated 2026-05-11).
-        // Notation: A∈{8,4,2} → A_INT8/4/2 (Mode_oh in Accumulator_Col),
-        //           W∈{8,4,2} → cnt rollover threshold (Accumulator internal).
+        // 출처: precision_modes_protocol.md §1 Mode Matrix (v1.0, 2026-05-11 검증).
+        // 기호: A∈{8,4,2} → A_INT8/4/2 (Accumulator_Col 의 Mode_oh),
+        //       W∈{8,4,2} → Accumulator 내부 cnt rollover threshold.
         //
-        // !!! KEEP IN SYNC: any change to these per-mode values must also update
-        // precision_modes_protocol.md §1 / §3. Drift between this case and the
-        // protocol doc was the source of Task 8's TOGGLE_VAL (A8W4, A4W8) bug.
-        // Re-run `bash sim/run_integration_sweep.sh` after any edit — 9/9 PASS
-        // is the regression gate.
+        // !!! 동기화 주의: 이 case 값과 precision_modes_protocol.md §1/§3 은
+        // 반드시 같아야 함. Task 8 에서 둘 사이 drift 때문에 TOGGLE_VAL
+        // (A8W4, A4W8) 버그가 났었음. 값을 손대면
+        // `bash sim/run_integration_sweep.sh` → "ALL 9 MODES PASSED" 가
+        // 회귀 게이트.
         case ({A_PREC[3:0], B_PREC[3:0]})
-            // A8 row: A_FIRE_DELAY=2, N_T_LOGICAL=4, FIRES_PER_COL=2048
+            // A8 행: A_FIRE_DELAY=2, N_T_LOGICAL=4, FIRES_PER_COL=2048
             {4'd8, 4'd8}: begin
                 W_CYC=8; A_FIRE_DELAY=2; FIRST_FIRE_GLOBAL=28; TOGGLE_VAL=24;
                 FIRES_PER_COL=2048; N_T_LOGICAL=4;
@@ -756,7 +770,7 @@ module gemm_sram_top_tb;
                 FIRES_PER_COL=2048; N_T_LOGICAL=4;
                 A_CTRL_CODE=A_INT8; W_CTRL_CODE=W_INT2;
             end
-            // A4 row: A_FIRE_DELAY=1, N_T_LOGICAL=2, FIRES_PER_COL=1024
+            // A4 행: A_FIRE_DELAY=1, N_T_LOGICAL=2, FIRES_PER_COL=1024
             {4'd4, 4'd8}: begin
                 W_CYC=8; A_FIRE_DELAY=1; FIRST_FIRE_GLOBAL=27; TOGGLE_VAL=23;
                 FIRES_PER_COL=1024; N_T_LOGICAL=2;
@@ -772,7 +786,7 @@ module gemm_sram_top_tb;
                 FIRES_PER_COL=1024; N_T_LOGICAL=2;
                 A_CTRL_CODE=A_INT4; W_CTRL_CODE=W_INT2;
             end
-            // A2 row: A_FIRE_DELAY=0, N_T_LOGICAL=1, FIRES_PER_COL=512
+            // A2 행: A_FIRE_DELAY=0, N_T_LOGICAL=1, FIRES_PER_COL=512
             {4'd2, 4'd8}: begin
                 W_CYC=8; A_FIRE_DELAY=0; FIRST_FIRE_GLOBAL=26; TOGGLE_VAL=22;
                 FIRES_PER_COL=512; N_T_LOGICAL=1;
@@ -798,7 +812,7 @@ module gemm_sram_top_tb;
                  A_PREC, B_PREC, W_CYC, A_FIRE_DELAY, FIRST_FIRE_GLOBAL, TOGGLE_VAL,
                  FIRES_PER_COL, N_T_LOGICAL);
 
-        // ───── CONFIG (idle hold for chain settle) ─────
+        // ───── CONFIG 후 idle 유지 (chain settle) ─────
         in_Station_control  <= A_IDLE;
         in_Wcontrol         <= W_IDLE;
         in_loadEN           <= 0;
@@ -813,10 +827,10 @@ module gemm_sram_top_tb;
         @(posedge clk); @(posedge clk); @(posedge clk); @(posedge clk);
 
         // ───── DRIVE ─────
-        drive_stage_2a(0, 0);          // Stage 2-A: initial B load (n_t=0, k_t=0)
+        drive_stage_2a(0, 0);          // Stage 2-A: 초기 B load (n_t=0, k_t=0)
         drive_stage_2b;                // Stage 2-B: settle + Buf1 toggle
-        drive_stage_3_4;               // Stage 3+4: MAC sweep (also enables capture_en)
-        drive_stage_5_tail;            // Stage 5: tail + close capture
+        drive_stage_3_4;               // Stage 3+4: MAC sweep (capture_en 도 켬)
+        drive_stage_5_tail;            // Stage 5: tail + capture 종료
 
         $display("DRIVE DONE: captured %0d fires (expected up to 65536)", fifo_wp);
 
@@ -853,9 +867,9 @@ module gemm_sram_top_tb;
         $finish;
     end
 
-    // ─── timeout safety ────────────────────────────────────────────
+    // ─── timeout 안전장치 ──────────────────────────────────────────
     initial begin
-        #50_000_000;   // 50 ms = 5_000_000 cycles @ 100 MHz
+        #50_000_000;   // 50 ms = 5_000_000 cycles @ 100 MHz (정상 sim 의 ~10 배)
         $display("ERROR: timeout");
         $finish;
     end

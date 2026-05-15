@@ -1,17 +1,23 @@
 `timescale 1ns/1ps
 //-----------------------------------------------------------------------------
-// accumulator_col_elab.v — elaboration-only sanity TB for Accumulator_Col.
+// accumulator_col_elab.v — Accumulator_Col 의 elaboration-only sanity TB.
 //
-// Purpose: force xelab to parse + bind the project-local copy of
-// Accumulator_Col.v after the IMPLICIT_total subtraction edit (Task 8).
-// No simulation run required; we only need elab to succeed with zero errors.
+// 검증 목적:
+//   ../MXP 에서 가져온 Accumulator_Col.v 의 프로젝트-로컬 사본을 RMW 작업 중
+//   "IMPLICIT_total 보정" 패치한 뒤, xelab 단계에서 파라미터/포트가 깨지지
+//   않고 정상적으로 binding 되는지만 본다 (Task 8 의 사전 점검 단계).
+//
+// 시뮬레이션을 돌리지 않는다:
+//   - 모든 입력은 0 으로 묶고 클록도 토글하지 않음.
+//   - $display 한 줄로 elab 통과 신호만 남김.
+//   - 목표는 "xelab errors=0" 그 자체.
 //
 // Spec: docs/superpowers/specs/2026-05-14-rmw-design.md (Q3a).
 //-----------------------------------------------------------------------------
 
 module accumulator_col_elab;
 
-    // Default-parameter instantiation. All inputs tied to constants.
+    // 기본 파라미터로 한 번 인스턴스화 (모든 입력 상수 결선).
     reg                 clk = 1'b0;
     reg                 rst = 1'b1;
     wire signed  [6:0]  in_a0 = 7'sd0;
