@@ -42,35 +42,60 @@
 - 재검증: pytest 43/43 PASS → `bash sim/run_rmw.sh` 71/71 PASS → `bash sim/run_integration_sweep.sh` 9/9 PASS
 - 다음 세션에서 업스트림 변경분이 또 들어오면 메모리 `reference_mxp_tools_upstream.md` 참고해서 동일 절차로 동기화.
 
+**완성 — phase 3 (RMW 32× col-parallel, 2026-05-15)**
+- `sram_1rw_banked_mp.v` (per-bank port-exposed, NB=32, depth=1024).
+- `gemm_sram_top.v` 32-RMW + 32-bank generate.
+- `tb/gemm_sram_top_tb.v` 32-stream capture/drain (per-col FIFO + parallel state-machine drain).
+- MXP_Tools `interleaved_row_major_32bank` layout (32-bank compare).
+- 검증: 9/9 PASS (`bash sim/run_integration_sweep.sh`), wall-clock **633s ≈ 10.5 min** (이전 1-RMW sweep ~20-25 min 대비 약 2× 단축).
+- 산출 commit: f102756 (wrapper) → c4ae7fc (MXP_Tools) → 3d21544 (top) → 20f60e6 (TB) → 76bb597 (cleanup) → 326ce1f (sweep).
+
 **잠정 결정값** (재검토 트리거는 `CLAUDE.md` "Settled — with re-visit triggers" 표 참고)
-- RMW instance: **1개** (TB-side mode-aware dispatch)
+- RMW instance: **32개** (col-parallel, per-bank SRAM port)
 - Loop order: **K-outermost** (`n_t → k_t → m_t → o`)
 - 워크로드: **M=K=N=128**
-- Bank strategy: **INTERLEAVED** (16 banks × 1024 word 사용 = 16384 elements)
+- Bank strategy: **per-bank port 노출** (col j → bank j, 충돌 0; NUM_BANKS=32, BANK_DEPTH=1024)
 - SRAM PIPELINE: **0** (read latency 1 cyc)
 
 ---
 
 ## 다음 단계 후보 (사용자 선택)
 
-### 1. Throughput 확장 — RMW 다중 instance
+### ~~1. Throughput 확장 — RMW 다중 instance~~ ✓ 완료 (phase 3)
 
-현재 RMW 1개로 65536 fire 를 직렬 dispatch. K-tile / m-tile 별 fire 가 burst 로 몰리는 구간에서 SRAM bank-level 병목 발생 가능. 후보 변경:
+RMW 32 col-parallel + 32-bank per-bank port 로 완성. sweep wall-clock 633s ≈ 10.5 min (이전 ~20-25 min 대비 2×). 이 항목은 닫힘.
 
-- RMW 2개로 늘려서 A2 mode 의 4-lane × 32-col fire 를 두 갈래로 분산
-- RMW 4개 + per-col 가벼운 arbiter
-- 각 옵션의 sim 시간 / 합성 후 cycle count 비교
+---
 
-(영향 파일: `gemm_sram_top.v` 구조 변경, `tb/gemm_sram_top_tb.v` dispatcher 분기, 그리고 spec § 9 "RMW instance 수" 항목 갱신)
+### 1. Real-time drain — DRIVE 와 DRAIN 동시 진행
 
-### 2. Timing closure — Vivado 합성
+현재 capture/replay 모델 (DRIVE 완료 후 DRAIN 직렬). fire 즉시 per-col RMW → SRAM write 가 overlap 하면 추가 sim time 단축 가능. 필요 변경:
+
+- TB drain loop 를 DRIVE clock 과 interleave (per-col FIFO 는 이미 있음)
+- back-pressure 처리 (FIFO full 시 DRIVE stall)
+
+### 2. SRAM multi-port 진짜 활용
+
+현재 `sram_1rw_banked_mp.v` 는 1RW × 32 bank. leaf 를 1R1W / 2RW 로 교체하면 read + write 동시 → latency overlap → throughput 추가 향상 가능.
+
+- `sram_1rw.v` 를 1R1W 로 파생 (upstream sram repo 에서 spec 작성 필요)
+- RMW 의 READ 와 다음 WRITE 사이 latency 를 hiding
+
+### 3. Timing closure — Vivado 합성
 
 - target: 250 MHz @ xc7vx485 (MXP standalone 의 closure 결과 답습)
 - 합성 진입 전 readiness check: `gemm_sram.xpr` open → "Run Synthesis" 무에러
 - 잠재적 critical path: HardFloat `addRecFN`, GEMM 의 station chain, SRAM 의 1RW write
 - 새 spec/plan 필요 (timing closure 는 별도 workflow)
 
-### 3. Future scope — SRAM 을 weight (B input) 저장소로
+### 4. 9-mode 자동 회귀 CI
+
+`sim/run_integration_sweep.sh` 를 CI (GitHub Actions / 로컬 cron) 로 묶음. 변경 사항이 RTL / TB / MXP_Tools 어디든 닿을 때마다 9/9 PASS 자동 회귀.
+
+- 633s sweep (≈ 10.5 min) — nightly 가 자연스러움
+- 또는 modes={A8_B8, A2_B2} 만 빠르게 PR-time 에 돌리고, 나머지 7 modes 는 nightly
+
+### 5. Future scope — SRAM 을 weight (B input) 저장소로
 
 현재 `tb/gemm_sram_top_tb.v` 는 `$readmemh` 로 `in_b` 를 직접 driving. HW deployment 시 B 도 SRAM 에서 읽도록 변경하려면:
 
@@ -80,21 +105,14 @@
 
 별도 spec 작성 필요. 통합 spec § 1 "Future scope" 에 명시.
 
-### 4. 9-mode 자동 회귀 CI
-
-`sim/run_integration_sweep.sh` 를 CI (GitHub Actions / 로컬 cron) 로 묶음. 변경 사항이 RTL / TB / MXP_Tools 어디든 닿을 때마다 9/9 PASS 자동 회귀.
-
-- 20-25 min sweep — nightly 가 자연스러움
-- 또는 modes={A8_B8, A2_B2} 만 빠르게 PR-time 에 돌리고, 나머지 7 modes 는 nightly
-
 ---
 
 ## 새 spec/plan 작성 흐름
 
-위 4가지 중 하나로 진행 결정 시:
+위 5가지 중 하나로 진행 결정 시:
 
 1. `superpowers:brainstorming` → 결정 사항 정리 → `docs/superpowers/specs/2026-MM-DD-<topic>.md`
 2. `superpowers:writing-plans` → `docs/superpowers/plans/2026-MM-DD-<topic>.md`
 3. `superpowers:executing-plans` (혹은 `superpowers:subagent-driven-development`) 로 진행
 
-이전 두 phase (RMW unit, 통합) 가 같은 흐름으로 굴러갔음. 답습하면 됨.
+이전 세 phase (RMW unit, 통합, RMW 32× col-parallel) 가 같은 흐름으로 굴러갔음. 답습하면 됨.
