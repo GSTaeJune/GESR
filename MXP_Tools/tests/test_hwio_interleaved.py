@@ -23,3 +23,22 @@ def test_interleaved_row_major_round_trip():
 
 def test_interleaved_row_major_out_of_range():
     assert hwio.interleaved_row_major_16bank(0, 9999, 128, 128) is None
+
+
+def test_interleaved_row_major_32bank_round_trip():
+    """col-parallel RMW design: bank = flat % 32, word = flat // 32."""
+    M, N = 128, 128
+    flat = lambda m, n: m * N + n
+    bank = lambda f: f % 32
+    word = lambda f: f // 32
+
+    for m, n in [(0, 0), (0, 31), (0, 32), (1, 0), (127, 127), (63, 31), (5, 96)]:
+        f = flat(m, n)
+        b = bank(f)
+        w = word(f)
+        result = hwio.interleaved_row_major_32bank(b, w, M, N)
+        assert result == (m, n), f"({m},{n})→bank{b}/word{w}→{result}"
+
+
+def test_interleaved_row_major_32bank_out_of_range():
+    assert hwio.interleaved_row_major_32bank(0, 9999, 128, 128) is None

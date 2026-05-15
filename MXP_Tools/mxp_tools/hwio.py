@@ -160,6 +160,21 @@ def interleaved_row_major_16bank(bank_idx, word_offset, M, N):
     return divmod(flat, N)
 
 
+def interleaved_row_major_32bank(bank_idx, word_offset, M, N):
+    """C[m,n] = SRAM[bank=flat%32, word=flat//32] where flat = m*N+n.
+
+    col-parallel RMW (32 instance) 의 매핑. col j 의 RMW 가 자기 bank j
+    만 건드림 — 128 % 32 = 0 이므로 모든 mode (A8/A4/A2) 에서 충돌 0.
+
+    Used by: gemm_sram integration testbench (32-RMW phase)
+    Spec   : docs/superpowers/specs/2026-05-15-rmw-32x-design.md §4
+    """
+    flat = word_offset * 32 + bank_idx
+    if flat >= M * N:
+        return None
+    return divmod(flat, N)
+
+
 def gather_banks(bank_paths, M, N, mapping, reader=read_writememh_fp32):
     """Reconstruct C_hw (M, N) from per-bank .mem files via `mapping`.
 
