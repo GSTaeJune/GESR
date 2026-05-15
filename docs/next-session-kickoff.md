@@ -27,6 +27,21 @@
   코드 로직 무변경 (comment-only), 단위 + 통합 회귀 PASS 후 commit. HEAD = `92d6b1e`.
 - 다음 세션 진입 시 임의의 TB 를 열어서 헤더만 봐도 그 TB 가 뭘 검증하는지 즉시 파악 가능.
 
+**완성 — MXP_Tools 업스트림 동기화 (2026-05-15)**
+- 업스트림 `~/Desktop/Desktop/MXP_Tools` 에서 들어온 버그 픽스 머지:
+  - `compare.py` — NaN/Inf-aware 통계 (이제 fully-NaN HW 출력이 "0 mismatches" 로 안 보임)
+  - `hwio.py` — `@addr` writememh 파서 (sparse dump 정렬), gather_banks duplicate-write detection,
+    `_require_block_multiple` enforcement, LF-only newline 고정
+  - `quant.py` — NaN/Inf 입력 거부 (이전엔 downstream OverflowError 로 묻힘)
+  - `cli.py` — `cmd_emit` 의 ab_fp32.npz shape validation
+  - `viz.py` — inf 라벨 표시 개선
+  - `gemm.py` — bit-exactness contract docstring 추가
+- 프로젝트 전용 추가분 보존: `rmw_gen.py`, cli `rmw-gen`, hwio `interleaved_row_major_16bank`, `test_hwio_interleaved.py`
+- pytest 슈트 신규 도입 — `tests/test_{compare,gemm,hwio,quant}.py` + 기존 interleaved 테스트 = **43/43 PASS**
+- `pyproject.toml` 추가 — `pip install -e .` 가능, pytest config 도 여기서 잡힘
+- 재검증: pytest 43/43 PASS → `bash sim/run_rmw.sh` 71/71 PASS → `bash sim/run_integration_sweep.sh` 9/9 PASS
+- 다음 세션에서 업스트림 변경분이 또 들어오면 메모리 `reference_mxp_tools_upstream.md` 참고해서 동일 절차로 동기화.
+
 **잠정 결정값** (재검토 트리거는 `CLAUDE.md` "Settled — with re-visit triggers" 표 참고)
 - RMW instance: **1개** (TB-side mode-aware dispatch)
 - Loop order: **K-outermost** (`n_t → k_t → m_t → o`)

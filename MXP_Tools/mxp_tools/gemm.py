@@ -11,6 +11,14 @@ Per OCP MX Spec §6.3.2:
 
 Per-block scale application is mandatory — scales differ per block, so an
 int32 accumulation across blocks followed by a single scale would be wrong.
+
+Bit-exactness contract:
+    `C += block_fp` accumulates blocks in K-tile order (block 0, 1, 2, ...)
+    using a single FP32 accumulator. HW that uses a different reduction
+    tree (e.g., pairwise), a wider accumulator (FP64 / extended), or fused
+    multiply-add ordering will produce different FP32 round-off and may
+    show non-zero `C_hw - C_sw` even with bit-correct PE math. If your
+    bring-up sees that, suspect accumulation order before chasing PE bugs.
 """
 import numpy as np
 

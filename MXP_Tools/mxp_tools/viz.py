@@ -70,25 +70,38 @@ def summary_dashboard(results_per_mode, savepath=None, metric="rmse"):
     pair_keys = ("hw_sw", "sw_fp32", "hw_fp32")
     pair_titles = ("HW − SW (correctness)", "SW − FP32 (quant err)", "HW − FP32 (total)")
     for ax, pkey, ptitle in zip(axes, pair_keys, pair_titles):
-        grid = np.zeros((len(precs), len(precs)), dtype=np.float64)
+        # raw grid keeps inf for label display; plot_grid masks inf to NaN
+        # so imshow's colormap doesn't saturate the whole panel on one cell.
+        raw_grid = np.full((len(precs), len(precs)), np.nan, dtype=np.float64)
         for i, pa in enumerate(precs):
             for j, pb in enumerate(precs):
                 key = f"mxint{pa}_mxint{pb}"
-                if key not in results_per_mode:
-                    grid[i, j] = np.nan
-                else:
-                    grid[i, j] = results_per_mode[key]["stats"][pkey][metric]
-        im = ax.imshow(grid, aspect="auto", cmap="magma")
+                if key in results_per_mode:
+                    raw_grid[i, j] = results_per_mode[key]["stats"][pkey][metric]
+        plot_grid = raw_grid.copy()
+        plot_grid[~np.isfinite(plot_grid)] = np.nan
+
+        im = ax.imshow(plot_grid, aspect="auto", cmap="magma")
         ax.set_xticks(range(len(precs)), [f"B={p}" for p in precs])
         ax.set_yticks(range(len(precs)), [f"A={p}" for p in precs])
         ax.set_title(f"{ptitle}\n{metric}")
+        finite_mean = np.nanmean(plot_grid) if np.isfinite(plot_grid).any() else 0.0
         for i in range(len(precs)):
             for j in range(len(precs)):
-                v = grid[i, j]
-                txt = "—" if np.isnan(v) else (f"{v:.2e}" if abs(v) < 1e-1 or abs(v) >= 1e3 else f"{v:.3f}")
-                ax.text(j, i, txt, ha="center", va="center",
-                        color="white" if np.isfinite(v) and v > np.nanmean(grid) else "black",
-                        fontsize=9)
+                v = raw_grid[i, j]
+                if np.isnan(v):
+                    txt = "—"
+                elif np.isposinf(v):
+                    txt = "+inf"
+                elif np.isneginf(v):
+                    txt = "-inf"
+                elif abs(v) < 1e-1 or abs(v) >= 1e3:
+                    txt = f"{v:.2e}"
+                else:
+                    txt = f"{v:.3f}"
+                pv = plot_grid[i, j]
+                color = "white" if np.isfinite(pv) and pv > finite_mean else "black"
+                ax.text(j, i, txt, ha="center", va="center", color=color, fontsize=9)
         fig.colorbar(im, ax=ax, fraction=0.046)
 
     fig.suptitle(f"MXP 9-mode summary — {metric}")

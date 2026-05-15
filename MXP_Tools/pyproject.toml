@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mxp_tools"
+version = "0.1.0"
+description = "FPGA bring-up / verification helper for the MXP accelerator. Numpy-only, OCP MX Spec §6.3 aligned."
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.20"]
+
+[project.optional-dependencies]
+viz = ["matplotlib>=3.5"]
+dev = ["pytest>=7", "matplotlib>=3.5"]
+
+[project.scripts]
+mxp-tools = "mxp_tools.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mxp_tools*"]
+exclude = ["tests*", "examples*", "work*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

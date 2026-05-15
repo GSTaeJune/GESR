@@ -24,18 +24,32 @@ def quantize_block_mx(block_fp32, prec):
         raise ValueError(f"block_fp32 must be shape ({BLOCK_SIZE},), got {block_fp32.shape}")
     if prec not in IMPLICIT_SCALE_EXP:
         raise ValueError(f"prec must be in {sorted(IMPLICIT_SCALE_EXP)}, got {prec}")
+    if not np.isfinite(block_fp32).all():
+        raise ValueError(
+            "block_fp32 contains NaN or Inf — MX quant has no defined behavior "
+            "for non-finite inputs. Filter or replace upstream."
+        )
 
     max_int = MAX_INT[prec]
     implicit_inv = 1 << IMPLICIT_SCALE_EXP[prec]
 
     max_abs = float(np.max(np.abs(block_fp32)))
     if max_abs == 0:
+        # OCP MX zero-block convention: emit e8m0=0 (biased exp 0 → 2^-127).
+        # The int mantissa is also 0, so the product is exactly 0 regardless
+        # of how HW dequantizes the scale. If your HW special-cases e8m0=0
+        # as a "NaN scale" sentinel, dequant will still yield 0 because the
+        # mantissa is 0 — but document the assumption with your HW vendor.
         return np.zeros(BLOCK_SIZE, dtype=np.int8), np.uint8(0)
 
     floor_log2 = int(np.floor(np.log2(max_abs)))
     e8m0 = int(np.clip(floor_log2 + 127, 0, 254))
     scale = 2.0 ** (e8m0 - 127)
 
+    # Rounding: np.round uses banker's rounding (round-half-to-even, IEEE-754
+    # default). OCP MX Spec leaves rounding mode unspecified; if your HW uses
+    # round-half-away-from-zero instead, expect ±1 ULP mismatch at the *.5
+    # boundary in C_hw - C_sw. Confirm with HW vendor.
     raw = np.round(block_fp32.astype(np.float64) / scale * implicit_inv).astype(np.int32)
     raw = np.clip(raw, -max_int, max_int).astype(np.int8)
     return raw, np.uint8(e8m0)

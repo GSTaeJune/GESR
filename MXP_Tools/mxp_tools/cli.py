@@ -51,6 +51,14 @@ def cmd_gen(args):
 def cmd_emit(args):
     data = np.load(os.path.join(args.out, "ab_fp32.npz"))
     A, B = data["A"], data["B"]
+    if A.ndim != 2 or B.ndim != 2:
+        raise ValueError(f"A, B must be 2-D; got A.ndim={A.ndim}, B.ndim={B.ndim}")
+    if A.shape[1] != B.shape[0]:
+        raise ValueError(
+            f"shape mismatch in ab_fp32.npz: A.shape[1]={A.shape[1]} != "
+            f"B.shape[0]={B.shape[0]}. C_fp32 in this npz won't match the "
+            f"emitted multiply."
+        )
     M, K = A.shape
     _, N = B.shape
 
