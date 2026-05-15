@@ -1,15 +1,17 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////
-// gemm_sram_top — GEMM + RMW + sram_1rw_banked 묶음 (pure structural).
+// gemm_sram_top — GEMM + RMW[32] + sram_1rw_banked_mp 묶음 (pure structural).
 // 모든 control 신호는 TB 가 driving (controller 없음).
-// 내부 wiring: 두 줄 (sram_Q ─► rmw.in_SRAM, mux(sram_D_use_zero) ─► sram.D).
 //
-// Spec: docs/superpowers/specs/2026-05-14-integration-design.md
+// col j 의 RMW[j] 가 자기 bank[j] 만 건드림 (col-parallel). 매 cycle 최대
+// 32 개의 독립 R/W 가능. 매핑 책임은 호출자 (TB).
+//
+// Spec: docs/superpowers/specs/2026-05-15-rmw-32x-design.md
 //////////////////////////////////////////////////////////////////////////////
 
 module gemm_sram_top #(
-    parameter NUM_BANKS  = 16,
-    parameter BANK_DEPTH = 32768
+    parameter NUM_BANKS  = 32,
+    parameter BANK_DEPTH = 1024
 )(
     input  wire        clk,
     input  wire        rst,
@@ -30,19 +32,18 @@ module gemm_sram_top #(
     output wire [32*36-1:0]                  out_scale,
     output wire [32-1:0]                     out_fire,
 
-    // ───── RMW input (TB 가 직접 발사) ─────
-    input  wire [31:0]                       rmw_in_GEMM,
-    input  wire [8:0]                        rmw_scale,
-    output wire [31:0]                       rmw_out_RMW,        // probe
+    // ───── RMW 32 lane input (TB 가 각 lane 별 직접 발사) ─────
+    input  wire [NUM_BANKS*32-1:0]           rmw_in_GEMM,    // flat slice
+    input  wire [NUM_BANKS*9-1:0]            rmw_scale,      // flat slice
+    output wire [NUM_BANKS*32-1:0]           rmw_out_RMW,    // probe (flat)
 
-    // ───── SRAM control (TB 가 직접 발사) ─────
-    // sram_A width tracks NUM_BANKS / BANK_DEPTH (default: clog2(16)+clog2(32768)=19).
-    input  wire                              sram_CEB,
-    input  wire                              sram_WEB,
-    input  wire [$clog2(NUM_BANKS)+$clog2(BANK_DEPTH)-1:0] sram_A,
-    input  wire [31:0]                       sram_WMASK,
-    input  wire                              sram_D_use_zero,    // 1=D 강제 0, 0=RMW 출력
-    output wire [31:0]                       sram_Q              // probe
+    // ───── SRAM 32 bank control (TB 가 각 bank 별 직접 발사) ─────
+    input  wire [NUM_BANKS-1:0]                                CEB,
+    input  wire [NUM_BANKS-1:0]                                WEB,
+    input  wire [NUM_BANKS*$clog2(BANK_DEPTH)-1:0]             A,
+    input  wire [NUM_BANKS*32-1:0]                             WMASK,
+    input  wire                                                sram_D_use_zero,  // 모든 bank 공통
+    output wire [NUM_BANKS*32-1:0]                             Q                 // probe (flat)
 );
 
     // ─── GEMM ──────────────────────────────────────────────────────
@@ -62,35 +63,39 @@ module gemm_sram_top #(
         .out_fire(out_fire)
     );
 
-    // ─── RMW ───────────────────────────────────────────────────────
-    wire [31:0] rmw_out_w;
-    RMW u_rmw (
-        .clk(clk), .rst(rst),
-        .in_SRAM(sram_Q),
-        .in_GEMM(rmw_in_GEMM),
-        .scale(rmw_scale),
-        .out_RMW(rmw_out_w)
-    );
-    assign rmw_out_RMW = rmw_out_w;
+    // ─── RMW[32] + SRAM bank D-mux per col ─────────────────────────
+    wire [NUM_BANKS*32-1:0] sram_D_w;
+    genvar c;
+    generate
+        for (c = 0; c < NUM_BANKS; c = c + 1) begin : g_lane
+            wire [31:0] rmw_out_c;
+            RMW u_rmw (
+                .clk    (clk),
+                .rst    (rst),
+                .in_SRAM(Q          [c*32 +: 32]),
+                .in_GEMM(rmw_in_GEMM[c*32 +: 32]),
+                .scale  (rmw_scale  [c*9  +: 9 ]),
+                .out_RMW(rmw_out_c)
+            );
+            assign rmw_out_RMW[c*32 +: 32] = rmw_out_c;
+            assign sram_D_w  [c*32 +: 32] = sram_D_use_zero ? 32'h00000000 : rmw_out_c;
+        end
+    endgenerate
 
-    // ─── SRAM D 입력 mux (zero priming 단계 우회용) ─────────────────
-    wire [31:0] sram_D_w = sram_D_use_zero ? 32'h00000000 : rmw_out_w;
-
-    // ─── SRAM banked ───────────────────────────────────────────────
-    sram_1rw_banked #(
-        .DATA_WIDTH    (32),
-        .NUM_BANKS     (NUM_BANKS),
-        .BANK_DEPTH    (BANK_DEPTH),
-        .BANK_STRATEGY ("INTERLEAVED"),
-        .PIPELINE      (0)
+    // ─── SRAM (per-bank port) ──────────────────────────────────────
+    sram_1rw_banked_mp #(
+        .DATA_WIDTH (32),
+        .NUM_BANKS  (NUM_BANKS),
+        .BANK_DEPTH (BANK_DEPTH),
+        .PIPELINE   (0)
     ) u_sram (
         .CLK   (clk),
-        .CEB   (sram_CEB),
-        .WEB   (sram_WEB),
-        .A     (sram_A),
+        .CEB   (CEB),
+        .WEB   (WEB),
+        .A     (A),
         .D     (sram_D_w),
-        .WMASK (sram_WMASK),
-        .Q     (sram_Q)
+        .WMASK (WMASK),
+        .Q     (Q)
     );
 
 endmodule

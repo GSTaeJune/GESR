@@ -17,6 +17,7 @@ xvlog -sv \
     $SRC_ROOT/new/int_to_fp32.v \
     $SRC_ROOT/new/fp32_adder.v \
     $SRC_ROOT/new/RMW.v \
+    $SRC_ROOT/new/sram_1rw_banked_mp.v \
     $SRC_ROOT/new/GEMM.v \
     $SRC_ROOT/new/gemm_sram_top.v
 
