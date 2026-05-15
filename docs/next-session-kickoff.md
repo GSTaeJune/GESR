@@ -15,12 +15,17 @@
 
 **완성 — phase 2 (시스템 통합, 2026-05-15)**
 - `gemm_sram_top.v` (pure structural wrapper, GEMM + RMW + sram_1rw_banked + 1-bit zero-prime mux)
-- `tb/gemm_sram_top_tb.v` (단일 9-mode plusarg-driven TB, 857 lines)
+- `tb/gemm_sram_top_tb.v` (단일 9-mode plusarg-driven TB, 870+ lines)
 - `sim/run_integration_one.sh` / `sweep.sh` / `parallel.sh`
 - `MXP_Tools/mxp_tools/hwio.py::interleaved_row_major_16bank` 매핑 + `compare --layout` 분기
 - `int_to_fp32.v` zero-passthrough 버그 fix (in_int=0 + scale≠127 케이스)
 - TOGGLE_VAL 확정값 (A8W4=22, A4W8=23 — `precision_modes_protocol.md` §3 의 TBD 해결)
 - 검증: `bash sim/run_integration_sweep.sh` → **9/9 PASS** (A,B ∈ {2,4,8}, 각 128×128 bit-exact)
+
+**완성 — 부수 작업 (TB 한글 주석, 2026-05-15)**
+- TB 6개 (`tb/*.v`) 헤더와 본문 주석 한글화 — 파일별 "검증 목적 / 검증 내용 / 동작 의도" 명시.
+  코드 로직 무변경 (comment-only), 단위 + 통합 회귀 PASS 후 commit. HEAD = `92d6b1e`.
+- 다음 세션 진입 시 임의의 TB 를 열어서 헤더만 봐도 그 TB 가 뭘 검증하는지 즉시 파악 가능.
 
 **잠정 결정값** (재검토 트리거는 `CLAUDE.md` "Settled — with re-visit triggers" 표 참고)
 - RMW instance: **1개** (TB-side mode-aware dispatch)
