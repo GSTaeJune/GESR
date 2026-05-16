@@ -27,6 +27,39 @@
 //                 외부 compare 가 MXP_Tools golden npz 와 비트 단위 비교.
 //
 // 회귀 게이트: `bash sim/run_integration_sweep.sh` → "ALL 9 MODES PASSED".
+//
+// ─── Vivado GUI 에서 돌리는 절차 ────────────────────────────────────────
+//   sim top: `gemm_sram_top_tb` (Vivado 가 .xpr 의 sim_1 fileset 에서 자동 인식).
+//
+//   1) Hex 입력 미리 준비 (project root 에서):
+//        cd MXP_Tools
+//        python -m mxp_tools gen   --out ../work/A8_B8 -M 128 -K 128 -N 128 --seed 0
+//        python -m mxp_tools emit  --out ../work/A8_B8
+//        python -m mxp_tools ref   --out ../work/A8_B8 --prec-a 8 --prec-b 8
+//        mkdir -p ../work/A8_B8/hw_out
+//   2) Vivado 에서 `gemm_sram.xpr` 열기.
+//   3) Flow Navigator → Simulation → Simulation Settings → Simulation tab:
+//        xsim.simulate.xsim.more_options 에 plusarg 추가
+//        예) -testplusarg "A_PREC=8" -testplusarg "B_PREC=8"
+//            -testplusarg "WORK_DIR=../../../../work/A8_B8"
+//            -testplusarg "DUMP_DIR=../../../../work/A8_B8/hw_out"
+//        (path 는 Vivado sim 스크래치 디렉토리
+//         `gemm_sram.sim/sim_1/behav/xsim/` 기준 상대경로.)
+//   4) Flow Navigator → Run Simulation → Run Behavioral Simulation.
+//   5) Tcl Console 에서 PASS/FAIL 배너 확인 (sim 종료 직전 출력).
+//      비트 정확도 검증은 sim 종료 후 외부 compare 실행:
+//        cd MXP_Tools
+//        BANKS=$(printf "../work/A8_B8/hw_out/bank%d.mem " {0..31})
+//        python -m mxp_tools compare \
+//          --ref ../work/A8_B8/sw_ref/C_sw_mxint8_mxint8.npz \
+//          --hw-banks ${BANKS} --layout interleaved_row_major_32bank
+//
+// PASS/FAIL 배너 의미:
+//   TB 자체는 구조적 invariant 만 in-sim 검증:
+//     - 캡처 총 push 수 == 드레인 총 pop 수 == EXPECTED (65536)
+//     - bank-col 매핑 assert 가 한 번도 $finish FATAL 트리거 안 함
+//     - 32 bank dump 파일이 모두 정상 open
+//   비트 정확도 (FP32 값 일치) 는 외부 Python compare 가 담당.
 //////////////////////////////////////////////////////////////////////////////
 
 module gemm_sram_top_tb;
@@ -59,6 +92,16 @@ module gemm_sram_top_tb;
     integer W_CYC, A_FIRE_DELAY, FIRST_FIRE_GLOBAL, TOGGLE_VAL;
     integer FIRES_PER_COL, N_T_LOGICAL;
     reg [1:0] A_CTRL_CODE, W_CTRL_CODE;
+
+    // ─── PASS/FAIL 구조적 검증용 카운터 ───────────────────────────
+    // EXPECTED_TOTAL 은 mode 무관 — 32 col × 2048 RMW/col 곱.
+    //   A8: 2048 fires × 1 lane = 2048 RMW/col
+    //   A4: 1024 fires × 2 lane = 2048
+    //   A2:  512 fires × 4 lane = 2048
+    //   → 32 × 2048 = 65536 (모든 모드 동일)
+    localparam integer EXPECTED_TOTAL = 32 * 2048;
+    integer total_captured;
+    integer total_drained;
 
     // ─── RMW 파이프라인 타이밍 보조 상수 ──────────────────────────
     // RMW latency = L_CONV + L_ADD = 2 + 3 = 5 cy. RMW 입력 드라이브 후
@@ -949,14 +992,14 @@ module gemm_sram_top_tb;
         drive_stage_3_4;               // Stage 3+4: MAC sweep (capture_en 도 켬)
         drive_stage_5_tail;            // Stage 5: tail + capture 종료
 
-        // capture FIFO 의 총 push 수 (per-col 합) 를 진단용으로 출력
+        // capture FIFO 의 총 push 수 (per-col 합) — 구조적 검증의 첫 invariant
+        total_captured = 0;
         begin : dbg_drive_count
-            integer dbg_c, dbg_total;
-            dbg_total = 0;
+            integer dbg_c;
             for (dbg_c = 0; dbg_c < 32; dbg_c = dbg_c + 1)
-                dbg_total = dbg_total + fifo_wp[dbg_c];
-            $display("DRIVE DONE: captured %0d fires (expected up to 65536)", dbg_total);
+                total_captured = total_captured + fifo_wp[dbg_c];
         end
+        $display("DRIVE DONE: captured %0d fires (expected %0d)", total_captured, EXPECTED_TOTAL);
 
         // ───── PRIME: drain 시작 전 in-flight fire 들이 reg 에 들어올 여유 ─────
         repeat (PRIME_CYC) @(posedge clk);
@@ -972,17 +1015,42 @@ module gemm_sram_top_tb;
         wait_drain_complete;
         drain_enable <= 1'b0;
 
+        total_drained = 0;
         begin : dbg_drain_count
-            integer dbg_c, dbg_total;
-            dbg_total = 0;
+            integer dbg_c;
             for (dbg_c = 0; dbg_c < 32; dbg_c = dbg_c + 1)
-                dbg_total = dbg_total + fifo_rp[dbg_c];
-            $display("DRAIN DONE: %0d entries processed", dbg_total);
+                total_drained = total_drained + fifo_rp[dbg_c];
         end
+        $display("DRAIN DONE: %0d entries processed (expected %0d)", total_drained, EXPECTED_TOTAL);
 
         // ───── DUMP: 32 bank × 512 words via port-based read → $fwrite ─────
         $display("[DUMP] writing 32 bank .mem files to %0s", DUMP_DIR);
         dump_banks;
+
+        // ───── PASS/FAIL 배너 (in-sim 구조적 검증) ─────────────────────────
+        // 검증 항목:
+        //   1) capture 총 push 수 == EXPECTED (mode 무관 65536)
+        //   2) drain 총 pop 수    == EXPECTED
+        //   3) 모든 bank-col assert 가 sim 진행 중 한 번도 $finish FATAL 안 함
+        //      → 여기까지 도달한 것 자체가 증거 (FATAL 시 즉시 종료됨)
+        //   4) dump task 가 32 파일 모두 fopen 성공 (실패 시 $finish FATAL)
+        // 비트 정확도는 외부 Python compare 가 담당 (TB header §Vivado 절차 참고).
+        if (total_captured == EXPECTED_TOTAL && total_drained == EXPECTED_TOTAL) begin
+            $display("");
+            $display("============================================================");
+            $display("  [PASS] INTEGRATION TB A%0d_B%0d — structural checks OK", A_PREC, B_PREC);
+            $display("         captured=%0d  drained=%0d  expected=%0d",
+                     total_captured, total_drained, EXPECTED_TOTAL);
+            $display("         (bit-exact 검증은 외부 compare 실행)");
+            $display("============================================================");
+        end else begin
+            $display("");
+            $display("============================================================");
+            $display("  [FAIL] INTEGRATION TB A%0d_B%0d — count mismatch", A_PREC, B_PREC);
+            $display("         captured=%0d  drained=%0d  expected=%0d",
+                     total_captured, total_drained, EXPECTED_TOTAL);
+            $display("============================================================");
+        end
 
         $display("[DONE] INTEGRATION TB: A%0d_B%0d", A_PREC, B_PREC);
         $finish;
