@@ -208,6 +208,15 @@ module gemm_sram_top_tb;
                 // 가짜 fire 가 뜨는 경우가 있음. FIRES_PER_COL 은 모드 의존
                 // (A8=2048, A4=1024, A2=512).
                 if (out_fire[ci] && (fire_cnt_per_col[ci] < FIRES_PER_COL)) begin
+                    // FIFO overflow guard — exact-fit bound (2048 = A2 worst case).
+                    // FIRES_PER_COL × lanes_per_fire = 2048 모든 모드 동일이라 정상
+                    // 동작에선 안 터지지만, 워크로드/FIRES_PER_COL 변경 시 silent
+                    // memory corruption 방지용 safety net.
+                    if (fifo_wp[ci] >= FIFO_DEPTH) begin
+                        $display("FATAL: FIFO overflow col=%0d wp=%0d depth=%0d fire_cnt=%0d",
+                                 ci, fifo_wp[ci], FIFO_DEPTH, fire_cnt_per_col[ci]);
+                        $finish;
+                    end
                     fc = fire_cnt_per_col[ci];
 
                     // 내부 카운터는 mod (K_T*M_T*TILE) = 512 로 wrap.
@@ -676,13 +685,16 @@ module gemm_sram_top_tb;
     initial drain_enable = 1'b0;
 
     reg [3:0]  drain_state [0:31];
-    reg [3:0]  drain_wait  [0:31];
+    // drain_wait 폭은 DRAIN_RMW_WAIT (현재 8) 보다 충분히 큰 5-bit 사용. 4-bit 면
+    // 16 까지밖에 표현 못 해서 후일 wait 값을 16 이상으로 늘릴 때 wrap-around
+    // 위험. width-fragile foot-gun 차단.
+    reg [4:0]  drain_wait  [0:31];
     reg [18:0] drain_addr  [0:31];
 
     initial begin
         for (init_i = 0; init_i < 32; init_i = init_i + 1) begin
             drain_state[init_i] = 4'd0;
-            drain_wait [init_i] = 4'd0;
+            drain_wait [init_i] = 5'd0;
             drain_addr [init_i] = 19'd0;
         end
     end
@@ -701,7 +713,7 @@ module gemm_sram_top_tb;
             always @(posedge clk) begin
                 if (rst) begin
                     drain_state[dc] <= 4'd0;
-                    drain_wait [dc] <= 4'd0;
+                    drain_wait [dc] <= 5'd0;
                     drain_addr [dc] <= 19'd0;
                 end else if (drain_enable) begin
                     case (drain_state[dc])
@@ -727,11 +739,14 @@ module gemm_sram_top_tb;
                             drain_state[dc] <= 4'd3;
                         end
                         4'd3: begin
-                            drain_wait [dc] <= 4'd0;
+                            drain_wait [dc] <= 5'd0;
                             drain_state[dc] <= 4'd4;
                         end
                         4'd4: begin
-                            if (drain_wait[dc] == DRAIN_RMW_WAIT[3:0] - 1) begin
+                            // DRAIN_RMW_WAIT integer literal 을 5-bit drain_wait 와
+                            // 직접 비교 — Verilog 가 자동 sign-extension. [3:0] slice
+                            // 같은 width-narrowing 의 silent truncation 없음.
+                            if (drain_wait[dc] == DRAIN_RMW_WAIT - 1) begin
                                 drain_state[dc] <= 4'd5;
                             end else begin
                                 drain_wait[dc] <= drain_wait[dc] + 1;
