@@ -1,5 +1,5 @@
 #!/bin/bash
-# sim/run_integration_sweep.sh — Task 9: 9-mode serial sweep + compare gate.
+# sim/run_integration_sweep.sh — 9-mode serial sweep + compare gate.
 #
 # Loops over (A_P, B_P) in {2,4,8}^2, runs:
 #   1) MXP_Tools gen  -> ../work/<LABEL>
@@ -15,6 +15,9 @@
 # Note: this script intentionally does NOT use `set -e` because the compare
 # step is allowed to fail (it's caught by the if/then below for tallying);
 # `set -e` would abort the loop on the first FAIL and skip remaining modes.
+#
+# 동작 원리 / TB 와의 인터페이스 / mode 격리 / PASS 게이트 2단계 등 전체
+# 메커니즘 설명은 docs/sweep-architecture.md 참고.
 cd "$(dirname "$0")/.."
 
 PASSED=()

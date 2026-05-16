@@ -1,8 +1,12 @@
 #!/bin/bash
-# sim/run_integration_one.sh — Task 7+: parameterized single-mode integration sim.
+# sim/run_integration_one.sh — parameterized single-mode integration sim.
 #
 # Usage:   bash sim/run_integration_one.sh <LABEL> <A_PREC> <B_PREC>
 # Example: bash sim/run_integration_one.sh A8_B8 8 8
+#
+# TB (gemm_sram_top_tb.v) 는 plusarg 로 mode 받음 — 한 파일이 9 mode 모두 처리.
+# 9-mode 일괄 실행은 sim/run_integration_sweep.sh, 전체 흐름은
+# docs/sweep-architecture.md 참고.
 #
 # Requires MXP_Tools to have generated the inputs first:
 #   cd MXP_Tools && python -m mxp_tools gen   --out ../work/<LABEL> -M 128 -K 128 -N 128 --seed 0

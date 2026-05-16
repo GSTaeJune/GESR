@@ -27,6 +27,7 @@
 //                 외부 compare 가 MXP_Tools golden npz 와 비트 단위 비교.
 //
 // 회귀 게이트: `bash sim/run_integration_sweep.sh` → "ALL 9 MODES PASSED".
+// (sweep 가 9 mode 를 어떻게 한 TB 로 굴리는지 자세한 설명: docs/sweep-architecture.md)
 //
 // ─── Vivado GUI 에서 돌리는 절차 ────────────────────────────────────────
 //   sim top: `gemm_sram_top_tb` (Vivado 가 .xpr 의 sim_1 fileset 에서 자동 인식).
