@@ -309,3 +309,45 @@ def compute_golden_mixed(
         )
         C += block_fp
     return C
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    p = argparse.ArgumentParser(description="mixed-precision TB data + golden generator")
+    p.add_argument("--A", type=int, required=True, choices=[2, 4, 8],
+                   help="layer-wide A_PREC")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--out", type=Path, required=True,
+                   help="출력 디렉토리 (예: work/mixed_A8)")
+    p.add_argument("-M", type=int, default=128)
+    p.add_argument("-K", type=int, default=128)
+    p.add_argument("-N", type=int, default=128)
+    args = p.parse_args()
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    print(f"[gen_mixed] A_PREC={args.A}  seed={args.seed}  shape=({args.M},{args.K},{args.N})")
+
+    prec_map = build_w_prec_map(seed=args.seed, M=args.M, K_T=args.K // BLOCK_SIZE)
+    W_fp, A_fp = build_raw_data(seed=args.seed, M=args.M, K=args.K, N=args.N)
+    W_int, W_scale = quantize_weight_mixed(W_fp, prec_map)
+    A_int, A_scale = quantize_activation_uniform(A_fp, prec=args.A)
+    C_golden = compute_golden_mixed(W_int, W_scale, A_int, A_scale, prec_map)
+
+    emit_hex(W_int, W_scale, A_int, A_scale, prec_map, A_PREC=args.A, out_dir=out / "hw_input")
+    visualize_prec_map(prec_map, A_PREC=args.A, out_dir=out)
+
+    sw_ref = out / "sw_ref"
+    sw_ref.mkdir(exist_ok=True)
+    np.savez(sw_ref / "C_sw_mixed.npz", C=C_golden)
+    (out / "hw_out").mkdir(exist_ok=True)
+
+    print(f"[gen_mixed] done: hex+golden+viz → {out}")
+
+
+if __name__ == "__main__":
+    main()
