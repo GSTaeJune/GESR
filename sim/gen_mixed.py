@@ -338,12 +338,17 @@ def main():
     A_int, A_scale = quantize_activation_uniform(A_fp, prec=args.A)
     C_golden = compute_golden_mixed(W_int, W_scale, A_int, A_scale, prec_map)
 
+    # FP32 reference matmul — unquantized truth for compare's 3-way diff.
+    # Use single-precision matmul to match the dtype convention used by
+    # mxp_tools.cli.cmd_gen (which also stores C_fp32 as float32).
+    C_fp32_truth = (W_fp.astype(np.float32) @ A_fp.astype(np.float32)).astype(np.float32)
+
     emit_hex(W_int, W_scale, A_int, A_scale, prec_map, A_PREC=args.A, out_dir=out / "hw_input")
     visualize_prec_map(prec_map, A_PREC=args.A, out_dir=out)
 
     sw_ref = out / "sw_ref"
     sw_ref.mkdir(exist_ok=True)
-    np.savez(sw_ref / "C_sw_mixed.npz", C=C_golden)
+    np.savez(sw_ref / "C_sw_mixed.npz", C_sw=C_golden, C_fp32=C_fp32_truth)
     (out / "hw_out").mkdir(exist_ok=True)
 
     print(f"[gen_mixed] done: hex+golden+viz → {out}")
