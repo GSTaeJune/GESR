@@ -45,7 +45,13 @@ def visualize_prec_map(prec_map: np.ndarray, A_PREC: int, out_dir: Path) -> None
 
     try:
         import matplotlib
-        matplotlib.use("Agg")
+        # Set Agg only if no backend has been chosen yet — avoids "Backend already
+        # set" warning when caller imported matplotlib.pyplot first.
+        if not matplotlib.get_backend() or "agg" not in matplotlib.get_backend().lower():
+            try:
+                matplotlib.use("Agg", force=False)
+            except (ImportError, ValueError):
+                pass  # backend already locked in; we'll render with whatever it is.
         import matplotlib.pyplot as plt
     except ImportError:
         return  # matplotlib 없으면 PNG 생략.
