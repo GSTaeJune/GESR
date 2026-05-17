@@ -11,9 +11,18 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
+
+# MXP_Tools 를 import path 에 추가 (sim/gen_mixed.py 기준 ../MXP_Tools/)
+_MXP_TOOLS = Path(__file__).resolve().parent.parent / "MXP_Tools"
+if str(_MXP_TOOLS) not in sys.path:
+    sys.path.insert(0, str(_MXP_TOOLS))
+
+from mxp_tools.quant import quantize_block_mx, quantize_matrix_mx  # noqa: E402
+from mxp_tools.const import BLOCK_SIZE  # noqa: E402
 
 
 def build_w_prec_map(seed: int = 0, M: int = 128, K_T: int = 4) -> np.ndarray:
@@ -71,3 +80,42 @@ def visualize_prec_map(prec_map: np.ndarray, A_PREC: int, out_dir: Path) -> None
     fig.tight_layout()
     fig.savefig(out_dir / "precision_map.png", dpi=120)
     plt.close(fig)
+
+
+def build_raw_data(seed: int, M: int = 128, K: int = 128, N: int = 128):
+    """FP32 raw weight [M, K] + activation [K, N]. seed 분리해서 W/A 독립.
+
+    값 범위는 ~N(0, 1) — MX 양자화가 정상 동작하도록.
+    """
+    rng_w = np.random.default_rng(seed * 2 + 1)
+    rng_a = np.random.default_rng(seed * 2 + 2)
+    W = rng_w.standard_normal((M, K)).astype(np.float32)
+    A = rng_a.standard_normal((K, N)).astype(np.float32)
+    return W, A
+
+
+def quantize_weight_mixed(W_fp32: np.ndarray, prec_map: np.ndarray):
+    """weight [M, K] 를 (M, K-block) 단위 W_PREC 로 양자화.
+
+    Returns:
+      W_int   : int8, shape (M, K)
+      W_scale : uint8, shape (M, K_T)
+    """
+    M, K = W_fp32.shape
+    K_T = K // BLOCK_SIZE
+    assert prec_map.shape == (M, K_T), f"prec_map shape mismatch: {prec_map.shape}"
+    W_int = np.zeros((M, K), dtype=np.int8)
+    W_scale = np.zeros((M, K_T), dtype=np.uint8)
+    for m in range(M):
+        for kt in range(K_T):
+            sl = slice(kt * BLOCK_SIZE, (kt + 1) * BLOCK_SIZE)
+            prec = int(prec_map[m, kt])
+            q, s = quantize_block_mx(W_fp32[m, sl], prec)
+            W_int[m, sl] = q
+            W_scale[m, kt] = s
+    return W_int, W_scale
+
+
+def quantize_activation_uniform(A_fp32: np.ndarray, prec: int):
+    """activation [K, N] 를 K-axis (block_axis=0) 단위로 prec 로 양자화."""
+    return quantize_matrix_mx(A_fp32, prec=prec, block_axis=0)
