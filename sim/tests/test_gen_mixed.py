@@ -106,3 +106,38 @@ def test_golden_shape_and_dtype():
     C = compute_golden_mixed(W_int, W_scale, A_int, A_scale, pm)
     assert C.shape == (128, 128)
     assert C.dtype == np.float32
+
+
+def test_emit_hex_files_exist_with_expected_line_counts(tmp_path):
+    from gen_mixed import build_raw_data, build_w_prec_map, \
+        quantize_weight_mixed, quantize_activation_uniform, emit_hex
+    W_fp, A_fp = build_raw_data(seed=0)
+    pm = build_w_prec_map(seed=0)
+    W_int, W_scale = quantize_weight_mixed(W_fp, pm)
+    A_int, A_scale = quantize_activation_uniform(A_fp, prec=8)
+    out = tmp_path / "hw_input"
+    emit_hex(W_int, W_scale, A_int, A_scale, pm, A_PREC=8, out_dir=out)
+
+    expected = {
+        "a_input_BS_mixed.hex": 4096,     # K_T(4) * M_T(4) * TILE(32) * W=8 padding
+        "b_input_mixed_A8.hex": 512,      # N_T(4) * K_T(4) * TILE(32)
+        "a_scale_mixed.hex": 512,         # K_T*M_T*TILE
+        "b_scale_mixed.hex": 512,         # N_T*K_T*TILE
+        "w_prec_per_block.hex": 128,      # M rows
+    }
+    for name, n_lines in expected.items():
+        p = out / name
+        assert p.exists(), f"missing {name}"
+        lines = [ln for ln in p.read_text().splitlines() if ln.strip()]
+        assert len(lines) == n_lines, f"{name}: expected {n_lines} lines, got {len(lines)}"
+
+
+def test_w_prec_per_block_encoding():
+    """w_prec_per_block.hex 의 한 line = m row 의 4 K-block W_CTRL_CODE packed.
+    bit[2k+1:2k] = W_CTRL_CODE for (m, k_t=k).  W=8→11, W=4→10, W=2→01."""
+    from gen_mixed import emit_hex_w_prec_only
+    pm = np.array([[8, 4, 2, 8]], dtype=np.uint8)  # 1 row × 4 K-block
+    line = emit_hex_w_prec_only(pm)  # returns str
+    # bit[1:0] = W=8 → 11, bit[3:2] = W=4 → 10, bit[5:4] = W=2 → 01, bit[7:6] = W=8 → 11
+    # → 0b11_01_10_11 = 0xDB
+    assert line.strip() == "db"

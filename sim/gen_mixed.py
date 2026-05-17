@@ -121,6 +121,133 @@ def quantize_activation_uniform(A_fp32: np.ndarray, prec: int):
     return quantize_matrix_mx(A_fp32, prec=prec, block_axis=0)
 
 
+# ---------------------------------------------------------------------------
+# Hex emit helpers
+# ---------------------------------------------------------------------------
+
+# W_CTRL_CODE lookup (precision_modes_protocol.md §1 과 일치)
+_W_CTRL_LUT = {8: 0b11, 4: 0b10, 2: 0b01}
+
+
+def emit_hex_w_prec_only(prec_map: np.ndarray) -> str:
+    """prec_map (M, K_T) → 'hh\\n' 행 누적 문자열. 단위 검증용.
+
+    각 row m 에 대해 1 byte (8-bit) 를 생성:
+      bit[2*kt+1 : 2*kt] = _W_CTRL_LUT[prec_map[m, kt]]  for kt in 0..K_T-1.
+    """
+    out = []
+    for m in range(prec_map.shape[0]):
+        byte = 0
+        for kt in range(prec_map.shape[1]):
+            byte |= _W_CTRL_LUT[int(prec_map[m, kt])] << (2 * kt)
+        out.append(f"{byte:02x}\n")
+    return "".join(out)
+
+
+def _emit_a_input_bs(W_int: np.ndarray, out_path: Path,
+                     K_T: int = 4, M_T: int = 4, TILE: int = 32, W_PAD: int = 8):
+    """weight bit-serial hex. W=8 padding 컨벤션 — 모든 entry 8 cycle/row.
+
+    한 워드 (32-bit) = 한 TB cycle 의 32 K-row 의 1 bit.
+    파일 인덱싱: a_bs[k_t * M_T * TILE * W_PAD + m_t * TILE * W_PAD + m_in * W_PAD + bit_pos]
+    bit_pos ∈ 0..W_PAD-1, bit_pos=0 이 MSB (즉 MSB first emit).
+    W_PAD=8 보다 낮은 precision 의 경우 MSB 쪽 bit_pos 가 0 → word=0 (dot-product 기여 없음).
+    """
+    lines = []
+    for k_t in range(K_T):
+        for m_t in range(M_T):
+            for m_in in range(TILE):
+                m = m_t * TILE + m_in
+                # 한 (m, k_t) 의 32 K-element weight (INT8 signed).
+                w_block = W_int[m, k_t * TILE:(k_t + 1) * TILE].astype(np.int32)
+                # 2's complement → unsigned 8-bit 으로 (bit-serial 추출용).
+                w_unsigned = (w_block & 0xFF).astype(np.uint8)
+                for bit_pos in range(W_PAD - 1, -1, -1):
+                    word = 0
+                    for k in range(TILE):
+                        if (w_unsigned[k] >> bit_pos) & 1:
+                            word |= (1 << k)
+                    lines.append(f"{word:08x}\n")
+    out_path.write_text("".join(lines))
+
+
+def _emit_b_input(A_int: np.ndarray, out_path: Path, A_PREC: int,
+                  N_T: int = 4, K_T: int = 4, TILE: int = 32):
+    """activation 256-bit 워드 hex.
+
+    한 워드 = 한 (n_t, k_t, col) 의 32 K-row × 8-bit activation.
+    파일 인덱싱: b_bp[n_t * K_T * TILE + k_t * TILE + col]
+    A_PREC=4: 8-bit 안에 INT4 두 개 packed (TB 의 pack_int4_n_pair 가 풀어냄).
+    A_PREC=2: 8-bit 안에 INT2 네 개 packed.
+
+    emit 단계는 A_PREC 무관 INT8 raw 8-bit 그대로. TB 의 V3 pack 함수가
+    mode 별로 4-bit/2-bit 추출. (기존 9-mode sweep 의 b_input_mxint8.hex 가
+    A_PREC=2/4 모드에서도 동일 layout 으로 쓰이고 TB 가 분해하는 패턴 답습.)
+    """
+    lines = []
+    K, N = A_int.shape
+    for n_t in range(N_T):
+        for k_t in range(K_T):
+            for col in range(TILE):
+                n = n_t * TILE + col
+                # 32 K-row × 8-bit = 256-bit.
+                k_col = A_int[k_t * TILE:(k_t + 1) * TILE, n].astype(np.int32)
+                k_col_u = (k_col & 0xFF).astype(np.uint8)
+                word = 0
+                for k in range(TILE):
+                    word |= int(k_col_u[k]) << (8 * k)
+                lines.append(f"{word:064x}\n")
+    out_path.write_text("".join(lines))
+
+
+def _emit_a_scale(W_scale: np.ndarray, out_path: Path,
+                  K_T: int = 4, M_T: int = 4, TILE: int = 32):
+    """weight scale (E8M0, 1 byte) — (k_t, m_t, m_in) 순서로 emit.
+    파일 인덱싱: a_scale[k_t*M_T*TILE + m_t*TILE + m_in]"""
+    lines = []
+    for k_t in range(K_T):
+        for m_t in range(M_T):
+            for m_in in range(TILE):
+                m = m_t * TILE + m_in
+                lines.append(f"{int(W_scale[m, k_t]):02x}\n")
+    out_path.write_text("".join(lines))
+
+
+def _emit_b_scale(A_scale: np.ndarray, out_path: Path,
+                  N_T: int = 4, K_T: int = 4, TILE: int = 32):
+    """activation scale — (n_t, k_t, col) 순서.
+    파일 인덱싱: b_scale[n_t * K_T * TILE + k_t * TILE + col]"""
+    lines = []
+    for n_t in range(N_T):
+        for k_t in range(K_T):
+            for col in range(TILE):
+                n = n_t * TILE + col
+                lines.append(f"{int(A_scale[k_t, n]):02x}\n")
+    out_path.write_text("".join(lines))
+
+
+def emit_hex(W_int: np.ndarray, W_scale: np.ndarray,
+             A_int: np.ndarray, A_scale: np.ndarray,
+             prec_map: np.ndarray, A_PREC: int,
+             out_dir: "Path | str") -> None:
+    """5 개 hex 파일을 out_dir 에 emit.
+
+    파일 목록:
+      a_input_BS_mixed.hex    — weight bit-serial (W=8 padding)
+      b_input_mixed_A{P}.hex  — activation 256-bit packed
+      a_scale_mixed.hex       — weight scale (E8M0)
+      b_scale_mixed.hex       — activation scale (E8M0)
+      w_prec_per_block.hex    — per-block W_PREC 2-bit code packed
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _emit_a_input_bs(W_int, out_dir / "a_input_BS_mixed.hex")
+    _emit_b_input(A_int, out_dir / f"b_input_mixed_A{A_PREC}.hex", A_PREC)
+    _emit_a_scale(W_scale, out_dir / "a_scale_mixed.hex")
+    _emit_b_scale(A_scale, out_dir / "b_scale_mixed.hex")
+    (out_dir / "w_prec_per_block.hex").write_text(emit_hex_w_prec_only(prec_map))
+
+
 def compute_golden_mixed(
     W_int: np.ndarray,
     W_scale: np.ndarray,
