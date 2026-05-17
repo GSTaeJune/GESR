@@ -27,3 +27,17 @@ def test_w_prec_map_uniform_distribution_within_5pct():
     # 균등 1/3 ≈ 171. ±5% (8 개) 마진.
     for v, c in counts.items():
         assert abs(c - total / 3) < total * 0.05, f"W={v}: count={c}"
+
+
+def test_visualize_writes_png_and_txt(tmp_path):
+    from gen_mixed import build_w_prec_map, visualize_prec_map
+    pm = build_w_prec_map(seed=0)
+    visualize_prec_map(pm, A_PREC=8, out_dir=tmp_path)
+    assert (tmp_path / "precision_map.png").exists()
+    txt = (tmp_path / "precision_map.txt").read_text()
+    # ASCII map 의 한 row 가 K_T(=4) 글자.
+    lines = [ln for ln in txt.splitlines() if ln and not ln.startswith("#")]
+    assert len(lines) == 128
+    for ln in lines:
+        assert len(ln) == 4
+        assert set(ln) <= {"2", "4", "8"}
