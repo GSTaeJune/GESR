@@ -2,7 +2,31 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Next session kickoff (2026-05-15, integration done + MXP_Tools upstream synced)
+## Next session kickoff (2026-05-17, mixed-precision TB Task 1-7 PASS, Task 8 BLOCKED)
+
+**진행 상태**: per-block W_PREC 혼용 검증 TB 의 구현 (spec/plan: `docs/superpowers/{specs,plans}/2026-05-17-mixed-precision-tb*.md`) 중 P-Task1~7 (gen_mixed.py 전체 6 함수 + tb/gemm_sram_top_mixed_tb.v + elab smoke) 모두 PASS, P-Task8 (A=8 end-to-end bit-exact) **BLOCKED**.
+
+**P-Task8 BLOCKER 상세**:
+- `bash sim/run_mixed_one.sh 8` 가 끝까지 도달 (xsim 74s, capture/drain 65536/65536 정확) 하지만 MXP_Tools compare 에서 **hw_sw 비교 16384/16384 mismatch, max=6.6e+04, SNR=-43dB**.
+- run_mixed_one.sh 의 `mixed_A8: PASS` 출력은 false positive — `mxp_tools.cli.cmd_compare` 가 mismatch 시에도 print_stats 만 하고 sys.exit(1) 안 함. 9-mode sweep 도 같은 구조라 사실상 fail-gate 없음 (다만 9-mode 는 결과적으로 한 번도 실패 안 함).
+- Root cause 미파악. 가능 후보 3개: (a) TB driving timing (TOGGLE_VAL=24, FIRST_FIRE=17 등 worst-case 보수 가정), (b) `_emit_a_input_bs` 의 W=8 padding bit-serial layout 의 ordering, (c) `compute_golden_mixed` 의 누적 식 (mxint_gemm_golden 와 uniform W=8 일 때만 bit-exact 검증됨).
+
+**다음 세션 시작 시 debug protocol**:
+1. **isolation 검증** — `sim/gen_mixed.py` 의 `build_w_prec_map` 을 mod 해서 모든 (M, K-tile) 의 W_PREC=8 로 고정 후 `bash sim/run_mixed_one.sh 8` 실행. 결과 dump 와 9-mode sweep 의 `work/A8_B8/hw_out/bank{0..31}.mem` 을 직접 diff. 동일하면 mixed-TB / hex emit 이 균일 모드와 일치 (driving timing/golden 의 mixed-pattern 분기만 의심 대상), 다르면 mixed-TB 자체에 구조적 mismatch.
+2. **mxp_tools.compare 의 fail-gate 강화** — `sys.exit(1) if stats["hw_sw"]["n_nonzero_diff"] > 0 else 0` 추가. 별도 작업, 본 debug 와 독립.
+
+**기 commit 된 산출물** (이번 세션):
+- spec/plan: `docs/superpowers/{specs,plans}/2026-05-17-mixed-precision-tb*.md`
+- gen_mixed.py + 10 pytest: `sim/gen_mixed.py`, `sim/tests/test_gen_mixed.py` (commits `68a8542` ~ `a77bd12`)
+- 신규 TB: `tb/gemm_sram_top_mixed_tb.v` (commit `6106d7a`)
+- 신규 sim 스크립트: `sim/run_mixed_one.sh` (commit `a77bd12`)
+- `sim/run_mixed_sweep.sh` 는 아직 미작성 (P-Task9). P-Task8 debug 후.
+
+**핵심 RTL 매핑 사실 (이번 세션에 명시)**: SA 의 row=K, col=N, cycle=M 진행. 자세한 표는 본 CLAUDE.md `## MXP control surface` 의 첫 subsection.
+
+---
+
+## 기존 status (2026-05-15, integration done + MXP_Tools upstream synced)
 
 GEMM ↔ RMW ↔ sram_1rw_banked **시스템 통합 완성 및 검증**됨 — `bash sim/run_integration_sweep.sh` → `ALL 9 MODES PASSED` (9 precision combinations A,B ∈ {2,4,8}, 각각 128×128 = 16384 element 모두 bit-exact 일치 vs MXP_Tools golden). 단위 검증도 그대로 유효: `bash sim/run_rmw.sh` → 71/71 PASS.
 
