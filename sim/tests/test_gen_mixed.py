@@ -71,3 +71,38 @@ def test_quant_per_block_mixed_uses_per_block_prec():
     # block (0, 0) 는 W=2 라 INT 값 범위 ≤ MAX_INT[2].
     block_00 = W_int[0, 0:32]
     assert np.max(np.abs(block_00.astype(np.int32))) <= MAX_INT[2]
+
+
+def test_golden_matches_mxp_tools_when_uniform():
+    """모든 W_PREC=8, A_PREC=8 일 때 mxp_tools.gemm.mxint_gemm_golden 과 일치."""
+    from mxp_tools.gemm import mxint_gemm_golden
+    from gen_mixed import build_raw_data, quantize_weight_mixed, \
+        quantize_activation_uniform, compute_golden_mixed
+
+    W_fp, A_fp = build_raw_data(seed=0)
+    pm_uniform = np.full((128, 4), 8, dtype=np.uint8)
+    W_int, W_scale = quantize_weight_mixed(W_fp, pm_uniform)
+    A_int, A_scale = quantize_activation_uniform(A_fp, prec=8)
+
+    C_ours = compute_golden_mixed(W_int, W_scale, A_int, A_scale, pm_uniform)
+    # mxint_gemm_golden(int_A, scale_A, prec_A, int_B, scale_B, prec_B)
+    # prec_A = WEIGHT prec (우리의 W_int), prec_B = ACTIVATION prec (우리의 A_int).
+    C_ref = mxint_gemm_golden(W_int, W_scale, 8, A_int, A_scale, 8)
+    # FP32 bit-exact 일치 요구.
+    assert C_ours.dtype == np.float32
+    np.testing.assert_array_equal(
+        C_ours.view(np.uint32), C_ref.view(np.uint32),
+        err_msg="mixed-w/uniform-prec 의 골든이 mxp_tools 와 비트단위 일치하지 않음"
+    )
+
+
+def test_golden_shape_and_dtype():
+    from gen_mixed import build_raw_data, quantize_weight_mixed, \
+        quantize_activation_uniform, build_w_prec_map, compute_golden_mixed
+    W_fp, A_fp = build_raw_data(seed=0)
+    pm = build_w_prec_map(seed=0)
+    W_int, W_scale = quantize_weight_mixed(W_fp, pm)
+    A_int, A_scale = quantize_activation_uniform(A_fp, prec=4)
+    C = compute_golden_mixed(W_int, W_scale, A_int, A_scale, pm)
+    assert C.shape == (128, 128)
+    assert C.dtype == np.float32
