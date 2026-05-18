@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>Mixed-Precision GEMM 시뮬레이션 튜토리얼 — gemm_sram</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", "Noto Sans KR", sans-serif;
+         max-width: 980px; margin: 32px auto; padding: 0 24px;
+         line-height: 1.65; color: #222; }
+  h1 { border-bottom: 3px solid #2c5aa0; padding-bottom: 8px; }
+  h2 { border-left: 5px solid #2c5aa0; padding-left: 10px; margin-top: 36px; color: #2c5aa0; }
+  h3 { color: #1a4480; margin-top: 24px; }
+  h4 { color: #555; margin-top: 18px; }
+  code { background: #f0f3f7; padding: 2px 6px; border-radius: 3px;
+         font-family: "Consolas", "Cascadia Code", monospace; font-size: 0.92em; }
+  pre { background: #1e1e1e; color: #d4d4d4; padding: 14px 18px;
+        border-radius: 6px; overflow-x: auto; font-size: 0.9em;
+        font-family: "Consolas", "Cascadia Code", monospace; line-height: 1.5; }
+  pre code { background: none; color: inherit; padding: 0; }
+  .cmd { color: #4ec9b0; }
+  .comment { color: #6a9955; font-style: italic; }
+  .warn { background: #fff8dc; border-left: 4px solid #d4a017;
+          padding: 10px 14px; margin: 12px 0; border-radius: 0 4px 4px 0; }
+  .ok { background: #e6f4ea; border-left: 4px solid #2e8b57;
+        padding: 10px 14px; margin: 12px 0; border-radius: 0 4px 4px 0; }
+  .info { background: #e7f0fb; border-left: 4px solid #2c5aa0;
+          padding: 10px 14px; margin: 12px 0; border-radius: 0 4px 4px 0; }
+  .err { background: #fdecea; border-left: 4px solid #c0392b;
+         padding: 10px 14px; margin: 12px 0; border-radius: 0 4px 4px 0; }
+  table { border-collapse: collapse; margin: 14px 0; width: 100%; }
+  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: #2c5aa0; color: #fff; }
+  tr:nth-child(even) td { background: #f7f9fc; }
+  .toc { background: #f5f7fb; padding: 14px 20px; border-radius: 6px;
+         border: 1px solid #d8e0ee; }
+  .toc ol { margin: 0; padding-left: 24px; }
+  .toc a { color: #2c5aa0; text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .swatch { display: inline-block; width: 14px; height: 14px;
+            margin-right: 4px; vertical-align: middle; border: 1px solid #888; }
+  .filetree { font-family: Consolas, monospace; font-size: 0.88em;
+              background: #f7f9fc; padding: 12px 18px; border-radius: 4px;
+              border: 1px solid #ddd; white-space: pre; }
+  kbd { background: #eee; border: 1px solid #aaa; border-bottom-width: 2px;
+        border-radius: 3px; padding: 1px 5px; font-family: Consolas, monospace;
+        font-size: 0.88em; }
+</style>
+</head>
+<body>
+
+<h1>Mixed-Precision GEMM 시뮬레이션 튜토리얼</h1>
+<p>
+  본 튜토리얼은 <code>gemm_sram</code> 프로젝트에서 <strong>mixed-precision</strong>
+  (per-(M-row, K-block) W_PREC 혼용) GEMM 검증을 처음 돌리는 분을 위한
+  end-to-end 가이드입니다. 데이터 생성 → 시뮬레이션 → 비교까지 한 cycle.
+</p>
+<p>
+  <strong>전제</strong>: Vivado 2024.1 xsim CLI (PATH 등록), Python 3.10+, numpy, matplotlib.
+  Repo root = <code>C:/Users/ptj72/Desktop/Desktop/00project/gemm_sram</code>.
+</p>
+
+<div class="toc">
+  <strong>목차</strong>
+  <ol>
+    <li><a href="#quick">Quick start (한 줄 실행)</a></li>
+    <li><a href="#gen">데이터 생성 — <code>gen_mixed.py</code></a></li>
+    <li><a href="#map">Precision map — 어디서 보고 어떻게 읽나</a></li>
+    <li><a href="#sim">시뮬레이션 실행 — <code>run_mixed_one.sh</code></a></li>
+    <li><a href="#variants">변형 (uniform / K-tile / random)</a></li>
+    <li><a href="#verify">결과 검증 — <code>mxp_tools compare</code></a></li>
+    <li><a href="#9mode">9-mode 회귀 sweep</a></li>
+    <li><a href="#dataflow">RTL dataflow 핵심 (디버그 참조)</a></li>
+    <li><a href="#trouble">트러블슈팅</a></li>
+  </ol>
+</div>
+
+<h2 id="quick">1. Quick start — 한 줄 실행</h2>
+<p>random mixed-W 케이스 (default) end-to-end:</p>
+<pre><span class="cmd">bash sim/run_mixed_one.sh 8</span>
+<span class="comment"># A_PREC=8, random per-(M, K-block) W_PREC ∈ {2,4,8}</span>
+<span class="comment"># 약 1.5분 (xsim sim + compare)</span></pre>
+
+<p>성공 시 마지막 줄:</p>
+<pre>pair                   max          rmse      mean_abs      snr_dB    n_diff
+<strong>hw_sw            0.000e+00     0.000e+00     0.000e+00        inf         0</strong>
+mixed_A8: PASS</pre>
+
+<div class="ok">
+  <strong>핵심:</strong> <code>hw_sw</code> 의 <code>n_diff = 0</code> 이면 bit-exact PASS.
+  <code>sw_fp32</code> / <code>hw_fp32</code> 의 n_diff 는 quantization noise (정상).
+</div>
+
+<h2 id="gen">2. 데이터 생성 — <code>sim/gen_mixed.py</code></h2>
+
+<h3>2.1 단독 실행</h3>
+<pre><span class="cmd">python sim/gen_mixed.py --A 8 --seed 0 --out work/mixed_A8</span></pre>
+<p><strong>인자</strong>:</p>
+<table>
+  <tr><th>인자</th><th>의미</th><th>default</th></tr>
+  <tr><td><code>--A</code></td><td>layer-wide activation precision (2/4/8)</td><td>필수</td></tr>
+  <tr><td><code>--seed</code></td><td>random seed (W_PREC map + raw fp32 data 둘 다)</td><td>0</td></tr>
+  <tr><td><code>--out</code></td><td>출력 디렉토리</td><td>필수</td></tr>
+  <tr><td><code>-M</code> / <code>-K</code> / <code>-N</code></td><td>GEMM 차원</td><td>128 / 128 / 128</td></tr>
+</table>
+
+<h3>2.2 출력 파일 구조</h3>
+<div class="filetree">work/mixed_A8/
+├── hw_input/
+│   ├── a_input_BS_mxint_mixed.hex   # bit-serial weight (4 K-block 분리)
+│   ├── b_input_mxint8.hex            # activation byte-parallel (uniform A=8)
+│   ├── a_scale_mxint_mixed.hex       # weight scale (E8M0)
+│   ├── b_scale_mxint8.hex            # activation scale (E8M0)
+│   └── w_prec_packed.hex             # W_PREC map (2-bit per block, packed)
+├── hw_out/                            # bank0.mem .. bank31.mem (xsim 가 채움)
+├── sw_ref/
+│   └── C_sw_mixed.npz                 # golden: C_sw (mixed quant) + C_fp32 (truth)
+├── precision_map.png                  # W_PREC 색지도 ← <strong>여기 §3</strong>
+└── precision_map.txt                  # W_PREC 숫자 dump (M × K_T 매트릭스)</div>
+
+<h2 id="map">3. Precision map — 어디서 보고 어떻게 읽나</h2>
+
+<h3>3.1 파일 위치</h3>
+<table>
+  <tr><th>파일</th><th>내용</th></tr>
+  <tr><td><code>work/&lt;LABEL&gt;/precision_map.png</code></td>
+      <td>(M=128) × (K-block=4) 의 W_PREC 색지도. 한눈에 분포 확인용.</td></tr>
+  <tr><td><code>work/&lt;LABEL&gt;/precision_map.txt</code></td>
+      <td>같은 데이터의 숫자 dump. <code>diff</code> / grep 으로 비교 가능.</td></tr>
+</table>
+
+<h3>3.2 색 의미 (PNG)</h3>
+<p>
+  <span class="swatch" style="background:#fcd9b6"></span> W=2 (INT2, 1-bit weight × cnt=1)<br>
+  <span class="swatch" style="background:#f6a26b"></span> W=4 (INT4, cnt=3)<br>
+  <span class="swatch" style="background:#c14d36"></span> W=8 (INT8, cnt=7)
+</p>
+
+<h3>3.3 TXT 포맷</h3>
+<pre># precision_map  A_PREC=8  seed=0
+# rows = M=0..127, cols = K-block 0..3
+# values: 2 / 4 / 8 (W_PREC per block)
+8442    <span class="comment"># M=0: K-block 0=W8, 1=W4, 2=W4, 3=W2</span>
+2222    <span class="comment"># M=1: 모든 K-block W2</span>
+2848    <span class="comment"># M=2 ...</span>
+...</pre>
+
+<div class="info">
+  <strong>왜 (M, K_T) 매트릭스인가:</strong>
+  SA 의 row=K, col=N, cycle=M 진행. 한 cycle 의 32-bit weight 는 같은 K-block 의 32 K-element 의 bit (같은 W_PREC).
+  M 진행마다 W_PREC 갱신 가능 → (M-row, K-block) 단위 W mix.
+  자세한 매핑은 <code>precision_modes_protocol.md</code> §1, <code>CLAUDE.md</code> "MXP control surface" 참조.
+</div>
+
+<h2 id="sim">4. 시뮬레이션 실행 — <code>sim/run_mixed_one.sh</code></h2>
+
+<h3>4.1 절차</h3>
+<pre><span class="cmd">bash sim/run_mixed_one.sh &lt;A_PREC&gt;</span>
+<span class="comment"># 내부 단계:
+#   1) python sim/gen_mixed.py --A $A_PREC --seed 0 --out work/mixed_A$A_PREC
+#   2) xvlog + xelab + xsim  (tb/gemm_sram_top_mixed_tb.v 실행)
+#   3) cd MXP_Tools && python -m mxp_tools compare ...</span></pre>
+
+<h3>4.2 빌드/출력 위치</h3>
+<table>
+  <tr><th>디렉토리</th><th>역할</th></tr>
+  <tr><td><code>sim/build/mixed_A&lt;P&gt;/</code></td><td>xelab snapshot + xsim log</td></tr>
+  <tr><td><code>work/mixed_A&lt;P&gt;/hw_out/bank{0..31}.mem</code></td><td>xsim 가 $writememh 로 dump</td></tr>
+  <tr><td><code>work/mixed_A&lt;P&gt;/sw_ref/C_sw_mixed.npz</code></td><td>Python golden (compare 대상)</td></tr>
+</table>
+
+<h2 id="variants">5. 변형 — 환경변수 override</h2>
+
+<p><code>sim/gen_mixed.py</code> 의 W_PREC map 생성을 시나리오에 따라 바꿀 수 있습니다 (디버그/isolation 용).</p>
+
+<table>
+  <tr><th>시나리오</th><th>명령</th><th>의미</th></tr>
+  <tr><td>random (default)</td>
+      <td><code>bash sim/run_mixed_one.sh 8</code></td>
+      <td>(M=128, K_T=4) 전부 random W_PREC ∈ {2,4,8}</td></tr>
+  <tr><td>uniform W=8</td>
+      <td><code>MIXED_W_UNIFORM=8 bash sim/run_mixed_one.sh 8</code></td>
+      <td>모든 block W=8 (9-mode A8W8 과 동등)</td></tr>
+  <tr><td>uniform W=4</td>
+      <td><code>MIXED_W_UNIFORM=4 bash sim/run_mixed_one.sh 8</code></td>
+      <td>모든 block W=4</td></tr>
+  <tr><td>K-tile granular</td>
+      <td><code>MIXED_W_K_TILE=8,4,2,8 bash sim/run_mixed_one.sh 8</code></td>
+      <td>K-block 단위 mix (모든 M 동일 pattern). 예: 4 block = [W8, W4, W2, W8]</td></tr>
+</table>
+
+<div class="info">
+  isolation 순서 권장: <strong>uniform → K-tile granular → random</strong> 순서로 확장.
+  RTL/TB 변경 후 회귀 확인 시 이 순서로 fail 좁히기.
+</div>
+
+<h2 id="verify">6. 결과 검증 — <code>mxp_tools compare</code></h2>
+
+<h3>6.1 자동 호출 (sweep script 안에서)</h3>
+<pre><span class="cmd">cd MXP_Tools && python -m mxp_tools compare \
+    --ref ../work/mixed_A8/sw_ref/C_sw_mixed.npz \
+    --hw-banks ../work/mixed_A8/hw_out/bank0.mem ... bank31.mem \
+    --layout interleaved_row_major_32bank</span></pre>
+
+<h3>6.2 출력 해석</h3>
+<pre>pair                   max          rmse      mean_abs      snr_dB    n_diff
+hw_sw            0.000e+00     0.000e+00     0.000e+00        inf         0
+sw_fp32          2.418e+01     3.470e+00     2.489e+00      10.21     16384
+hw_fp32          2.418e+01     3.470e+00     2.489e+00      10.21     16384</pre>
+
+<table>
+  <tr><th>row</th><th>대상</th><th>합격 기준</th></tr>
+  <tr><td><code>hw_sw</code></td>
+      <td>HW (xsim) vs SW golden (mixed quant)</td>
+      <td><strong>n_diff = 0</strong> (bit-exact)</td></tr>
+  <tr><td><code>sw_fp32</code></td>
+      <td>SW golden vs FP32 truth (unquantized)</td>
+      <td>n_diff &gt; 0 정상 (quantization noise)</td></tr>
+  <tr><td><code>hw_fp32</code></td>
+      <td>HW vs FP32 truth</td>
+      <td><code>hw_sw</code>=0 이면 <code>sw_fp32</code> 와 동일해야 함</td></tr>
+</table>
+
+<div class="err">
+  <strong>주의 (현재 한계):</strong> <code>mxp_tools.compare</code> 가 mismatch 일 때
+  stats 만 print 하고 <code>sys.exit(1)</code> 안 함 → script 의 <code>set -e</code>
+  걸려도 false-positive "PASS" 가능. <strong>n_diff 값을 사람 눈으로 확인 필수</strong>.
+  (개선 작업 별도 todo: <code>n_nonzero_diff &gt; 0</code> 시 exit 1.)
+</div>
+
+<h2 id="9mode">7. 9-mode 회귀 sweep (uniform)</h2>
+
+<p>uniform (A, W) ∈ {2,4,8}² 의 9 케이스를 한 번에:</p>
+<pre><span class="cmd">bash sim/run_integration_sweep.sh</span>
+<span class="comment"># 약 10분 (633s wall-clock, 32-RMW col-parallel)</span></pre>
+
+<p>마지막 줄:</p>
+<pre>====================================
+SWEEP RESULT: 9/9 PASS
+PASSED: A2_B2 A2_B4 A2_B8 A4_B2 A4_B4 A4_B8 A8_B2 A8_B4 A8_B8
+ALL 9 MODES PASSED</pre>
+
+<div class="ok">
+  RTL 변경 시 <strong>반드시</strong> 이 sweep 통과 확인. mixed-prec fix 가 uniform 9-mode 를
+  깨면 안 됨.
+</div>
+
+<h2 id="dataflow">8. RTL dataflow 핵심 (디버그 시 참조)</h2>
+
+<p>mixed-W 디버그 시 잘못된 결론으로 점프하지 않으려면 <strong>cycle 단위 dataflow</strong> 를 정확히 알아야 합니다. 핵심 5 가지:</p>
+
+<h3>8.1 SA 차원 매핑 — row=K, col=N, cycle=M (가장 자주 헷갈림)</h3>
+<table>
+  <tr><th>SA 축</th><th>행렬 차원</th></tr>
+  <tr><td>row (in_a[r], in_b[r])</td><td>K-axis (PE_feeder 대각선, K=r 의 weight 가 N-col 방향 전파)</td></tr>
+  <tr><td>col (Accumulator_Col[c])</td><td>N-axis (N-col c 의 dot product)</td></tr>
+  <tr><td>cycle (W_CYC 단위)</td><td>M-axis 진행</td></tr>
+</table>
+
+<h3>8.2 in_Wcontrol cadence (mixed-W 핵심)</h3>
+<pre>drive_w_cyc[k] = 18 + Σ_{j=0..k-1} W[j]   <span class="comment"># cum_W_exclusive</span></pre>
+<p>m_in=k 의 MAC 시작 cycle 에 <code>in_Wcontrol &lt;= W[k]</code> 드라이브. m_in=0 의 cycle 18, m_in=1 의 cycle 18+W[0], ...</p>
+
+<h3>8.3 in_scale_weight cadence (fire 캡처 시점 정합)</h3>
+<pre>drive_cyc[k] = 18 + A_FIRE_DELAY + Σ_{j=0..k} W[j]   <span class="comment"># cum_W_inclusive</span></pre>
+<p>A_FIRE_DELAY: A8=2, A4=1, A2=0 (Accumulator_Col 의 fire chain 깊이).</p>
+
+<h3>8.4 fire chain → out_scale 캡처 timing (A=8 예시)</h3>
+<pre>cycle  signal
+─────  ───────────────────────────────────────
+  18   in_Wcontrol = W[0],  MAC 시작 (cnt 0)
+  25   cnt = 7,  fire_cycle = high
+  26   acc_fire = 1,  cnt = 0  (m_in=1 MAC 시작, in_Wcontrol = W[1])
+  27   fire_q1 = 1
+  28   fire_q2 = 1   ← comb_s 가 이 cycle 의 값으로 계산
+  29   out_scale 캡처 (posedge 29 에서 comb_s(28) latched)
+       ↑ in_Wcontrol(28) = W[1] (이미 다음 m_in 값) ← <strong>WRONG impl_w</strong></pre>
+
+<h3>8.5 impl_w 파이프라인 (2026-05-18 RTL fix)</h3>
+<p>해결: <code>impl_w</code> 를 fire chain 깊이 + 1 만큼 지연 (Accumulator_Col 의 새 reg chain):</p>
+<pre>reg [3:0] impl_w_q1, impl_w_q2, impl_w_q3;
+wire [3:0] impl_w_eff = is_A8 ? impl_w_q3 :
+                        is_A4 ? impl_w_q2 :
+                        is_A2 ? impl_w_q1 : impl_w;
+<span class="comment">// always block:</span>
+impl_w_q1 &lt;= impl_w;
+impl_w_q2 &lt;= impl_w_q1;
+impl_w_q3 &lt;= impl_w_q2;</pre>
+
+<div class="info">
+  uniform W 시 <code>q1=q2=q3=impl_w</code> 라 9-mode 회귀 영향 없음. 자세한 설명은
+  <code>precision_modes_protocol.md</code> §7 (v1.1 추가분) 참조.
+</div>
+
+<h2 id="trouble">9. 트러블슈팅</h2>
+
+<h3>9.1 xsim "Failed to launch child process (child exe not found)"</h3>
+<p>이전 xsim instance 잔여물. build dir 정리:</p>
+<pre><span class="cmd">rm -rf sim/build/mixed_A8 && bash sim/run_mixed_one.sh 8</span></pre>
+
+<h3>9.2 compare 가 PASS 인데 n_diff &gt; 0</h3>
+<p>compare 의 fail-gate 미구현 (§6.2 주의). 출력에서 <code>hw_sw n_diff</code> 직접 확인.</p>
+
+<h3>9.3 mismatch 발생 → 어디부터 의심?</h3>
+<ol>
+  <li><strong>Python sanity</strong>: <code>cd MXP_Tools && python -m pytest tests/ -q</code> (45 cases, 0.3 s) PASS 인지.</li>
+  <li><strong>emit/golden 분리</strong>: gen_mixed.py 의 hex emit (<code>_emit_a_input_bs</code>) 와 golden (<code>compute_golden_mixed</code>) 이 uniform 케이스에서 MXP_Tools 의 <code>hwio.emit_a_input_bs</code> + <code>gemm.mxint_gemm_golden</code> 과 byte-identical 한지.</li>
+  <li><strong>isolation 분리</strong>: random fail 시 <code>MIXED_W_UNIFORM=8</code> 로 uniform 돌려보기.
+    <ul>
+      <li>uniform PASS → mismatch 는 mixed-pattern 특화 (W cadence, impl_w timing, chain skew).</li>
+      <li>uniform 도 fail → 더 기본 (emit / driving sequence / RTL build).</li>
+    </ul>
+  </li>
+  <li><strong>cycle 도식화</strong>: §8 의 fire chain ↔ in_Wcontrol cadence ↔ comb_s 캡처 cycle 을 손으로 그려가며 mismatch 위치 추적.</li>
+</ol>
+
+<h3>9.4 9-mode regression fail (RTL 변경 후)</h3>
+<p>uniform 케이스 깨졌으면 RTL 변경이 회귀 유발. 변경분 revert 또는 mode-별 분기 (예: <code>impl_w_eff</code> 처럼 mode-aware) 으로 재설계.</p>
+
+<hr>
+<p style="font-size: 0.85em; color: #888;">
+  작성: 2026-05-18 (mixed-precision TB 완전 해결 직후). 자세한 spec/plan 은
+  <code>docs/superpowers/specs/2026-05-17-mixed-precision-tb*.md</code>,
+  protocol 은 <code>precision_modes_protocol.md</code> v1.1 §7 참조.
+</p>
+
+</body>
+</html>

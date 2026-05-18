@@ -116,7 +116,56 @@ assign a3 = {is_A2  ? in_a3[input_a_len-1] : 1'b0, in_a3};
 wire [3:0] impl_a = is_A8 ? 4'd6 : is_A4 ? 4'd2 : 4'd0;     // A side IMPLICIT
 wire [3:0] impl_w = (in_Wcontrol == 2'b11) ? 4'd6 :         // W side IMPLICIT
                     (in_Wcontrol == 2'b10) ? 4'd2 : 4'd0;
-wire [4:0] implicit_total = impl_a + impl_w;                // 4비트로도 충분(max=12)
+
+// === Mixed-precision per-m_in W 지원: impl_w 파이프라인 ================
+// Added: 2026-05-18, RTL fix #4 (P-Task8 random mixed-W bit-exact)
+// Reference: precision_modes_protocol.md §7.3, docs/mixed-precision-tutorial.html §8.5
+//
+// ─── WHY 이 fix 가 필요한가 ────────────────────────────────────────────
+//
+// **문제**: mixed-W (per-m_in 별 다른 W_PREC) 시 random TB 가 hw_sw n_diff=
+// 16384/16384, max=6.5e4, SNR=-43dB 로 catastrophic fail. uniform W 는 PASS.
+//
+// **Root cause** (cycle-by-cycle 추적, A=8 W[0]=8, W[1]=4 예시):
+//   cycle 18..25: m_in=0 MAC (in_Wcontrol = W[0]=2'b11, impl_w=6).
+//   cycle 26:     acc_fire=1, m_in=1 MAC 시작
+//                 → TB 가 in_Wcontrol <= W[1]=2'b10 드라이브 (cnt 새 threshold).
+//   cycle 27:     fire_q1=1 (acc_fire chain stage 1).
+//   cycle 28:     fire_q2=1 (chain stage 2). in_Wcontrol = W[1] (이미 변경됨).
+//   cycle 29:     out_scale <= fire_q2 ? comb_s(28) : 0.
+//                 ★ comb_s(28) 가 combinational impl_w(in_Wcontrol(28)=W[1])
+//                   사용 → m_in=0 의 scale 계산에 W[1]=4 의 impl_w=2 가 들어감
+//                   (정답은 W[0]=8 의 impl_w=6). implicit_total 4 차이 →
+//                   FP32 변환 시 2^4 = 16× off, 누산되면 max ~ 6e4.
+//   uniform W 에선 impl_w 값 자체가 안 바뀜 → bug masked.
+//
+// **fix**: cnt threshold 제어 (in_Wcontrol 현재값) 와 scale 계산용 impl_w
+// (fire chain 으로 캡처되는 m_in 의 W) 의 timing reference 가 다름을 인식.
+// impl_w 를 fire chain 깊이 + 1 만큼 reg 지연 → m_in=k 캡처 cycle 에서
+// impl_w_eff 가 m_in=k 의 W 를 가리킴.
+//
+// 왜 +1 인가: out_scale 은 register 라 fire_q2 가 high 인 cycle T 의 값을
+// posedge T+1 에서 latch. comb_s(T) 의 impl_w 는 cycle T 의 값. acc_fire 가
+// cycle T-2 일 때 (A=8), m_in=k 의 마지막 MAC cycle 은 T-3. drive_w_cyc[k+1]
+// 은 cycle T-2 → in_Wcontrol(T) = W[k+1]. m_in=k 의 W[k] 를 얻으려면 cycle
+// T-3 (= 3 cycle 이전) 의 impl_w 가 필요 → q3 (3-stage reg).
+//
+// ─── 호환성 ─────────────────────────────────────────────────────────────
+// uniform W (9-mode 회귀) 시 in_Wcontrol 상수 → q1=q2=q3=impl_w → impl_w_eff
+// = impl_w 와 동일 → 동작 변경 없음. 검증: 9-mode integration sweep ALL 9
+// PASS (Acc behavioral diff = 0).
+//
+// mode-별 fire chain 깊이 대응 (Accumulator_Col 자체 fire mux 와 일치):
+//   - A=2 (out_scale 가 acc_fire 캡처)  → impl_w_q1 (1-cyc lag)
+//   - A=4 (out_scale 가 fire_q1  캡처)  → impl_w_q2 (2-cyc lag)
+//   - A=8 (out_scale 가 fire_q2  캡처)  → impl_w_q3 (3-cyc lag)
+//   - IDLE → impl_w (사용 안 됨, fall-through)
+reg [3:0] impl_w_q1, impl_w_q2, impl_w_q3;
+
+wire [3:0] impl_w_eff = is_A8 ? impl_w_q3 :
+                        is_A4 ? impl_w_q2 :
+                        is_A2 ? impl_w_q1 : impl_w;
+wire [4:0] implicit_total = impl_a + impl_w_eff;            // 4비트로도 충분(max=12)
                                                             // 하지만 5비트로 슬랙 1비트
                                                             // 둬도 합성에 영향 없음
 
@@ -204,6 +253,9 @@ always @(posedge clk or posedge rst) begin
         s2                   <= 0;
         fire_q1              <= 0;
         fire_q2              <= 0;
+        impl_w_q1            <= 0;
+        impl_w_q2            <= 0;
+        impl_w_q3            <= 0;
         out_accumulate       <= 0;
         out_scale            <= 0;
         fire                 <= 0;
@@ -226,6 +278,12 @@ always @(posedge clk or posedge rst) begin
         //      ≡ lane0<<6 + lane1<<4 + lane2<<2 + lane3 (full 8-bit × weight MAC)
         s2      <= (s1_a <<< 4) + s1_b;
         fire_q2 <= fire_q1;
+
+        // impl_w 파이프라인: fire chain 과 함께 진행. comb_s 가 캡처되는
+        // cycle 에 m_in=k 의 W 와 일치하도록 지연.
+        impl_w_q1 <= impl_w;
+        impl_w_q2 <= impl_w_q1;
+        impl_w_q3 <= impl_w_q2;
 
         // One-hot mux on Mode_oh — semantics identical to the prior case (in_Acontrol).
         // Bits are mutually exclusive (idle = all zero → default branch via priority).

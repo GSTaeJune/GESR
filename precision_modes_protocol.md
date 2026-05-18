@@ -1,10 +1,10 @@
 # MXP Precision Modes Driver Protocol
 
-**Version**: 1.0 (2026-05-11)
-**Validated**: 9 modes (A∈{8,4,2} × W∈{8,4,2}), full GEMM 128×128×128 INT MAC + Scale 100% PASS.
+**Version**: 1.1 (2026-05-18) — **mixed-W per-m_in support 추가** (§7), §1 invariant clarification, §3 의 cycle reference frame 명시.
+**Version 1.0** (2026-05-11): 9 modes (A∈{8,4,2} × W∈{8,4,2}), full GEMM 128×128×128 INT MAC + Scale 100% PASS.
 **Architecture**: 32×32 systolic array, bit-serial weight, byte-parallel activation, mixed-precision via N-direction lane packing.
 
-이 문서는 MXP TOP 모듈을 다른 AI accelerator 프로젝트의 GEMM 코어로 instantiate 할 때 필요한 driver protocol 을 정리한다. 9가지 (A, W) precision 조합 전부에서 실측 검증됨.
+이 문서는 MXP TOP 모듈을 다른 AI accelerator 프로젝트의 GEMM 코어로 instantiate 할 때 필요한 driver protocol 을 정리한다. 9가지 (A, W) precision 조합 전부에서 실측 검증됨. v1.1 에서 **per-m_in × K-block W mix** (예: m_in=0 에 W=8, m_in=1 에 W=4) 도 RTL fix (Accumulator_Col 의 `impl_w` 파이프라인) + TB driver schedule 일반화로 지원됨.
 
 ---
 
@@ -30,7 +30,11 @@
 - `FIRES_PER_COL` = `N_T_logical * K_T * M_T * TILE_SIZE` (with K_T=M_T=4, TILE_SIZE=32).
 - **Cycle count includes**: Stage 2 setup (32 cy B load + 32 cy settle) + Stage 3+4 MAC sweep + last-fire latency.
 
-**Architecture invariant — A_ctrl 와 W_ctrl 직교**: `Accumulator_Col` 의 mode mux 는 A_ctrl(`Mode_oh` one-hot) 만 보고 lane sign-ext 와 out_accumulate 폭을 결정. `in_Wcontrol` 는 내부 4개 `Accumulator` 의 cnt rollover threshold 만 결정. 두 신호는 **runtime-independent** — K-tile boundary 정렬 보장 하에 동적 변경 가능 (단, K-tile mid 변경 시 partial sum 깨짐).
+**Architecture invariant — A_ctrl 와 W_ctrl 직교**: `Accumulator_Col` 의 mode mux 는 A_ctrl(`Mode_oh` one-hot) 만 보고 lane sign-ext 와 out_accumulate 폭을 결정. `in_Wcontrol` 는 내부 4개 `Accumulator` 의 cnt rollover threshold 만 결정. 두 신호는 **runtime-independent**.
+
+**A_ctrl 변경 제약**: K-tile boundary 에서만 변경 가능 (mid-K 변경 시 lane sign-ext / out_accumulate 폭이 바뀌어 partial sum 깨짐).
+
+**W_ctrl 변경 제약 (v1.1, 2026-05-18 갱신)**: **m_in 단위까지 변경 가능** (= per-(M-row, K-block) W mix 지원). 한 m_in 안에서 (= W_PREC cycle 안에서 mid-MAC) 변경 시 cnt rollover threshold 가 틀어져 partial sum 깨짐. **단**, m_in 사이 변경 시 `Accumulator_Col` 의 `out_scale` 캡처 timing 과 `impl_w` 의 cycle 정합이 필수 — RTL `impl_w` 파이프라인 (§7.3) + TB driver schedule (§7.2) 의 두 fix 모두 적용된 상태에서만 정합. uniform W (9-mode) 에서는 W 가 안 바뀌므로 두 fix 적용 전후 동작 동일.
 
 ---
 
@@ -249,7 +253,7 @@ TOP #(
    - Station in_control toggle (mode-specific TOGGLE 값)
    - scale_weight drive at `FIRST_FIRE + W_CYC × m`
 4. **Fire capture & accumulate** — `out_fire[c]` 감지 시 `out_accumulate` 슬라이스, mem_c 업데이트
-5. **Mode boundary alignment** — A_ctrl 또는 W_ctrl 변경 시 K-tile boundary 에서만 변경 (mid-K 변경하면 partial sum 깨짐)
+5. **Mode boundary alignment** — A_ctrl 변경은 K-tile boundary 에서만. W_ctrl 변경은 m_in boundary 까지 OK (per-(M-row, K-block) W mix 지원, v1.1). 단 mid-MAC (한 m_in 안의 W_CYC cycle 안에서) 변경은 금지. 자세한 driver schedule + RTL 정합 → §7.
 
 ### 6.3 주의사항
 
@@ -274,6 +278,110 @@ Windows 에서 Vivado xsim CLI 사용 시:
 
 ---
 
+## 7. Mixed-precision per-m_in W support (v1.1, 2026-05-18 검증)
+
+§3 의 driver protocol 은 한 sim 동안 W_PREC 가 fixed 인 9-mode (uniform) 기준. 본 §7 은 **per-(M-row, K-block) W mix** 지원을 위한 driver schedule 일반화 + RTL 정합 요건을 정리한다. `tb/gemm_sram_top_mixed_tb.v` 와 RTL fix (Accumulator_Col 의 `impl_w` 파이프라인) 의 조합으로 `bash sim/run_mixed_one.sh 8` 의 random W_PREC 케이스 bit-exact PASS (`hw_sw n_diff=0/16384`).
+
+### 7.1 W_PREC map 의 의미
+
+- shape `(M, K_T)`, 값 ∈ {2, 4, 8} — 각 (M-row, K-block) 의 W_PREC.
+- SA 차원 매핑 (row=K, col=N, cycle=M) 때문에 한 cycle 의 32-bit weight 는 같은 K-block 의 32 K-element bit (W_PREC 자연스레 동일).
+- M 진행마다 W_PREC 갱신 가능 → 같은 K-block 안에서도 M 별 다른 W_PREC.
+- 자세한 매핑: `CLAUDE.md` "MXP control surface" → "SA 차원 매핑" subsection, 메모리 `feedback_sa_dimension_mapping.md`.
+
+### 7.2 Driver schedule (TB 책임)
+
+TB 는 §3 의 6개 per-cycle drive 중 **`in_Wcontrol`** 과 **`in_scale_weight`** 을 m_in 별 cumulative-W cadence 로 발사.
+
+**`in_Wcontrol` schedule** (cnt rollover threshold 갱신):
+```
+drive_w_cyc[k] = 18 + Σ_{j=0..k-1} W[j]        (cum_W_exclusive[k])
+```
+- m_in=k 의 MAC 시작 cycle (= m_in=k-1 의 acc_fire 직후) 에 `in_Wcontrol <= W[k]` 드라이브.
+- chain entry: col 16 (symmetric), col c 도착 delay `|c-16|` (chain 이 자동 분산).
+
+**`in_scale_weight` schedule** (fire 캡처 시점 정합):
+```
+drive_cyc[k] = 18 + A_FIRE_DELAY + Σ_{j=0..k} W[j]   (cum_W_inclusive[k])
+```
+- uniform W 일 때 `9-mode 의 FIRST_FIRE + W_CYC × k` 와 정확히 일치 (예: A8W8 → 28 + 8k).
+- A_FIRE_DELAY: A8=2, A4=1, A2=0 (§3 Stage 3+4 #6 의 fire chain 깊이).
+
+**Dynamic TOGGLE_VAL** (K-tile 별):
+```
+TOGGLE[k_t] = 18 + A_FIRE_DELAY + W[k_t · M_T · TILE_SIZE] / 2
+```
+- 각 K-tile 의 첫 m_in 의 W 로 lookup. 9-mode 의 mode-별 fixed TOGGLE (§3 Stage 3+4 #3) 의 일반화.
+
+**참고 구현**: `tb/gemm_sram_top_mixed_tb.v` 의 `drive_cyc_target` / `drive_w_cyc_target` schedule 변수 + `lookup_w_for_idx(idx)` / `lookup_wctrl_for_idx(idx)` function.
+
+### 7.3 RTL 정합 — `impl_w` 파이프라인 (Accumulator_Col 의 `impl_w_q1/q2/q3`)
+
+**왜 필요한가**: `in_Wcontrol` 은 m_in=k 진입 cycle (= m_in=k-1 의 acc_fire cycle) 에 W[k] 로 갱신된다. 그러나 `out_scale` 의 fire chain 캡처 (A=8 의 fire_q2, A=4 의 fire_q1, A=2 의 acc_fire) 는 m_in=k-1 의 결과 → `comb_s` 가 m_in=k-1 의 scale 을 사용해야 함. 이때 `comb_s` 안의 `impl_w` 가 combinational 로 `in_Wcontrol` 에서 decode 되면 **이미 W[k] 의 impl_w 가 섞임** → mixed-W 결과 catastrophic fail.
+
+**해결** (Accumulator_Col.v, 본 protocol v1.1 의 RTL 변경분):
+```verilog
+reg [3:0] impl_w_q1, impl_w_q2, impl_w_q3;
+wire [3:0] impl_w_eff = is_A8 ? impl_w_q3 :    // 3-cyc lag (fire_q2 캡처)
+                        is_A4 ? impl_w_q2 :    // 2-cyc lag (fire_q1 캡처)
+                        is_A2 ? impl_w_q1 :    // 1-cyc lag (acc_fire 캡처)
+                        impl_w;
+wire [4:0] implicit_total = impl_a + impl_w_eff;
+// always @(posedge clk):
+impl_w_q1 <= impl_w;
+impl_w_q2 <= impl_w_q1;
+impl_w_q3 <= impl_w_q2;
+```
+uniform W 시 `q1=q2=q3=impl_w` 라 9-mode 회귀 영향 없음.
+
+### 7.4 Cycle-by-cycle 도식 (A=8, W[0]=8, W[1]=4 mixed 예시)
+
+```
+cycle  in_Wcontrol  Accumulator         Accumulator_Col           out_scale
+─────  ───────────  ──────────────────  ────────────────────────  ─────────
+  18   W[0]=2'b11   MAC start (cnt=0)
+  19                cnt=1
+  ...               ...
+  25                cnt=7, fire_cycle=1
+  26   W[1]=2'b10   acc_fire=1, cnt=0   fire_q1: pending
+                    (m_in=1 MAC 시작)   impl_w_q3 = impl_w(25) = 6 (W[0])
+  27                cnt=1               fire_q1=1
+                                        impl_w_q3 = impl_w(26) = impl_w(W[1])
+                                        BUT fire chain 으로 m_in=0 캡처 中
+  28                cnt=2               fire_q2=1  ← comb_s(28) 계산:
+                                          impl_w_eff = impl_w_q3(28) = impl_w(25) = 6 ✓
+                                          in_scale_weight(28) = a_scale[0] ✓ (drive_cyc[0]=28)
+  29                cnt=3               out_scale <= comb_s(28)  ← m_in=0 결과 정확히 latch
+                                        fire output = 1
+```
+
+**핵심 관찰**:
+- m_in=0 캡처 cycle (28) 에 `in_Wcontrol` 은 이미 W[1] 로 전환. combinational `impl_w` 쓰면 W[1] 의 6 → 2 로 잘못된 값.
+- `impl_w_q3(28) = impl_w(25) = impl_w(W[0]) = 6` ✓ (3-cyc lag 가 m_in=0 의 W 까지 거슬러 올라감).
+- `in_scale_weight(28) = a_scale[0]` ✓ (drive_cyc[0]=28 schedule).
+
+### 7.5 검증 결과 (2026-05-18)
+
+| Test | Cmd | hw_sw n_diff |
+|---|---|---|
+| uniform W=8 isolation | `MIXED_W_UNIFORM=8 bash sim/run_mixed_one.sh 8` | 0 / 16384 |
+| K-tile granular `[8,4,2,8]` | `MIXED_W_K_TILE=8,4,2,8 bash sim/run_mixed_one.sh 8` | 0 / 16384 |
+| random mixed (full) | `bash sim/run_mixed_one.sh 8` | 0 / 16384 |
+| 9-mode integration sweep | `bash sim/run_integration_sweep.sh` | ALL 9 PASS |
+
+### 7.6 디버그 시 dataflow 분석 순서 (lesson learned)
+
+mixed-precision 정합 디버그 시 잘못된 결론 점프 방지:
+
+1. **emit/golden 분리 검증** (1초): gen_mixed.py 의 `_emit_a_input_bs` + `compute_golden_mixed` 가 uniform 케이스에서 검증된 MXP_Tools 의 `hwio.emit_a_input_bs` + `gemm.mxint_gemm_golden` 과 byte-identical 인지 Python 으로 비교.
+2. **isolation 분리** (1분): random fail 시 `MIXED_W_UNIFORM=8` 로 uniform fix → uniform PASS 면 mismatch 가 mixed-pattern 특화 영역.
+3. **chain topology 확인**: GEMM.v 의 `wc_chain[num_col/2]=in_Wcontrol` (col 16 symmetric) vs PE_feeder 의 weight chain (row=K=r 의 col=r entry, 좌우 propagate). col 별 도착 cycle 도식화.
+4. **fire chain capture cycle vs combinational signal lag**: `impl_w` 같이 fire chain 으로 캡처되는 combinational signal 은 fire chain 깊이 + 1 만큼 reg 지연 필수. 안 그러면 다음 m_in 의 값으로 오염.
+
+자세한 lesson + 본 세션 실수 사례: 메모리 `feedback_mixed_prec_debug_lessons.md`.
+
+---
+
 ## 부록 A. RTL 구조 요약
 
 ```
@@ -290,10 +398,18 @@ TOP
 
 ## 부록 B. Validation summary
 
-이 protocol 의 모든 수치는 다음 sim 으로 검증됨:
+**v1.0 (2026-05-11)** — uniform 9-mode 기준:
 - 9 TB (tb_A{8,4,2}W{8,4,2}.v) full 128×128×128 GEMM
 - TransformSerial.py 의 FP32 random matrix → MXINT quant → reference C
 - Sim: Vivado 2024.1 xsim, 333 MHz clock (CLK_PERIOD=3 ns)
 - 모든 TB INT MAC PASS=16384/FAIL=0 AND Scale FAIL=0 (lanes×col×fires)
 - 기존 5 baseline cycle (16486/8294/8293/4197/1119) 정확히 보존
 - 새 4 mode cycle (4191/2142/4192/2142) 첫 시도 PASS (timing iteration 0회)
+
+**v1.1 (2026-05-18)** — mixed-W per-m_in 추가:
+- `tb/gemm_sram_top_mixed_tb.v` + Accumulator_Col 의 `impl_w` 파이프라인 fix.
+- uniform W=8 isolation (`MIXED_W_UNIFORM=8`): hw_sw n_diff = 0/16384.
+- K-tile granular `[8,4,2,8]` (`MIXED_W_K_TILE=...`): hw_sw n_diff = 0/16384.
+- random mixed (`bash sim/run_mixed_one.sh 8`, seed=0): hw_sw n_diff = 0/16384.
+- 9-mode integration sweep regression: ALL 9 PASS (uniform 회귀 영향 없음).
+- 데이터 생성/시뮬레이션 절차: `docs/mixed-precision-tutorial.html`.
