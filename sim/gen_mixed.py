@@ -378,6 +378,13 @@ def main():
     sw_ref = out / "sw_ref"
     sw_ref.mkdir(exist_ok=True)
     np.savez(sw_ref / "C_sw_mixed.npz", C_sw=C_golden, C_fp32=C_fp32_truth)
+    # Save inputs (W/A fp32 + int + scale + prec_map) so downstream viz can show
+    # the input side of the pipeline without re-parsing hex files.
+    np.savez(sw_ref / "inputs_mixed.npz",
+             W_fp=W_fp, A_fp=A_fp,
+             W_int=W_int, A_int=A_int,
+             W_scale=W_scale, A_scale=A_scale,
+             prec_map=prec_map, A_PREC=np.int32(args.A))
     (out / "hw_out").mkdir(exist_ok=True)
 
     print(f"[gen_mixed] done: hex+golden+viz → {out}")
