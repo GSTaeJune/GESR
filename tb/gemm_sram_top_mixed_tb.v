@@ -348,6 +348,32 @@ module gemm_sram_top_mixed_tb;
     reg     cur_pp;       // PE in_control 토글 상태 (Buf1/Buf2)
     reg     cur_st_pp;    // Station selector 토글 상태
 
+    // scale_weight 드라이브 schedule — fire_q2 capture 시점에 맞춰
+    // a_scale[k] 가 visible 되도록 cycle 정합.
+    // drive_cyc[k] = 18 + A_FIRE_DELAY + Σ W_PREC[0..k]  (cum_W_inclusive[k])
+    // — uniform W=8, A=8 일 때 28+8k 로 reduce (= 9-mode FIRST_FIRE+W_CYC*k).
+    integer drive_cyc_target;     // 다음 a_scale[] 드라이브 cyc_global
+    integer drive_idx_target;     // 다음 드라이브할 a_scale[] 인덱스 (0..K_T*M_T*TILE-1)
+
+    // 인덱스 → W (cycle 수) 매핑. drive_idx_target 의 m_in 위치 W_PREC lookup.
+    function integer lookup_w_for_idx;
+        input integer idx;
+        integer kt_v, mt_v, mi_v;
+        reg [1:0] w_ctrl_v;
+        begin
+            kt_v = idx / (M_T * TILE_SIZE);
+            mt_v = (idx / TILE_SIZE) % M_T;
+            mi_v = idx % TILE_SIZE;
+            w_ctrl_v = w_prec_packed[mt_v*TILE_SIZE + mi_v][2*kt_v +: 2];
+            case (w_ctrl_v)
+                W_INT8:  lookup_w_for_idx = 8;
+                W_INT4:  lookup_w_for_idx = 4;
+                W_INT2:  lookup_w_for_idx = 2;
+                default: lookup_w_for_idx = 8;
+            endcase
+        end
+    endfunction
+
     // a_bs[] 에서 (k_t, m_t, o) 위치 워드 추출.
     // mixed TB 에서 o = m_in_idx*8 + (7-bp) — gen_mixed.py W_PAD=8 padding 에 맞춤.
     // W_CYC 가 없으므로 a_bs_word 의 stride 를 8 (W_PAD) 로 고정.
@@ -526,6 +552,10 @@ module gemm_sram_top_mixed_tb;
             cur_pp = 1'b1;
             capture_en <= 1'b1;
 
+            // scale_weight schedule 초기화 — m_in=0 의 fire 가 도착할 cyc.
+            drive_idx_target = 0;
+            drive_cyc_target = 18 + A_FIRE_DELAY + lookup_w_for_idx(0);
+
             for (n_t = 0; n_t < N_T_LOGICAL; n_t = n_t + 1) begin
                 for (k_t = 0; k_t < K_T; k_t = k_t + 1) begin
                     for (m_t = 0; m_t < M_T; m_t = m_t + 1) begin
@@ -577,11 +607,16 @@ module gemm_sram_top_mixed_tb;
                                 end
                                 in_station_control <= cur_st_pp;
 
-                                // scale_weight 드라이브: 매 m_in iteration 의 첫 bit (bp == w_now-1) 시점.
-                                if (bp == w_now - 1) begin
-                                    in_scale_weight <= a_scale[
-                                        k_t * M_T * TILE_SIZE +
-                                        m_t * TILE_SIZE + m_in_idx];
+                                // scale_weight 드라이브 — schedule 기반.
+                                // drive_cyc_target = 18 + A_FIRE_DELAY + cum_W_inclusive[k],
+                                // 다음 m_in 의 W 만큼 advance. 한 n_t 의 a_scale[] 다 쓰면 wrap.
+                                if (cyc_global == drive_cyc_target) begin
+                                    in_scale_weight <= a_scale[drive_idx_target];
+                                    drive_idx_target = drive_idx_target + 1;
+                                    if (drive_idx_target >= K_T*M_T*TILE_SIZE)
+                                        drive_idx_target = 0;
+                                    drive_cyc_target = drive_cyc_target
+                                                       + lookup_w_for_idx(drive_idx_target);
                                 end
 
                                 // Prefetch: m_t=1 의 매 m_in 첫 bit 시점에 한 col 분 driving.
@@ -630,6 +665,15 @@ module gemm_sram_top_mixed_tb;
             in_b                <= 0;
             in_Scale_Activation <= 0;
             for (i = 0; i < TAIL_CYC; i = i + 1) begin
+                // tail 동안에도 scale_weight schedule 이어감 — in-flight fire 의 scale capture.
+                if (cyc_global == drive_cyc_target) begin
+                    in_scale_weight <= a_scale[drive_idx_target];
+                    drive_idx_target = drive_idx_target + 1;
+                    if (drive_idx_target >= K_T*M_T*TILE_SIZE)
+                        drive_idx_target = 0;
+                    drive_cyc_target = drive_cyc_target
+                                       + lookup_w_for_idx(drive_idx_target);
+                end
                 @(posedge clk);
                 cyc_global = cyc_global + 1;
             end

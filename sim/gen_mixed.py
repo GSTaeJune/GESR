@@ -29,7 +29,17 @@ def build_w_prec_map(seed: int = 0, M: int = 128, K_T: int = 4) -> np.ndarray:
     """(M, K_T) shape 의 W_PREC array ∈ {2,4,8} 균등 random.
 
     seed 고정 시 재현 가능. dtype=uint8.
+
+    Debug override: env MIXED_W_UNIFORM=<2|4|8> set 시 random 대신 전체 균일 W.
+    isolation test 용 — mixed TB 의 W=균일 path 가 9-mode sweep 과 일치하는지
+    분기 검증할 때 사용. CLAUDE.md 의 P-Task8 debug protocol 참고.
     """
+    import os
+    uniform = os.environ.get("MIXED_W_UNIFORM")
+    if uniform is not None:
+        p = int(uniform)
+        assert p in (2, 4, 8), f"MIXED_W_UNIFORM must be 2/4/8, got {p}"
+        return np.full((M, K_T), p, dtype=np.uint8)
     rng = np.random.default_rng(seed)
     choices = np.array([2, 4, 8], dtype=np.uint8)
     return choices[rng.integers(0, 3, size=(M, K_T), dtype=np.int64)]

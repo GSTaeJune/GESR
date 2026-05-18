@@ -2,27 +2,79 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Next session kickoff (2026-05-17, mixed-precision TB Task 1-7 PASS, Task 8 BLOCKED)
+## Next session kickoff (2026-05-18, mixed-prec TB scale_weight cadence 부분 fix, random mixed 미해결)
 
-**진행 상태**: per-block W_PREC 혼용 검증 TB 의 구현 (spec/plan: `docs/superpowers/{specs,plans}/2026-05-17-mixed-precision-tb*.md`) 중 P-Task1~7 (gen_mixed.py 전체 6 함수 + tb/gemm_sram_top_mixed_tb.v + elab smoke) 모두 PASS, P-Task8 (A=8 end-to-end bit-exact) **BLOCKED**.
+**진행 상태**: 2026-05-17 의 P-Task8 BLOCKER (random mixed bit-exact mismatch) 를 디버그해서 **root cause 부분 확정 + uniform W=8 isolation PASS** 까지 도달. random mixed (per-m_in W 변경) 는 여전히 fail. 변경 사항 **미커밋** (사용자 결정 대기).
 
-**P-Task8 BLOCKER 상세**:
-- `bash sim/run_mixed_one.sh 8` 가 끝까지 도달 (xsim 74s, capture/drain 65536/65536 정확) 하지만 MXP_Tools compare 에서 **hw_sw 비교 16384/16384 mismatch, max=6.6e+04, SNR=-43dB**.
-- run_mixed_one.sh 의 `mixed_A8: PASS` 출력은 false positive — `mxp_tools.cli.cmd_compare` 가 mismatch 시에도 print_stats 만 하고 sys.exit(1) 안 함. 9-mode sweep 도 같은 구조라 사실상 fail-gate 없음 (다만 9-mode 는 결과적으로 한 번도 실패 안 함).
-- Root cause 미파악. 가능 후보 3개: (a) TB driving timing (TOGGLE_VAL=24, FIRST_FIRE=17 등 worst-case 보수 가정), (b) `_emit_a_input_bs` 의 W=8 padding bit-serial layout 의 ordering, (c) `compute_golden_mixed` 의 누적 식 (mxint_gemm_golden 와 uniform W=8 일 때만 bit-exact 검증됨).
+### 확정 #1 (수정 완료, uniform W=8 isolation 으로 검증): scale_weight cadence misalignment
 
-**다음 세션 시작 시 debug protocol**:
-1. **isolation 검증** — `sim/gen_mixed.py` 의 `build_w_prec_map` 을 mod 해서 모든 (M, K-tile) 의 W_PREC=8 로 고정 후 `bash sim/run_mixed_one.sh 8` 실행. 결과 dump 와 9-mode sweep 의 `work/A8_B8/hw_out/bank{0..31}.mem` 을 직접 diff. 동일하면 mixed-TB / hex emit 이 균일 모드와 일치 (driving timing/golden 의 mixed-pattern 분기만 의심 대상), 다르면 mixed-TB 자체에 구조적 mismatch.
-2. **mxp_tools.compare 의 fail-gate 강화** — `sys.exit(1) if stats["hw_sw"]["n_nonzero_diff"] > 0 else 0` 추가. 별도 작업, 본 debug 와 독립.
+**증상**: mixed TB 가 `bp == w_now - 1` (m_in 진입 cycle) 에서 `in_scale_weight <= a_scale[m_idx]` 드라이브. 그러나 9-mode TB 는 `cyc_global ≥ FIRST_FIRE_GLOBAL && (cyc - FIRST_FIRE) % W_CYC == 0` cadence — Accumulator_Col 의 fire_q2 가 comb_s 를 capture 하는 cycle 직전 (1 cycle 차) 에 in_scale_weight 가 settle 되도록 calibrated. 둘이 약 28 cycle (W=8, A=8 기준) 어긋남 → fire 시점에 잘못된 m_in 의 scale 값 capture.
 
-**기 commit 된 산출물** (이번 세션):
+**Fix (일반화 공식)**:
+```
+drive_cyc[k] = 18 + A_FIRE_DELAY + Σ_{j=0..k} W[j]
+```
+- uniform W=8, A=8 일 때 = 28 + 8k = 9-mode 의 FIRST_FIRE+W_CYC*k 와 정확히 일치.
+- A_FIRE_DELAY: A8=2, A4=1, A2=0 (Accumulator_Col 의 fire_qN 단계 수).
+- W[j]: j-번째 m_in 의 W_PREC (cumulative_W_inclusive).
+
+**구현**: `tb/gemm_sram_top_mixed_tb.v` 에 `drive_cyc_target` / `drive_idx_target` schedule 변수 + `lookup_w_for_idx(idx)` function. drive_stage_3_4_mixed 진입 시 schedule 초기화 (`drive_cyc_target = 18 + A_FIRE_DELAY + lookup_w_for_idx(0)`). bp 루프 안에서 `cyc_global == drive_cyc_target` 시 드라이브 + idx 증분 + cyc_target += W[next idx]. drive_stage_5_tail 도 같은 schedule 이어감 (in-flight fire scale capture).
+
+**검증**: `work/isol_W8/` (env `MIXED_W_UNIFORM=8` 로 build_w_prec_map 균일 W=8 fix) 에 mixed TB 돌린 결과 vs mixed golden bit-exact PASS (hw_sw: max=0, n_diff=0/16384, SNR=inf). emit hex / golden 도 `compute_golden_mixed` == `mxint_gemm_golden` byte-identical 로 확인 완료.
+
+### 미해결 #2: random mixed (per-m_in W 변경) 여전히 fail
+
+isolation 에 fix 적용 후도 `bash sim/run_mixed_one.sh 8` (random W_PREC map) 은 hw_sw max=6.5e4, n_diff=16384/16384, SNR=-43dB 로 **여전히 fail**. cadence 외에 다른 mixed-prec 정합 요인이 있다는 뜻.
+
+**가설 / 미해결 질문**:
+1. **chain topology mismatch**: GEMM.v line 211: `wc_chain[num_col/2] = in_Wcontrol` — Wcontrol 은 **col 16 진입 symmetric chain** (|c-16|/hop). 반면 weight `in_a[r]` 의 PE_feeder 는 **각 row 의 col=r 위치 feeder** 에서 좌우 propagate (col c at row r = TB + |c-r|). uniform W 에선 Wcontrol 안 바뀌어서 무관, mixed W 에선 col 별 in_Wcontrol 도착 시점이 col 별 weight bit 도착 시점과 비대칭 → cnt rollover threshold 가 잘못된 cycle 에 적용될 가능성.
+2. **prefetch cadence 차이**: mixed TB 는 `m_t == 1 && bp == w_now-1` 에서 sparse prefetch (32 m_in × W 분산). 9-mode 는 `m_t == 1 && o < TILE_SIZE` 에서 dense (32 consecutive cycles). station chain settle 시점이 mixed-W 에서 어긋날 가능성 (TOGGLE_VAL=24 worst-case 고정).
+3. **TOGGLE_VAL fixed-24 의 mixed-W invariant**: 9-mode 는 (A, W) 마다 TOGGLE_VAL 다름 (19~24). mixed TB 는 TOGGLE_VAL=24 worst-case 보수 고정. mixed-W 에선 K-tile 마다 cyc_in_K 가 가변이라 station toggle 시점이 다른 K-tile 의 Wcontrol settle 과 어긋날 가능성.
+
+**사용자 의도 확인 필요 (2026-05-18 conversation 중 명시)**:
+- 사용자: "in_Wcontrol 도 weight 처럼 전파될수있기때문에 적절한 타이밍 (weight block 이 바뀌어서 출력되는 타이밍) 에 그거에 맞는 신호를 전파시키면 block 이 타일내에서 바뀌더라도 카운터 조절이 될수있는데".
+- 즉 RTL 의 design intent 는 per-(M-row, K-block) W mix 를 지원하고, TB 가 in_Wcontrol 을 "weight block 출력 타이밍에 맞게" 드라이브해야 한다는 입장.
+- 그러나 RTL 의 wc_chain 은 col 16 진입 symmetric — weight feeder 가 row 마다 다른 col 위치 에 있는 것과 chain 구조 다름. **TB 만으로 col 별 도착 시점 보정이 가능한지 추가 확인 필요.**
+- precision_modes_protocol.md §1 마지막 줄 "K-tile mid 변경 시 partial sum 깨짐" 는 (a) mid-MAC (한 m_in 안에서) 만 가리키는 보수적 표현일 수도 있고, (b) RTL 의 실제 한계를 정확히 반영한 것일 수도 — 본 세션에서 결론 못 냄.
+
+### 다음 세션 protocol
+
+1. **사용자 결정 먼저 물어보기**:
+   - (a) 현재 TB 변경 (scale_weight schedule 일반화) 만 일단 commit 하고 random mixed 디버그는 별도 작업으로?
+   - (b) random mixed 디버그 계속? (RTL chain timing 분석 필요)
+   - (c) spec 단순화 (prec_map shape `(K_T,)` 만 = K-tile 단위 mix) 로 RTL 손 안대고 working 으로?
+
+2. **(b) 진행 시 다음 step 후보**:
+   - GEMM.v / SystolicArray.v 의 wc_chain (Wcontrol propagation) vs PE_feeder 의 in_a chain (weight propagation) 의 col 별 도착 시점 cycle 도식화. SA 가 mixed-W per-m_in 에서 어떤 col 에서 어떤 cyc 에 in_Wcontrol 이 어떤 값이어야 하는지 정확히 specify.
+   - mixed TB 의 in_Wcontrol 드라이브 시점 (현재 m_in_idx 진입 cycle) 을 RTL 정합 시점으로 보정. 가능하면 isolation 처럼 small-case (e.g., 8 m_in 만 random W) 로 debug 좁히기.
+
+3. **(c) 진행 시**: `sim/gen_mixed.py::build_w_prec_map` 의 shape 를 `(M, K_T)` → `(K_T,)` 로 변경. TB 의 `lookup_w_for_idx` 도 m_in 무관하게 K-tile 단위 lookup 으로 단순화. spec/plan 문서도 업데이트.
+
+### 미커밋 변경 (working tree, status)
+
+- `sim/gen_mixed.py`: `build_w_prec_map` 에 `MIXED_W_UNIFORM` env override 추가 (isolation test helper). 값 ∈ {2,4,8} set 시 random 대신 균일 W. 디버그용이라 keep or revert 둘 다 OK.
+- `tb/gemm_sram_top_mixed_tb.v`:
+  - module-level: `integer drive_cyc_target, drive_idx_target;` + `function integer lookup_w_for_idx(input integer idx);`.
+  - drive_stage_3_4_mixed: schedule 초기화 + bp 루프 안에서 `if (cyc_global == drive_cyc_target) ...` 드라이브.
+  - drive_stage_5_tail: 같은 schedule 이어감.
+  - 기존 `if (bp == w_now - 1) in_scale_weight <= a_scale[...]` 블록은 새 schedule 로 교체됨 (제거).
+
+### 본 세션 이미 commit 된 산출물 (2026-05-17)
+
+(직전 commit 들. 본 디버그 세션에서는 추가 commit 없음)
 - spec/plan: `docs/superpowers/{specs,plans}/2026-05-17-mixed-precision-tb*.md`
 - gen_mixed.py + 10 pytest: `sim/gen_mixed.py`, `sim/tests/test_gen_mixed.py` (commits `68a8542` ~ `a77bd12`)
 - 신규 TB: `tb/gemm_sram_top_mixed_tb.v` (commit `6106d7a`)
 - 신규 sim 스크립트: `sim/run_mixed_one.sh` (commit `a77bd12`)
-- `sim/run_mixed_sweep.sh` 는 아직 미작성 (P-Task9). P-Task8 debug 후.
+- `sim/run_mixed_sweep.sh` 는 아직 미작성 (P-Task9). P-Task8 완전 해결 후.
 
-**핵심 RTL 매핑 사실 (이번 세션에 명시)**: SA 의 row=K, col=N, cycle=M 진행. 자세한 표는 본 CLAUDE.md `## MXP control surface` 의 첫 subsection.
+### 별도 작업 — mxp_tools.compare 의 fail-gate
+
+`mxp_tools/cli.py::cmd_compare` 가 mismatch 시 stats print 만 하고 `sys.exit(1)` 안 함 → run_mixed_one.sh / run_integration_sweep.sh 모두 false-positive PASS 가능. `n_nonzero_diff > 0` 시 exit 1 추가 필요. 본 디버그 작업과 독립 — 작업 시 9-mode sweep 회귀 확인 필수.
+
+### 핵심 RTL 매핑 사실 (참조)
+
+SA 의 row=K, col=N, cycle=M 진행. 자세한 표는 본 CLAUDE.md `## MXP control surface` 의 첫 subsection. mixed-prec 디버그 시 row=M 으로 단정 금지 (메모리 `feedback_sa_dimension_mapping.md` 참조).
 
 ---
 
