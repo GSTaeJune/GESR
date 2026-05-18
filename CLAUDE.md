@@ -2,9 +2,36 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Next session kickoff (2026-05-18, review fixes + Python orchestrator)
+## Next session kickoff (2026-05-18, **BLOCKER 재발견**: A=2/A=4 mixed bit-exact fail)
 
-**진행 상태**: P-Task8 BLOCKER 완전 해결 + 후속 3-agent 코드리뷰 결과 (Critical 1 + Important 5 + Minor 8) 모두 fix + Python orchestrator (`sim/runner.py`) 추가. 다음 BLOCKER 없음.
+**진행 상태**: mixed-sweep 첫 실행에서 **A=2/A=4 mixed-W bit-exact FAIL** 발견. A=8 만 PASS. 즉 RTL fix #4 (impl_w pipeline) 가 A=8 케이스만 정확히 처리하고, A=2/A=4 의 mode-aware lag 분석에 빠진 부분이 있음.
+
+### 검증 상태 (2026-05-18 mixed-sweep 결과)
+
+| Mode | Structural (DRIVE/DRAIN/DUMP) | Bit-exact compare |
+|---|---|---|
+| `mixed-one --A 2` | ✅ TB cycle-align OK (drive_w=509/512) | ❌ **n_diff=16319/16384, snr=-35.99 dB** |
+| `mixed-one --A 4` | ✅ OK (drive_w=1021/1024) | ❌ **n_diff=16366/16384** |
+| `mixed-one --A 8` | ✅ OK (drive_w=2046/2048) | ✅ n_diff=0/16384 |
+
+**왜 이전 검증이 통과 보고했나** (회고):
+- P-Task8 디버그 + 3-agent 리뷰 모두 cycle-by-cycle 도식화를 A=8 한 케이스만 수행. protocol_modes_protocol.md §7.4 도 A=8 표만 있음.
+- 9-mode integration sweep 의 A=2/A=4 모드는 *uniform* W 라 mixed-pattern 의 q-chain 의 effect 가 발현 안됨 (q1=q2=q3=impl_w). → 본 BLOCKER 완전히 mask.
+- 따라서 ~~"mixed-sweep 3/3 PASS"~~, ~~"P-Task9 DONE"~~ 같은 마킹은 **유효하지 않음** — A=8 만 실제로 검증된 상태.
+
+### 다음 세션 진입점
+
+1. **A=2 mixed cycle-by-cycle 도식화** — protocol §7.4 의 A=8 표와 같은 형식으로 A=2 (out_scale 가 acc_fire 캡처) 의 모든 cycle 의 impl_w / q1 / in_Wcontrol / fire chain 상태 작성.
+2. 같은 작업 A=4 (out_scale 가 fire_q1 캡처, q2 사용) — 빠진 곳 찾기.
+3. 가능한 이슈 위치:
+   - `Accumulator_Col.v` 의 mode-aware mux `impl_w_eff = is_A8 ? q3 : is_A4 ? q2 : is_A2 ? q1 : impl_w` — A=2/A=4 의 lag 가 실제 cycle 정합 맞는지 재검증.
+   - A=2 의 경우 4 lane 모두 동시 fire 인데 lane 별 station scale 캡처 cycle 미세 차이 가능.
+   - `comb_s0/1/2/3` 의 `in_scale_act` 가 A=2 mode 에서 station chain timing 따라 cycle-by-cycle 다를 수 있음.
+4. 디버그 단서: A=2 mixed 의 hw_fp32 snr=4.21 dB 가 sw_fp32 snr=0.12 dB 보다 *좋음* — HW 가 FP32 truth 에 가까운 무언가를 계산. impl_w 가 0 (IDLE) 또는 평균값으로 잘못 들어가서 quant 효과가 무효화된 형태일 가능성.
+
+### 이전 산출 (참고)
+
+본 세션의 commits (`c8deb32` / `b3bbf79` / `8cb2482` / `fbbb70c` / `5f24ac4`) 는 그대로 유효 — review fixes + Python orchestrator + viz + env-var fix + mixed-sweep subcommand 모두 사용 가능. 단 **mixed-sweep 결과 검증은 A=8 만** 성립.
 
 ### 본 세션 산출 (2026-05-18 add-on)
 
@@ -90,7 +117,7 @@ uniform W 시 `q1=q2=q3=impl_w` 라 9-mode 회귀 영향 없음.
 
 ### 추가 후보 작업
 
-1. ~~P-Task9 — mixed sweep (A_PREC ∈ {2, 4, 8})~~ → **DONE** (commit `fbbb70c`, `python sim/runner.py mixed-sweep`, 3/3 PASS).
+1. **P-Task9 — mixed sweep (A_PREC ∈ {2,4,8})** → infrastructure DONE (`python sim/runner.py mixed-sweep`, commit `fbbb70c`), 그러나 **결과 1/3 PASS only — A=2/A=4 BLOCKER** (위 kickoff 섹션 참조).
 2. ~~mxp_tools.compare fail-gate~~ → **DONE** (commit `c8deb32`, pytest 검증).
 3. **Throughput/area 잠정값 재검토** (통합 spec § 9), **timing closure (Vivado 합성)**, **SRAM weight storage** (future scope), **9-mode CI 자동화**.
 
