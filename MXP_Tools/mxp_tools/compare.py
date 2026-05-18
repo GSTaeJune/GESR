@@ -116,3 +116,7 @@ def print_stats(result, label=""):
         print(f"{k:<12}{max_s}{rmse_s}{mean_s}{snr}{p['n_nonzero_diff']:>10d}")
         if p["n_nan_diff"] or p["n_inf_diff"]:
             print(f"{'':<12}  ⚠ non-finite: {p['n_nan_diff']} NaN, {p['n_inf_diff']} Inf")
+    # Greppable single-line summary for sweep logs.
+    hw_sw = s["hw_sw"]
+    verdict = "PASS" if hw_sw["n_nonzero_diff"] == 0 else "FAIL"
+    print(f"summary: hw_sw {verdict}  n_diff={hw_sw['n_nonzero_diff']}/{hw_sw['n_total']}")

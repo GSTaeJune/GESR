@@ -12,6 +12,7 @@ Use `python -m mxp_tools <command> -h` for per-command flags.
 """
 import argparse
 import os
+import sys
 
 import numpy as np
 
@@ -148,6 +149,19 @@ def cmd_compare(args):
         )
         print(f"compare: dumped → {args.save}")
 
+    # Bit-exact PASS/FAIL gate.
+    # Only hw_sw is required to be zero for "HW is bit-correct": sw_fp32 carries
+    # pure quantization error (always nonzero), and hw_fp32 mixes the two. A
+    # script-level fail-gate must therefore look at hw_sw.n_nonzero_diff only.
+    # NaN/Inf in HW dump are already folded into n_nonzero_diff by _pair_stats.
+    n_diff = result["stats"]["hw_sw"]["n_nonzero_diff"]
+    if n_diff > 0:
+        print(f"compare: FAIL - hw_sw n_nonzero_diff={n_diff} (of "
+              f"{result['stats']['hw_sw']['n_total']})")
+        return 1
+    print(f"compare: PASS - hw_sw bit-exact ({result['stats']['hw_sw']['n_total']} elements)")
+    return 0
+
 
 def cmd_viz(args):
     data = np.load(args.npz)
@@ -213,7 +227,10 @@ def main(argv=None):
     ]))
 
     args = p.parse_args(argv)
-    args.func(args)
+    rc = args.func(args)
+    # Commands that don't gate (gen/emit/ref/viz/rmw-gen) return None → exit 0.
+    # cmd_compare returns 1 on bit-exact mismatch.
+    sys.exit(rc if isinstance(rc, int) else 0)
 
 
 if __name__ == "__main__":

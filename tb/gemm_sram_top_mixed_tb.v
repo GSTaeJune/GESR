@@ -365,6 +365,15 @@ module gemm_sram_top_mixed_tb;
     integer drive_w_cyc_target;
     integer drive_w_idx_target;
 
+    // ─── Cycle-alignment self-check counters (monotonic, no wrap) ────────
+    // R2 review (2026-05-18) 권고: ~512 W_PREC drive 중 1-cycle drift 가 발생해도
+    // 외부 compare 까지 가서야 발각됨 (16k 캡처 silent corrupt). drift 가 곧
+    // schedule fire count 의 불일치로 드러나므로, drive_w/drive_scale 의 총
+    // fire 횟수를 monotonic 으로 카운트해 stage 3-4 종료 시점에 expected 값과
+    // 비교 → drift 가 schedule-level 에서 즉시 잡힘.
+    integer drive_w_event_count;
+    integer drive_scale_event_count;
+
     // 인덱스 → W (cycle 수) 매핑. drive_idx_target 의 m_in 위치 W_PREC lookup.
     function integer lookup_w_for_idx;
         input integer idx;
@@ -583,6 +592,10 @@ module gemm_sram_top_mixed_tb;
             drive_w_idx_target = 0;
             drive_w_cyc_target = 18;
 
+            // Self-check counters.
+            drive_w_event_count = 0;
+            drive_scale_event_count = 0;
+
             for (n_t = 0; n_t < N_T_LOGICAL; n_t = n_t + 1) begin
                 for (k_t = 0; k_t < K_T; k_t = k_t + 1) begin
                     for (m_t = 0; m_t < M_T; m_t = m_t + 1) begin
@@ -624,6 +637,7 @@ module gemm_sram_top_mixed_tb;
                                     drive_w_cyc_target = drive_w_cyc_target
                                                          + lookup_w_for_idx(drive_w_idx_target);
                                     drive_w_idx_target = drive_w_idx_target + 1;
+                                    drive_w_event_count = drive_w_event_count + 1;
                                     if (drive_w_idx_target >= K_T*M_T*TILE_SIZE)
                                         drive_w_idx_target = 0;
                                 end
@@ -637,8 +651,20 @@ module gemm_sram_top_mixed_tb;
                                 // Station selector toggle: K-tile 의 W 따라 가변.
                                 // 9-mode 의 TOGGLE_VAL = 18 + A_FIRE_DELAY + W/2.
                                 // W=8 → 24, W=4 → 22, W=2 → 21 (A=8 기준).
-                                // 현재 K-tile 의 W = W[m_in=0 of this K-tile] (K-tile granular 일 땐
-                                // 전체 K-tile 동일; random mixed 일 땐 첫 m_in 의 W proxy).
+                                //
+                                // 현재 K-tile 의 W = W[m_in=0 of this K-tile] proxy.
+                                // 왜 first-m_in W 가 random mixed 에서도 안전한가:
+                                //   station selector 의 Buf1/Buf2 ping-pong 은 K-tile
+                                //   중간 어디서든 한 번 toggle 만 보장되면 됨 — fire
+                                //   window 자체에 ±O(W) jitter tolerance 가 있음 (각
+                                //   col 의 station data 가 col 31→0 leftward chain 으로
+                                //   31 cycle 에 걸쳐 정착하므로). first-m_in W proxy 가
+                                //   K-tile 내 max W 보다 작아도 toggle 이 K-tile 경계
+                                //   훨씬 전에 발생 → 안전. K-tile granular mix 일 땐
+                                //   first==max 라 자동 정합. 검증: random mixed
+                                //   n_diff=0/16384 (2026-05-18).
+                                // 더 보수적으로 가려면 lookup_w_for_idx(...) 자리에
+                                // K-tile 내 max(W) 를 계산해 넣으면 됨.
                                 if (cyc_in_K == (18 + A_FIRE_DELAY +
                                                  (lookup_w_for_idx(k_t * M_T * TILE_SIZE) / 2))
                                     && !(n_t == 0 && k_t == 0)) begin
@@ -652,6 +678,7 @@ module gemm_sram_top_mixed_tb;
                                 if (cyc_global == drive_cyc_target) begin
                                     in_scale_weight <= a_scale[drive_idx_target];
                                     drive_idx_target = drive_idx_target + 1;
+                                    drive_scale_event_count = drive_scale_event_count + 1;
                                     if (drive_idx_target >= K_T*M_T*TILE_SIZE)
                                         drive_idx_target = 0;
                                     drive_cyc_target = drive_cyc_target
@@ -687,6 +714,47 @@ module gemm_sram_top_mixed_tb;
                     k_t_start_cycle = cyc_global; // 다음 K-tile 의 cyc_in_K 기준점
                 end // k_t loop
             end // n_t loop
+
+            // ─── Cycle-alignment self-check ─────────────────────────
+            // stage 3-4 종료 시 schedule fire count 가 정상 범위 안인가.
+            //
+            // 정확한 expected 계산:
+            //   drive_w 의 첫 fire 는 cyc_global=18 (18-cycle pre-MAC delay).
+            //   그러나 stage 3-4 의 총 cyc_global 길이 = Σ_all w_now (bit-serial
+            //   MAC cycle 합). 따라서 마지막 m_in 몇 개의 fire 가 cyc_global 초과
+            //   범위 → tail 로 밀림. W_min=2 worst case 9 fire 까지 deferred.
+            //   drive_scale 은 추가 A_FIRE_DELAY+W[0] cyc 만큼 더 늦게 시작 →
+            //   최대 ~18 fire deferred.
+            //
+            // Drift 시그니처: schedule fire 가 한 번 miss 되면 drive_w_cyc_target
+            // 이 stuck 되고 모든 후속 fire 도 miss → count 가 expected 보다 훨씬
+            // (수십~수천) 낮아짐. 따라서 lower bound 만 잘 두면 drift 검출 가능.
+            begin: cycle_align_check
+                integer expected_evt, w_lower_bound, scale_lower_bound;
+                expected_evt = N_T_LOGICAL * K_T * M_T * TILE_SIZE;
+                // 18 cyc pre-MAC delay / W_min=2 → 최대 9 fire deferred.
+                // 20 으로 마진 약간 둠 — 1-cycle drift 면 수십 이상 miss 라 둔감 X.
+                w_lower_bound = expected_evt - 20;
+                // scale 은 추가 A_FIRE_DELAY (≤2) + W[0] (≤8) cyc 더 늦음 → 최대
+                // ~28 / W_min = 14 fire deferred. 30 마진.
+                scale_lower_bound = expected_evt - 30;
+
+                if (drive_w_event_count > expected_evt
+                    || drive_w_event_count < w_lower_bound) begin
+                    $display("FATAL TB cycle-align: drive_w_event_count=%0d out of [%0d,%0d]",
+                             drive_w_event_count, w_lower_bound, expected_evt);
+                    $finish;
+                end
+                if (drive_scale_event_count > expected_evt
+                    || drive_scale_event_count < scale_lower_bound) begin
+                    $display("FATAL TB cycle-align: drive_scale_event_count=%0d out of [%0d,%0d]",
+                             drive_scale_event_count, scale_lower_bound, expected_evt);
+                    $finish;
+                end
+                $display("TB cycle-align OK: drive_w=%0d (in [%0d,%0d]) drive_scale=%0d (in [%0d,%0d])",
+                         drive_w_event_count, w_lower_bound, expected_evt,
+                         drive_scale_event_count, scale_lower_bound, expected_evt);
+            end
         end
     endtask
 

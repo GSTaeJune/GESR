@@ -180,8 +180,12 @@ def _emit_a_input_bs(W_int: np.ndarray, out_path: Path,
             for m_in in range(TILE):
                 m = m_t * TILE + m_in
                 # 한 (m, k_t) 의 32 K-element weight (INT8 signed).
+                # int32 promote 후 `& 0xFF` 로 LSByte 만 추출 — quantize_block_mx 가
+                # 이미 INT8 범위 (±127) 로 clip 했음을 가정. 음수 → 2's complement
+                # unsigned 8-bit 표현 (예: INT2 q=-1 = int8 = 0xFF). RTL 의 bit-serial
+                # weight 가 unsigned 8-bit 의 bit_pos 순회로 sign-extended 의미를 자연
+                # 획득.
                 w_block = W_int[m, k_t * TILE:(k_t + 1) * TILE].astype(np.int32)
-                # 2's complement → unsigned 8-bit 으로 (bit-serial 추출용).
                 w_unsigned = (w_block & 0xFF).astype(np.uint8)
                 for bit_pos in range(W_PAD - 1, -1, -1):
                     word = 0
@@ -307,20 +311,24 @@ def compute_golden_mixed(
     # Activation implicit_scale is uniform (same prec_b for all blocks).
     impl_b = IMPLICIT_SCALE_EXP[prec_b]
 
+    # Vectorized LUT: prec ∈ {2,4,8} → IMPLICIT_SCALE_EXP[prec]. Used per-block
+    # per-row, so build a max-index lookup once instead of per-row dict lookups.
+    impl_lut = np.zeros(9, dtype=np.float64)
+    for p, v in IMPLICIT_SCALE_EXP.items():
+        impl_lut[p] = v
+
     C = np.zeros((M, N), dtype=np.float32)
     for blk in range(K_T):
         sl = slice(blk * BLOCK_SIZE, (blk + 1) * BLOCK_SIZE)
-        # int32 block matmul — shape (M, N)
+        # int32 block matmul — shape (M, N). int8 @ int8 must promote to int32
+        # to hold up to ±32·127·127 ≈ 5e5 per element (block_size=32).
         block_int = W_int[:, sl].astype(np.int32) @ A_int[sl, :].astype(np.int32)  # (M, N)
 
         # Per-row implicit scale for weight: depends on per-block prec_map[m, blk].
         # Build a (M, 1) FP32 array of 2^-(impl_a[m] + impl_b).
-        impl_a_vec = np.array(
-            [IMPLICIT_SCALE_EXP[int(prec_map[m, blk])] for m in range(M)],
-            dtype=np.float64,
-        )
+        impl_a_vec = impl_lut[prec_map[:, blk]]  # (M,) float64
         # FP32 scalar per row: mirrors np.float32(2.0 ** -(impl_a + impl_b))
-        implicit_scale_vec = (2.0 ** -(impl_a_vec + impl_b)).astype(np.float32)  # (M,)
+        implicit_scale_vec = (2.0 ** -(impl_a_vec + np.float64(impl_b))).astype(np.float32)  # (M,)
 
         block_fp = (
             block_int.astype(np.float32)

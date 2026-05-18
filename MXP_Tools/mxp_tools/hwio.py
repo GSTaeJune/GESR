@@ -54,6 +54,11 @@ def read_writememh_fp32(path):
     sequential semantics. If there are gaps or non-zero starts, the unwritten
     slots are NaN so gather_banks can detect them. Output length is
     `max(addr)+1` rounded up implicitly by the highest seen address.
+
+    Host endianness note (mirror of `fp32_to_hex_words`): `int(tok, 16)` reads
+    the logical 32-bit value and `np.uint32.view(np.float32)` reinterprets the
+    host-endian bytes. On LE hosts (x86/ARM-LE) the bit pattern matches the
+    writer's hex. On BE hosts this would invert — guard if you ever port.
     """
     items = list(_iter_writememh_words(path))
     if not items:

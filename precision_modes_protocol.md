@@ -336,29 +336,34 @@ uniform W 시 `q1=q2=q3=impl_w` 라 9-mode 회귀 영향 없음.
 
 ### 7.4 Cycle-by-cycle 도식 (A=8, W[0]=8, W[1]=4 mixed 예시)
 
+핵심: q-chain 은 매 posedge 마다 reg shift → `impl_w_qN(T) = impl_w(T-N)` (T cycle
+관측 시점 기준). A=8 모드의 캡처 cycle T 에서 `impl_w_q3(T) = impl_w(T-3)` 가
+m_in=k 의 W 를 가리키도록 +3 lag 설계.
+
 ```
-cycle  in_Wcontrol  Accumulator         Accumulator_Col           out_scale
-─────  ───────────  ──────────────────  ────────────────────────  ─────────
-  18   W[0]=2'b11   MAC start (cnt=0)
-  19                cnt=1
-  ...               ...
-  25                cnt=7, fire_cycle=1
-  26   W[1]=2'b10   acc_fire=1, cnt=0   fire_q1: pending
-                    (m_in=1 MAC 시작)   impl_w_q3 = impl_w(25) = 6 (W[0])
-  27                cnt=1               fire_q1=1
-                                        impl_w_q3 = impl_w(26) = impl_w(W[1])
-                                        BUT fire chain 으로 m_in=0 캡처 中
-  28                cnt=2               fire_q2=1  ← comb_s(28) 계산:
-                                          impl_w_eff = impl_w_q3(28) = impl_w(25) = 6 ✓
-                                          in_scale_weight(28) = a_scale[0] ✓ (drive_cyc[0]=28)
-  29                cnt=3               out_scale <= comb_s(28)  ← m_in=0 결과 정확히 latch
-                                        fire output = 1
+cycle  in_Wcontrol  impl_w  q1  q2  q3   Accumulator           comb_s(T) / out_scale
+─────  ───────────  ──────  ──  ──  ──   ──────────────────    ─────────────────────
+  23   W[0]=2'b11    6       6   6   6   m_in=0 MAC (cnt=5)
+  24   W[0]          6       6   6   6                   (cnt=6)
+  25   W[0]          6       6   6   6                   (cnt=7, fire_cycle=1)
+  26   W[1]=2'b10    2       6   6   6   acc_fire=1 (m_in=0 fire)  fire_q1: pending
+                                          m_in=1 MAC 시작 (cnt=0)
+  27   W[1]          2       2   6   6   fire_q1=1 (1-cyc 전 acc_fire 캡처)
+  28   W[1]          2       2   2   6   fire_q2=1                  ★ comb_s(28) 사용:
+                                                                       impl_w_eff = q3(28) = 6 ✓
+                                                                       in_scale_weight(28)=a_scale[0]
+  29   W[1]          2       2   2   2   (m_in=0 결과 latch)         out_scale <= comb_s(28)
+                                                                     fire output = 1
 ```
 
 **핵심 관찰**:
-- m_in=0 캡처 cycle (28) 에 `in_Wcontrol` 은 이미 W[1] 로 전환. combinational `impl_w` 쓰면 W[1] 의 6 → 2 로 잘못된 값.
-- `impl_w_q3(28) = impl_w(25) = impl_w(W[0]) = 6` ✓ (3-cyc lag 가 m_in=0 의 W 까지 거슬러 올라감).
-- `in_scale_weight(28) = a_scale[0]` ✓ (drive_cyc[0]=28 schedule).
+- m_in=0 캡처 cycle (28) 에 `in_Wcontrol` 은 이미 W[1] 로 전환 → live `impl_w(28) = 2`.
+  combinational 로 쓰면 W[1] 의 2 가 들어가 m_in=0 의 scale 오염.
+- `q3(28) = impl_w(28-3) = impl_w(25) = 6 (= W[0])` ✓ → 3-cyc lag 가 m_in=0 의
+  마지막 MAC cycle 까지 거슬러 올라가 정확한 W 회복.
+- q3 가 W[1] 의 2 로 전환되는 시점은 cycle 29 (= 26+3) — 이미 out_scale latch 완료.
+- A=4 모드는 fire_q1 캡처 (T+1) → q2 (2-cyc lag). A=2 는 acc_fire 캡처 (T) → q1 (1-cyc lag).
+- `in_scale_weight(28) = a_scale[0]` ✓ (drive_cyc[0] schedule 이 동일 cycle 에 정착).
 
 ### 7.5 검증 결과 (2026-05-18)
 

@@ -113,6 +113,10 @@ assign a3 = {is_A2  ? in_a3[input_a_len-1] : 1'b0, in_a3};
 //   W side(weight)    : in_Wcontrol = 11(INT8) / 10(INT4) / 01(INT2) / 00(IDLE)
 //
 // Spec: docs/superpowers/specs/2026-05-14-rmw-design.md (Q3a)
+// impl_a 는 의도적으로 pipeline 하지 않음 — 본 프로젝트는 A_PREC 가 layer-fixed
+// (sim 시작 시 1회 설정, mid-sim 변경 없음, precision_modes_protocol.md §1 참조)
+// 라 is_A2/4/8 가 cycle 마다 상수. 만약 미래에 per-m_in A_PREC mix 를 지원한다면
+// impl_w 와 같은 q-chain (impl_a_q1/q2/q3 + mode-aware mux) 도입 필요.
 wire [3:0] impl_a = is_A8 ? 4'd6 : is_A4 ? 4'd2 : 4'd0;     // A side IMPLICIT
 wire [3:0] impl_w = (in_Wcontrol == 2'b11) ? 4'd6 :         // W side IMPLICIT
                     (in_Wcontrol == 2'b10) ? 4'd2 : 4'd0;
@@ -160,7 +164,7 @@ wire [3:0] impl_w = (in_Wcontrol == 2'b11) ? 4'd6 :         // W side IMPLICIT
 //   - A=4 (out_scale 가 fire_q1  캡처)  → impl_w_q2 (2-cyc lag)
 //   - A=8 (out_scale 가 fire_q2  캡처)  → impl_w_q3 (3-cyc lag)
 //   - IDLE → impl_w (사용 안 됨, fall-through)
-reg [3:0] impl_w_q1, impl_w_q2, impl_w_q3;
+(* INIT = "0" *) reg [3:0] impl_w_q1, impl_w_q2, impl_w_q3;
 
 wire [3:0] impl_w_eff = is_A8 ? impl_w_q3 :
                         is_A4 ? impl_w_q2 :
