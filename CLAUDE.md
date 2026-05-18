@@ -2,9 +2,28 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Next session kickoff (2026-05-18, mixed-prec TB **완전 해결** — random mixed + 9-mode 모두 PASS)
+## Next session kickoff (2026-05-18, review fixes + Python orchestrator)
 
-**진행 상태**: P-Task8 BLOCKER (random mixed bit-exact mismatch) **완전 해결**. TB 3단계 fix + RTL `Accumulator_Col.v::impl_w` 파이프라인 fix 로 모든 케이스 PASS. 9-mode 회귀 영향 없음.
+**진행 상태**: P-Task8 BLOCKER 완전 해결 + 후속 3-agent 코드리뷰 결과 (Critical 1 + Important 5 + Minor 8) 모두 fix + Python orchestrator (`sim/runner.py`) 추가. 다음 BLOCKER 없음.
+
+### 본 세션 산출 (2026-05-18 add-on)
+
+- **commit `c8deb32`** `fix(review)` — 3-agent review (R1 Python golden / R2 RTL+TB / R3 compare+bank) 결과 fix:
+  - **Critical**: `MXP_Tools/mxp_tools/cli.py::cmd_compare` 가 `hw_sw n_nonzero_diff > 0` 시 `sys.exit(1)`. 이전엔 stats print 만 하고 0 종료 → `run_*.sh` 가 false-positive PASS 가능. 회귀 방지 pytest 4 case 추가 (`tests/test_cli_compare.py`, 총 49 케이스).
+  - **Important**: `Accumulator_Col.v::impl_a` not-pipelined 이유 주석 + `impl_w_q*` `(* INIT="0" *)`. TB cycle-alignment self-check (`drive_w_event_count` / `drive_scale_event_count` 범위 assertion). TOGGLE_VAL first-m_in W proxy 정당화 주석.
+  - **Minor**: `gen_mixed.py` impl_a LUT 벡터화, `compare.py` greppable PASS/FAIL one-liner, `hwio.py` host-endian caveat 미러링, protocol §7.4 cycle table q3 timestamp off-by-one fix.
+- **commit `b3bbf79`** `feat(sim)` — Python orchestrator `sim/runner.py`:
+  - VSCode "Run Python File" 호환 (no-args = `mixed-one --A 8` random mixed). subcommand: `mixed-one`, `integration-one`, `integration-sweep`.
+  - bash 스크립트 dispatch 패턴 (`subprocess.run(["bash", "sim/run_*.sh", ...])`) — Python 으로 xsim 직접 호출 시 xsimk.exe 가 orphan 되어 bank.mem 잠그는 issue 회피 (메모리 `feedback_xsim_zombie_windows.md` 참고).
+  - 자동 viz: 단발 run → `work/<LABEL>/result.png` (4-row: 입력 W/A/prec_map · 출력 C_hw/C_sw/C_fp32 · diff log10 · PASS/FAIL verdict + 통계). sweep → `work/sweep_summary.png` (9-mode rmse matrix). `gen_mixed.py` 가 inputs_mixed.npz 도 저장.
+  - 기존 bash 스크립트는 그대로 유지. `bash sim/run_*.sh` 도 계속 동작.
+
+### 본 세션 디버그 lesson (메모리 신규)
+
+- **xsim 좀비 (Windows)**: Python subprocess 로 xsim.bat 직접 호출 시 xsim 실패하면 xsimk.exe 가 orphan → 후속 bash sim 의 bank.mem 잠금 → false-positive FAIL (n_diff 대량). 복구: `taskkill //F //IM xsim.exe && taskkill //F //IM xsimk.exe && rm -rf work sim/build`. 메모리 `feedback_xsim_zombie_windows.md`.
+- **ASCII-only 출력**: TB `$display` 와 Python `print` 의 user-facing string 에 em-dash (—), `∈`, `→` 같은 unicode 금지. Windows cp949 console 은 `UnicodeEncodeError` 로 죽고, xsim 은 silent drop. 메모리 `feedback_ascii_only_displays.md`.
+
+### 기존 4 단계 mixed-prec fix chain (reference)
 
 ### 4 단계 fix chain
 
@@ -45,7 +64,9 @@ uniform W 시 `q1=q2=q3=impl_w` 라 9-mode 회귀 영향 없음.
 | random mixed (full) | `bash sim/run_mixed_one.sh 8` | hw_sw n_diff=0/16384, max=0 |
 | 9-mode integration sweep | `bash sim/run_integration_sweep.sh` | ALL 9 PASS |
 
-### 다음 세션 = **본 commit 코드 리뷰** (사용자 지정)
+### 다음 세션 = ~~본 commit 코드 리뷰~~ → **DONE** (2026-05-18, c8deb32)
+
+본 commit (RTL fix #4 + 문서) 의 3-agent 독립 리뷰 완료. 결과는 위 "본 세션 산출" 참고. 이하 원본 리뷰 대비 정보 (아카이브):
 
 다음 세션에서 사용자가 본 commit (RTL fix #4 + 문서) 을 직접 리뷰 예정. 리뷰 대비 핵심 정보:
 
@@ -67,10 +88,10 @@ uniform W 시 `q1=q2=q3=impl_w` 라 9-mode 회귀 영향 없음.
 3. comb_s 4개 (s0/s1/s2/s3) 모두 같은 `impl_w_eff` 사용 — A=2 모드 일 때 4 lane 동시 fire 라 mode-aware lag 가 acc_fire 기준 (q1) 이면 모두 정합. OK.
 4. mode 가 sim 중 바뀌면 `impl_w_eff` mux 가 잘못된 q stage 선택 가능 — 본 프로젝트 A_PREC 은 sim 시작 시 fix. 미래 mid-sim mode 변경 시 재검증 필요.
 
-### 추가 후보 작업 (코드리뷰 후)
+### 추가 후보 작업
 
-1. **P-Task9 — `sim/run_mixed_sweep.sh`**: A_PREC ∈ {2, 4, 8} mixed sweep (`run_integration_sweep.sh` 와 유사). 3 케이스 자동 회귀.
-2. **mxp_tools.compare fail-gate** (별도 작업, 독립): `mxp_tools/cli.py::cmd_compare` 가 mismatch 시 stats print 만 하고 `sys.exit(1)` 안 함 → false-positive PASS 가능. `n_nonzero_diff > 0` 시 exit 1 추가. 작업 후 9-mode sweep 회귀 확인 필수.
+1. **P-Task9 — mixed sweep** (A_PREC ∈ {2, 4, 8} mixed). 옵션: `sim/run_mixed_sweep.sh` 신규, 또는 `runner.py` 에 `mixed-sweep` subcommand 추가.
+2. ~~mxp_tools.compare fail-gate~~ → **DONE** (commit `c8deb32`, pytest 검증).
 3. **Throughput/area 잠정값 재검토** (통합 spec § 9), **timing closure (Vivado 합성)**, **SRAM weight storage** (future scope), **9-mode CI 자동화**.
 
 ### 핵심 RTL 매핑 사실 (참조)
@@ -214,10 +235,22 @@ The banked wrapper additionally has a 1-cycle `bank_sel_d1` register inside, so 
 
 ## Common commands
 
-Two ways to run sim:
+Three ways to run sim:
 
 1. **Vivado GUI** — open `gemm_sram.xpr`. Synth top = `gemm_sram_top`; sim top = `gemm_sram_top_tb`. Run Behavioral Simulation.
-2. **XSim batch** — `sim/run_*.sh` scripts:
+2. **Python orchestrator (recommended for VSCode users)** — `sim/runner.py`:
+
+   ```bash
+   python sim/runner.py                                # default: mixed-one A=8 (random mixed) + viz
+   python sim/runner.py mixed-one --A 8 --uniform 8    # uniform W isolation test
+   python sim/runner.py mixed-one --A 8 --k-tile 8,4,2,8   # K-tile granular
+   python sim/runner.py integration-one --A 8 --B 8    # single (A,B) uniform mode
+   python sim/runner.py integration-sweep              # 9-mode (~10 min)
+   ```
+
+   VSCode "Run Python File" 버튼 (no-args) → default mixed-one. 산출물: `work/<LABEL>/result.png` (4-row 종합 figure: 입력 W/A/prec_map · 출력 C_hw/C_sw/C_fp32 · diff log10 · PASS/FAIL + 통계), sweep 추가로 `work/sweep_summary.png` (9-mode rmse matrix). 내부적으로 기존 `sim/run_*.sh` 를 bash 로 호출 (xsim Python 직접 호출 시 좀비 issue 회피 — 메모리 `feedback_xsim_zombie_windows.md`).
+
+3. **XSim batch (bash)** — 기존 `sim/run_*.sh` 직접 호출:
 
    ```bash
    # Unit-level
@@ -320,11 +353,14 @@ tb/
     fp32_adder_tb.v, rmw_smoke_tb.v,
     accumulator_col_elab.v             # Unit testbenches
 sim/
+    runner.py                          # Python orchestrator (VSCode "Run" 호환); auto viz → work/<LABEL>/result.png
+    gen_mixed.py                       # mixed-prec 입력/golden 생성 + inputs_mixed.npz (for viz Row 1)
     run_top_elab.sh                    # gemm_sram_top elab smoke
     run_integration_smoke.sh           # TB zero-prime + dump (no GEMM driving)
     run_integration_one.sh             # 1 mode end-to-end (<LABEL> <A_PREC> <B_PREC>)
     run_integration_sweep.sh           # 9-mode serial sweep + compare gate
     run_integration_parallel.sh        # 9-mode parallel dispatch guide (print template)
+    run_mixed_one.sh                   # mixed-prec 단발 (random / uniform / K-tile via env vars)
     run_rmw*.sh, run_int_to_fp32.sh, run_fp32_adder.sh, clean.sh
 third_party/berkeley-hardfloat/        # Vendored HardFloat (HardFloatBundle.v + VENDORING.md)
 MXP_Tools/                             # Python verification toolkit (fork of ~/Desktop/Desktop/MXP_Tools)
