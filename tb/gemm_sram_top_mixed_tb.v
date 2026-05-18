@@ -634,8 +634,14 @@ module gemm_sram_top_mixed_tb;
                                 end
                                 in_control <= {32{cur_pp}};
 
-                                // Station selector toggle: K-tile 진입 후 24 cycle (worst-case 보수).
-                                if (cyc_in_K == 24 && !(n_t == 0 && k_t == 0)) begin
+                                // Station selector toggle: K-tile 의 W 따라 가변.
+                                // 9-mode 의 TOGGLE_VAL = 18 + A_FIRE_DELAY + W/2.
+                                // W=8 → 24, W=4 → 22, W=2 → 21 (A=8 기준).
+                                // 현재 K-tile 의 W = W[m_in=0 of this K-tile] (K-tile granular 일 땐
+                                // 전체 K-tile 동일; random mixed 일 땐 첫 m_in 의 W proxy).
+                                if (cyc_in_K == (18 + A_FIRE_DELAY +
+                                                 (lookup_w_for_idx(k_t * M_T * TILE_SIZE) / 2))
+                                    && !(n_t == 0 && k_t == 0)) begin
                                     cur_st_pp = ~cur_st_pp;
                                 end
                                 in_station_control <= cur_st_pp;
