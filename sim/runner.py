@@ -56,14 +56,21 @@ def _bash_run(script_path: str, *args: str, env_extra: dict | None = None,
               check: bool = True) -> int:
     """Invoke a bash script (relative to REPO_ROOT) with the given args.
 
-    Inherits stdin/stdout/stderr and the parent's full env (so Vivado tools
-    found in the parent shell remain available).
+    Inherits stdin/stdout/stderr and the parent's full env. env_extra values:
+      - str           : set/override env var
+      - None          : UNSET (remove from env); needed because empty-string
+                        env var would still be "set" and may break downstream
+                        (e.g. int("") in gen_mixed.py).
     """
     bash = _require_bash()
     argv = [bash, script_path, *args]
     env = os.environ.copy()
     if env_extra:
-        env.update(env_extra)
+        for k, v in env_extra.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
     print(f"  $ bash {script_path} {' '.join(args)}", flush=True)
     result = subprocess.run(argv, cwd=str(REPO_ROOT), env=env)
     if check and result.returncode != 0:
@@ -270,18 +277,20 @@ def _viz_sweep(passed_labels: list[str]) -> None:
 # ── subcommands ─────────────────────────────────────────────────────────────
 
 def cmd_mixed_one(args: argparse.Namespace) -> int:
-    env_extra = {}
+    # Build env override. Setting a key to None tells _bash_run to UNSET (pop)
+    # that var - NOT set it to empty string. Empty-string env var would still
+    # be "set" and trip gen_mixed.py's int("") check.
+    env_extra: dict = {}
     if args.uniform is not None:
         env_extra["MIXED_W_UNIFORM"] = str(args.uniform)
-        # Clear the other (in case both were passed via env from outside).
-        env_extra["MIXED_W_K_TILE"] = ""
+        env_extra["MIXED_W_K_TILE"] = None
     elif args.k_tile is not None:
         env_extra["MIXED_W_K_TILE"] = args.k_tile
-        env_extra["MIXED_W_UNIFORM"] = ""
+        env_extra["MIXED_W_UNIFORM"] = None
     else:
-        # Random mixed - explicitly clear so leftover env doesn't taint it.
-        env_extra["MIXED_W_UNIFORM"] = ""
-        env_extra["MIXED_W_K_TILE"] = ""
+        # Random mixed - explicitly unset both so leftover env doesn't taint.
+        env_extra["MIXED_W_UNIFORM"] = None
+        env_extra["MIXED_W_K_TILE"] = None
 
     print(f"\n===== mixed-one A_PREC={args.A} =====", flush=True)
     rc = _bash_run("sim/run_mixed_one.sh", str(args.A),
@@ -340,6 +349,43 @@ python -m mxp_tools compare \
     return rc
 
 
+def cmd_mixed_sweep(args: argparse.Namespace) -> int:
+    """Mixed-precision sweep: random per-(M,K-block) W_PREC × A_PREC ∈ {2,4,8}.
+
+    This is the appropriate regression for the mixed TB - W is random per
+    block by design, so the only thing that varies between modes is A_PREC.
+    The 9-mode (A,B) ∈ {2,4,8}^2 integration-sweep tests UNIFORM precision
+    combinations - a different TB and a different question.
+    """
+    passed: list[str] = []
+    failed: list[str] = []
+
+    for a in (2, 4, 8):
+        label = f"mixed_A{a}"
+        print(f"\n==================== {label} (random W per block) ====================",
+              flush=True)
+        try:
+            ns = argparse.Namespace(
+                A=a, uniform=None, k_tile=None, viz=args.viz,
+            )
+            rc = cmd_mixed_one(ns)
+        except subprocess.CalledProcessError:
+            print(f"{label}: pipeline FAILED")
+            failed.append(label)
+            continue
+
+        (passed if rc == 0 else failed).append(label)
+
+    print("\n====================================")
+    print(f"MIXED SWEEP RESULT: {len(passed)}/3 PASS")
+    print(f"PASSED: {' '.join(passed)}")
+    if failed:
+        print(f"FAILED: {' '.join(failed)}")
+        return 1
+    print("ALL 3 MIXED MODES PASSED")
+    return 0
+
+
 def cmd_integration_sweep(args: argparse.Namespace) -> int:
     """Invoke the existing 9-mode sweep script, then aggregate visuals."""
     print("\n===== integration-sweep (9 modes) =====", flush=True)
@@ -379,7 +425,13 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--no-viz", dest="viz", action="store_false", default=True)
     g.set_defaults(func=cmd_integration_one)
 
-    g = sp.add_parser("integration-sweep", help="9-mode serial sweep")
+    g = sp.add_parser("mixed-sweep",
+                      help="3-mode mixed sweep: A in {2,4,8} x random W (mixed-prec TB)")
+    g.add_argument("--no-viz", dest="viz", action="store_false", default=True)
+    g.set_defaults(func=cmd_mixed_sweep)
+
+    g = sp.add_parser("integration-sweep",
+                      help="9-mode uniform sweep: (A,B) in {2,4,8}^2 (integration TB)")
     g.add_argument("--no-viz", dest="viz", action="store_false", default=True)
     g.set_defaults(func=cmd_integration_sweep)
 

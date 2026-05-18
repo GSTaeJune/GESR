@@ -38,13 +38,16 @@ def build_w_prec_map(seed: int = 0, M: int = 128, K_T: int = 4) -> np.ndarray:
     둘 다 unset 이면 random (M, K_T).
     """
     import os
+    # Empty-string env var (e.g. "MIXED_W_UNIFORM=" inherited from parent
+    # shell) must be treated as "unset" - else int("") crashes. The truthy
+    # check below covers both None and "".
     uniform = os.environ.get("MIXED_W_UNIFORM")
-    if uniform is not None:
+    if uniform:
         p = int(uniform)
         assert p in (2, 4, 8), f"MIXED_W_UNIFORM must be 2/4/8, got {p}"
         return np.full((M, K_T), p, dtype=np.uint8)
     k_tile = os.environ.get("MIXED_W_K_TILE")
-    if k_tile is not None:
+    if k_tile:
         vals = [int(v) for v in k_tile.split(",")]
         assert len(vals) == K_T, f"MIXED_W_K_TILE must have {K_T} vals, got {len(vals)}"
         for v in vals:
