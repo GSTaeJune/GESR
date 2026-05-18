@@ -90,7 +90,7 @@ uniform W 시 `q1=q2=q3=impl_w` 라 9-mode 회귀 영향 없음.
 
 ### 추가 후보 작업
 
-1. **P-Task9 — mixed sweep** (A_PREC ∈ {2, 4, 8} mixed). 옵션: `sim/run_mixed_sweep.sh` 신규, 또는 `runner.py` 에 `mixed-sweep` subcommand 추가.
+1. ~~P-Task9 — mixed sweep (A_PREC ∈ {2, 4, 8})~~ → **DONE** (commit `fbbb70c`, `python sim/runner.py mixed-sweep`, 3/3 PASS).
 2. ~~mxp_tools.compare fail-gate~~ → **DONE** (commit `c8deb32`, pytest 검증).
 3. **Throughput/area 잠정값 재검토** (통합 spec § 9), **timing closure (Vivado 합성)**, **SRAM weight storage** (future scope), **9-mode CI 자동화**.
 
@@ -244,8 +244,9 @@ Three ways to run sim:
    python sim/runner.py                                # default: mixed-one A=8 (random mixed) + viz
    python sim/runner.py mixed-one --A 8 --uniform 8    # uniform W isolation test
    python sim/runner.py mixed-one --A 8 --k-tile 8,4,2,8   # K-tile granular
+   python sim/runner.py mixed-sweep                    # 3-mode: A in {2,4,8} x random W (~5 min)
    python sim/runner.py integration-one --A 8 --B 8    # single (A,B) uniform mode
-   python sim/runner.py integration-sweep              # 9-mode (~10 min)
+   python sim/runner.py integration-sweep              # 9-mode uniform (A,B) in {2,4,8}^2 (~10 min)
    ```
 
    VSCode "Run Python File" 버튼 (no-args) → default mixed-one. 산출물: `work/<LABEL>/result.png` (4-row 종합 figure: 입력 W/A/prec_map · 출력 C_hw/C_sw/C_fp32 · diff log10 · PASS/FAIL + 통계), sweep 추가로 `work/sweep_summary.png` (9-mode rmse matrix). 내부적으로 기존 `sim/run_*.sh` 를 bash 로 호출 (xsim Python 직접 호출 시 좀비 issue 회피 — 메모리 `feedback_xsim_zombie_windows.md`).
