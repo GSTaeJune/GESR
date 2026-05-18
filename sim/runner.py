@@ -81,19 +81,25 @@ def _bash_run(script_path: str, *args: str, env_extra: dict | None = None,
 # ── visualization ───────────────────────────────────────────────────────────
 
 def _viz_one(work_dir: Path, title: str) -> None:
-    """Comprehensive 4-row figure: inputs / outputs / diffs / stats text.
+    """Comprehensive 3-row figure: inputs / prec maps + HW-truth diff / stats.
 
     Loads inputs (W/A/prec_map) from sw_ref/inputs_*.npz (saved by gen_mixed
     or, for integration runs, reconstructed from MXP_Tools' ab_fp32 + quant
     npzs). Reassembles C_hw from bank files. Produces work_dir/result.png.
 
-    Layout (4 rows x 3 cols):
-      Row 1 - Inputs    : W (fp32), A (fp32), prec_map (mixed) or W_int (int)
-      Row 2 - Outputs   : C_hw, C_sw, C_fp32 (shared color scale)
-      Row 3 - Diffs     : |C_hw-C_sw| (bit-exact gate),
-                          |C_sw-C_fp32| (quant noise),
-                          |C_hw-C_fp32| (total)
-      Row 4 - Stats text: PASS/FAIL + per-pair max/rmse/snr summary
+    Layout (3 rows x 3 cols):
+      Row 1 - Inputs+Out : W (fp32), A (fp32), C_hw (HW output)
+      Row 2 - Prec+Diff  : W_PREC_map, A_PREC_map, log10|C_hw - C_fp32|
+                           <- W prec map (col 0) and HW-truth diff (col 2)
+                              share this row's M-axis; the eye can scan a
+                              single M-row left -> right to correlate weight
+                              precision pattern with total HW error pattern.
+      Row 3 - Stats text : PASS/FAIL + hw_sw / hw_fp32 max/rmse/snr summary
+
+    C_sw and the sw_fp32 visualizations are intentionally omitted: when the
+    bit-exact gate (hw_sw) passes, C_sw is identical to C_hw and |C_sw -
+    C_fp32| identical to |C_hw - C_fp32|, so both would duplicate panels
+    elsewhere in the figure.
     """
     sys.path.insert(0, str(REPO_ROOT / "MXP_Tools"))
     try:
@@ -131,25 +137,35 @@ def _viz_one(work_dir: Path, title: str) -> None:
     # (MXP_Tools gen for integration).
     inputs_mixed = sw_ref_dir / "inputs_mixed.npz"
     ab_fp32 = work_dir / "ab_fp32.npz"
-    W_fp, A_fp, prec_map = None, None, None
+    W_fp, A_fp = None, None
+    W_prec_map, A_prec_scalar = None, None
     if inputs_mixed.exists():
         d = np.load(inputs_mixed)
         W_fp = d["W_fp"]
         A_fp = d["A_fp"]
-        prec_map = d["prec_map"]
+        W_prec_map = d["prec_map"]                    # (M, K_T) per-block W_PREC
+        A_prec_scalar = int(d["A_PREC"])              # layer-wide A_PREC
     elif ab_fp32.exists():
         d = np.load(ab_fp32)
         # In integration, gen names A=activation (analogous to W in mixed)
         # and B=weight. Use the same role split for the figure.
         W_fp = d["A"]   # activation (top operand)
         A_fp = d["B"]   # weight     (bottom operand)
-        prec_map = None  # uniform precision, no per-block map
+        W_prec_map = None  # uniform precision, no per-block map
 
-    # Build the figure.
-    fig = plt.figure(figsize=(15, 14))
-    gs = fig.add_gridspec(4, 3, height_ratios=[1, 1, 1, 0.35], hspace=0.35, wspace=0.25)
+    # Cap M for A_prec_map vertical extent (== K dim in input A_fp).
+    K_dim = A_fp.shape[0] if A_fp is not None else M
+    K_T = K_dim // 32 if K_dim % 32 == 0 else 4  # mixed TB: K=128 -> K_T=4
 
-    # Row 1: Inputs.
+    # 3-class colormap for precision maps (W=2 red, W=4 orange, W=8 blue).
+    prec_cmap = matplotlib.colors.ListedColormap(["#d62728", "#ff7f0e", "#1f77b4"])
+    prec_lookup = {2: 0, 4: 1, 8: 2}
+
+    # Build the figure (3 row x 3 col + stats strip).
+    fig = plt.figure(figsize=(15, 11))
+    gs = fig.add_gridspec(3, 3, height_ratios=[1, 1, 0.35], hspace=0.4, wspace=0.28)
+
+    # Row 1: W input | A input | C_hw (HW output).
     if W_fp is not None:
         ax = fig.add_subplot(gs[0, 0])
         im = ax.imshow(W_fp, aspect="auto", cmap="RdBu_r",
@@ -164,69 +180,70 @@ def _viz_one(work_dir: Path, title: str) -> None:
         ax.set_title("Input: Activation matrix A (FP32)")
         ax.set_xlabel("N"); ax.set_ylabel("K")
         fig.colorbar(im, ax=ax, fraction=0.046)
-    if prec_map is not None:
-        ax = fig.add_subplot(gs[0, 2])
-        # prec_map values are 2/4/8. Map to category for nicer colorbar.
-        cmap = matplotlib.colors.ListedColormap(["#d62728", "#ff7f0e", "#1f77b4"])
-        lookup = {2: 0, 4: 1, 8: 2}
-        img = np.vectorize(lookup.get)(prec_map)
-        im = ax.imshow(img, aspect="auto", cmap=cmap, vmin=0, vmax=2)
-        ax.set_title("Input: W_PREC map (per row, per K-block)")
+    ax = fig.add_subplot(gs[0, 2])
+    im = ax.imshow(C_hw, aspect="auto", cmap="viridis")
+    ax.set_title("C_hw  (HW output)")
+    ax.set_xlabel("N"); ax.set_ylabel("M")
+    fig.colorbar(im, ax=ax, fraction=0.046)
+
+    # Row 2: W_PREC map | A_PREC map | log10|C_hw - C_fp32|.
+    # M-axis aligned across col 0 and col 2 -> visual correlation between
+    # low-precision weight rows and high HW-vs-truth error rows.
+    if W_prec_map is not None:
+        ax = fig.add_subplot(gs[1, 0])
+        img_w = np.vectorize(prec_lookup.get)(W_prec_map)
+        im = ax.imshow(img_w, aspect="auto", cmap=prec_cmap, vmin=0, vmax=2)
+        ax.set_title("W_PREC map (per M-row, per K-block)")
         ax.set_xlabel("K-block (0..3)"); ax.set_ylabel("M-row")
-        ax.set_xticks(range(prec_map.shape[1]))
+        ax.set_xticks(range(W_prec_map.shape[1]))
         cbar = fig.colorbar(im, ax=ax, fraction=0.046, ticks=[0, 1, 2])
         cbar.ax.set_yticklabels(["W=2", "W=4", "W=8"])
     else:
-        ax = fig.add_subplot(gs[0, 2])
+        ax = fig.add_subplot(gs[1, 0])
         ax.axis("off")
-        ax.text(0.5, 0.5, "(uniform precision\nno per-block map)",
+        ax.text(0.5, 0.5, "(uniform W precision\nno per-block map)",
                 ha="center", va="center", fontsize=10, color="gray")
 
-    # Row 2: Outputs (shared color scale).
-    outs = [("C_hw  (HW output)", C_hw),
-            ("C_sw  (SW golden)", C_sw),
-            ("C_fp32 (FP32 truth)", C_fp32)]
-    vmin = min(m.min() for _, m in outs)
-    vmax = max(m.max() for _, m in outs)
-    for j, (name, m) in enumerate(outs):
-        ax = fig.add_subplot(gs[1, j])
-        im = ax.imshow(m, vmin=vmin, vmax=vmax, aspect="auto", cmap="viridis")
-        ax.set_title(name)
-        ax.set_xlabel("N"); ax.set_ylabel("M")
-        fig.colorbar(im, ax=ax, fraction=0.046)
+    if A_prec_scalar is not None:
+        ax = fig.add_subplot(gs[1, 1])
+        a_map = np.full((K_T, N), prec_lookup[A_prec_scalar], dtype=np.uint8)
+        im = ax.imshow(a_map, aspect="auto", cmap=prec_cmap, vmin=0, vmax=2)
+        ax.set_title(f"A_PREC map (layer-uniform: A={A_prec_scalar})")
+        ax.set_xlabel("N"); ax.set_ylabel("K-block")
+        ax.set_yticks(range(K_T))
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, ticks=[0, 1, 2])
+        cbar.ax.set_yticklabels(["A=2", "A=4", "A=8"])
+    else:
+        ax = fig.add_subplot(gs[1, 1])
+        ax.axis("off")
+        ax.text(0.5, 0.5, "(integration mode\nno mixed A_PREC)",
+                ha="center", va="center", fontsize=10, color="gray")
 
-    # Row 3: Diffs (log10 |diff|).
-    diffs = [
-        ("|C_hw - C_sw|  (bit-exact gate)",  np.abs(result["diff_hw_sw"])),
-        ("|C_sw - C_fp32|  (quant noise)",   np.abs(result["diff_sw_fp32"])),
-        ("|C_hw - C_fp32|  (total error)",   np.abs(result["diff_hw_fp32"])),
-    ]
-    log_diffs = [(n, np.log10(np.maximum(d, 1e-12))) for n, d in diffs]
-    dvmin = min(d.min() for _, d in log_diffs)
-    dvmax = max(d.max() for _, d in log_diffs)
-    for j, (name, d) in enumerate(log_diffs):
-        ax = fig.add_subplot(gs[2, j])
-        im = ax.imshow(d, vmin=dvmin, vmax=dvmax, aspect="auto", cmap="magma")
-        ax.set_title("log10 " + name)
-        ax.set_xlabel("N"); ax.set_ylabel("M")
-        fig.colorbar(im, ax=ax, fraction=0.046)
+    ax = fig.add_subplot(gs[1, 2])
+    d_hw_fp32 = np.abs(result["diff_hw_fp32"])
+    im = ax.imshow(np.log10(np.maximum(d_hw_fp32, 1e-12)),
+                   aspect="auto", cmap="magma")
+    ax.set_title("log10 |C_hw - C_fp32|  (HW vs FP32 truth)")
+    ax.set_xlabel("N"); ax.set_ylabel("M")
+    fig.colorbar(im, ax=ax, fraction=0.046)
 
-    # Row 4: Stats text.
-    ax = fig.add_subplot(gs[3, :])
+    # Row 3: Stats text (compact — sw_fp32 line dropped; redundant when
+    # hw_sw passes, since C_sw == C_hw and diffs coincide).
+    ax = fig.add_subplot(gs[2, :])
     ax.axis("off")
     s = result["stats"]
     hw_sw_pass = s["hw_sw"]["n_nonzero_diff"] == 0
-    verdict = "PASS  (bit-exact)" if hw_sw_pass else f"FAIL  (n_diff={s['hw_sw']['n_nonzero_diff']}/{s['hw_sw']['n_total']})"
+    verdict = ("PASS  (bit-exact)" if hw_sw_pass
+               else f"FAIL  (n_diff={s['hw_sw']['n_nonzero_diff']}/{s['hw_sw']['n_total']})")
     lines = [
-        f"hw_sw  (HW vs SW golden)      : {verdict}",
-        f"                                 max={s['hw_sw']['max_abs_err']:.3e}   rmse={s['hw_sw']['rmse']:.3e}   snr={s['hw_sw']['snr_db']:.2f} dB",
-        f"sw_fp32 (SW vs FP32 truth) [quant noise floor]: max={s['sw_fp32']['max_abs_err']:.3e}   rmse={s['sw_fp32']['rmse']:.3e}   snr={s['sw_fp32']['snr_db']:.2f} dB",
-        f"hw_fp32 (HW vs FP32 truth) [total observed err]: max={s['hw_fp32']['max_abs_err']:.3e}   rmse={s['hw_fp32']['rmse']:.3e}   snr={s['hw_fp32']['snr_db']:.2f} dB",
+        f"hw_sw  (HW vs SW golden)        : {verdict}",
+        f"                                   max={s['hw_sw']['max_abs_err']:.3e}   rmse={s['hw_sw']['rmse']:.3e}   snr={s['hw_sw']['snr_db']:.2f} dB",
+        f"hw_fp32 (HW vs FP32 truth) [tot] : max={s['hw_fp32']['max_abs_err']:.3e}   rmse={s['hw_fp32']['rmse']:.3e}   snr={s['hw_fp32']['snr_db']:.2f} dB",
     ]
     color = "green" if hw_sw_pass else "red"
-    ax.text(0.02, 0.95, lines[0], transform=ax.transAxes, fontsize=12,
+    ax.text(0.02, 0.92, lines[0], transform=ax.transAxes, fontsize=12,
             color=color, family="monospace", va="top", weight="bold")
-    ax.text(0.02, 0.70, "\n".join(lines[1:]), transform=ax.transAxes,
+    ax.text(0.02, 0.55, "\n".join(lines[1:]), transform=ax.transAxes,
             fontsize=10, family="monospace", va="top")
 
     fig.suptitle(title, fontsize=14, y=0.995)

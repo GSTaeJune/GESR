@@ -965,6 +965,7 @@ module gemm_sram_top_mixed_tb;
         init_zero_prime;
         @(posedge clk);
         @(posedge clk);
+        $display("[CYC] INIT done       t=%0t ns  cyc=%0d", $time, $time/10);
 
         // ───── LOAD ─────
         $display("[LOAD] $readmemh inputs (mixed-precision)");
@@ -1027,9 +1028,14 @@ module gemm_sram_top_mixed_tb;
         // ───── DRIVE ─────
         $display("[DRIVE] stage 2-A / 2-B / 3+4 mixed / 5-tail");
         drive_stage_2a(0, 0);
+        $display("[CYC] stage 2A done   t=%0t ns  cyc=%0d", $time, $time/10);
         drive_stage_2b;
+        $display("[CYC] stage 2B done   t=%0t ns  cyc=%0d", $time, $time/10);
         drive_stage_3_4_mixed;
+        $display("[CYC] stage 3+4 done  t=%0t ns  cyc=%0d  (MAC sweep cyc_global=%0d)",
+                 $time, $time/10, cyc_global);
         drive_stage_5_tail;
+        $display("[CYC] stage 5 done    t=%0t ns  cyc=%0d", $time, $time/10);
 
         total_captured = 0;
         begin : dbg_drive_count
@@ -1041,6 +1047,7 @@ module gemm_sram_top_mixed_tb;
 
         // ───── PRIME ─────
         repeat (PRIME_CYC) @(posedge clk);
+        $display("[CYC] PRIME done      t=%0t ns  cyc=%0d", $time, $time/10);
 
         // ───── DRAIN ─────
         sram_D_use_zero <= 1'b0;
@@ -1049,6 +1056,7 @@ module gemm_sram_top_mixed_tb;
         drain_enable <= 1'b1;
         wait_drain_complete;
         drain_enable <= 1'b0;
+        $display("[CYC] DRAIN done      t=%0t ns  cyc=%0d", $time, $time/10);
 
         total_drained = 0;
         begin : dbg_drain_count
@@ -1061,6 +1069,7 @@ module gemm_sram_top_mixed_tb;
         // ───── DUMP ─────
         $display("[DUMP] writing 32 bank .mem files to %0s", DUMP_DIR);
         dump_banks;
+        $display("[CYC] DUMP done       t=%0t ns  cyc=%0d", $time, $time/10);
 
         // ───── PASS/FAIL 배너 ─────
         if (total_captured == EXPECTED_TOTAL && total_drained == EXPECTED_TOTAL) begin

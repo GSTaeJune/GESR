@@ -2,128 +2,70 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Next session kickoff (2026-05-18, **BLOCKER 재발견**: A=2/A=4 mixed bit-exact fail)
+## Next session kickoff (2026-05-18, **mixed-sweep BLOCKER 해소** — root cause = golden side prec_b 누락)
 
-**진행 상태**: mixed-sweep 첫 실행에서 **A=2/A=4 mixed-W bit-exact FAIL** 발견. A=8 만 PASS. 즉 RTL fix #4 (impl_w pipeline) 가 A=8 케이스만 정확히 처리하고, A=2/A=4 의 mode-aware lag 분석에 빠진 부분이 있음.
+**진행 상태**: mixed-sweep A=2/A=4/A=8 **전 모드 PASS** (hw_sw n_diff=0/16384). 이전 세션에서 RTL fix #4 (`impl_w` 파이프라인) 가 A=8 만 검증된 채 BLOCKER 로 마킹됐던 건 RTL 문제가 아니라 **golden 측 bug** 였음. 사용자 직관 (RTL 수정 불필요) 정확.
 
-### 검증 상태 (2026-05-18 mixed-sweep 결과)
+### 검증 상태 (2026-05-18 final)
 
-| Mode | Structural (DRIVE/DRAIN/DUMP) | Bit-exact compare |
+| Test | 명령 | 결과 |
 |---|---|---|
-| `mixed-one --A 2` | ✅ TB cycle-align OK (drive_w=509/512) | ❌ **n_diff=16319/16384, snr=-35.99 dB** |
-| `mixed-one --A 4` | ✅ OK (drive_w=1021/1024) | ❌ **n_diff=16366/16384** |
-| `mixed-one --A 8` | ✅ OK (drive_w=2046/2048) | ✅ n_diff=0/16384 |
+| mixed-sweep (random W per block) | `python sim/runner.py mixed-sweep` | **3/3 PASS** (A=2/4/8 모두 n_diff=0/16384) |
+| 9-mode uniform integration | `bash sim/run_integration_sweep.sh` | ALL 9 PASS (회귀 없음) |
+| MXP_Tools pytest | `cd MXP_Tools && python -m pytest tests/ -q` | **53 PASS** (기존 49 + 새 mixed-aware 4) |
 
-**왜 이전 검증이 통과 보고했나** (회고):
-- P-Task8 디버그 + 3-agent 리뷰 모두 cycle-by-cycle 도식화를 A=8 한 케이스만 수행. protocol_modes_protocol.md §7.4 도 A=8 표만 있음.
-- 9-mode integration sweep 의 A=2/A=4 모드는 *uniform* W 라 mixed-pattern 의 q-chain 의 effect 가 발현 안됨 (q1=q2=q3=impl_w). → 본 BLOCKER 완전히 mask.
-- 따라서 ~~"mixed-sweep 3/3 PASS"~~, ~~"P-Task9 DONE"~~ 같은 마킹은 **유효하지 않음** — A=8 만 실제로 검증된 상태.
+### Root cause + fix (1 줄 + 1 함수 generalization)
 
-### 다음 세션 진입점
+**원인**: `sim/gen_mixed.py::main()` 의 `compute_golden_mixed(...)` 호출 시 `prec_b` 인자 누락 → default `prec_b=8` → `impl_b = IMPLICIT_SCALE_EXP[8] = 6` 으로 모든 모드 고정.
+- A=8: 우연히 정답 (expected impl_b=6).
+- A=4: expected 2, 실제 6 → 2^4 = 16× off.
+- A=2: expected 0, 실제 6 → 2^6 = **64× off** → `C_hw / C_old_golden` median ratio = 64.000 (실측 확인).
 
-1. **A=2 mixed cycle-by-cycle 도식화** — protocol §7.4 의 A=8 표와 같은 형식으로 A=2 (out_scale 가 acc_fire 캡처) 의 모든 cycle 의 impl_w / q1 / in_Wcontrol / fire chain 상태 작성.
-2. 같은 작업 A=4 (out_scale 가 fire_q1 캡처, q2 사용) — 빠진 곳 찾기.
-3. 가능한 이슈 위치:
-   - `Accumulator_Col.v` 의 mode-aware mux `impl_w_eff = is_A8 ? q3 : is_A4 ? q2 : is_A2 ? q1 : impl_w` — A=2/A=4 의 lag 가 실제 cycle 정합 맞는지 재검증.
-   - A=2 의 경우 4 lane 모두 동시 fire 인데 lane 별 station scale 캡처 cycle 미세 차이 가능.
-   - `comb_s0/1/2/3` 의 `in_scale_act` 가 A=2 mode 에서 station chain timing 따라 cycle-by-cycle 다를 수 있음.
-4. 디버그 단서: A=2 mixed 의 hw_fp32 snr=4.21 dB 가 sw_fp32 snr=0.12 dB 보다 *좋음* — HW 가 FP32 truth 에 가까운 무언가를 계산. impl_w 가 0 (IDLE) 또는 평균값으로 잘못 들어가서 quant 효과가 무효화된 형태일 가능성.
+**진단 단서** (다음에 빠르게 식별):
+- `hw_fp32 snr > sw_fp32 snr` 시그니처 — HW 가 FP32 truth 에 가까운데 SW golden 만 멀어진 형태 = "정상 RTL + 잘못된 golden". 본 케이스 A=2 mixed 에서 hw_fp32 snr=4.21 dB vs sw_fp32 snr=0.12 dB 가 정확한 시그니처.
+- ratio 측정 (`(C_hw / C_old_golden).median()`) 이 깔끔한 2^k 면 implicit_scale 인자 누락.
 
-### 이전 산출 (참고)
+**Fix** (본 세션):
+1. `MXP_Tools/mxp_tools/gemm.py::mxint_gemm_golden` 을 mixed-aware 로 확장 — `prec_A` 가 scalar int OR (M, n_blocks) ndarray 둘 다 받게 분기. scalar 분기 보존으로 uniform 9-mode 회귀 영향 없음.
+2. `sim/gen_mixed.py` 의 `compute_golden_mixed` 를 `mxint_gemm_golden` thin wrapper 로 축약. `main()` 은 `mxint_gemm_golden(W_int, W_scale, prec_map, A_int, A_scale, args.A)` 직접 호출, `prec_B=args.A` 명시 전달.
+3. `MXP_Tools/tests/test_gemm.py` 에 4 새 케이스 추가 (scalar↔array 동치성 × 3 prec, 실제 mixed top/bot, bad value/shape reject).
 
-본 세션의 commits (`c8deb32` / `b3bbf79` / `8cb2482` / `fbbb70c` / `5f24ac4`) 는 그대로 유효 — review fixes + Python orchestrator + viz + env-var fix + mixed-sweep subcommand 모두 사용 가능. 단 **mixed-sweep 결과 검증은 A=8 만** 성립.
+**왜 RTL fix #4 의 impl_w 파이프라인은 유효**: 본 세션에서 의심됐지만 검증 결과 정확. uniform W (9-mode) 와 mixed W (3-mode) 둘 다 PASS. mode-aware mux `impl_w_eff = is_A8 ? q3 : is_A4 ? q2 : is_A2 ? q1 : impl_w` 의 lag 가 fire chain 깊이와 정합. 본 BLOCKER 의 root cause 가 RTL 이 아니라 golden 측에 있었던 것.
 
-### 본 세션 산출 (2026-05-18 add-on)
+### Viz 갱신 (`sim/runner.py::_viz_one`)
 
-- **commit `c8deb32`** `fix(review)` — 3-agent review (R1 Python golden / R2 RTL+TB / R3 compare+bank) 결과 fix:
-  - **Critical**: `MXP_Tools/mxp_tools/cli.py::cmd_compare` 가 `hw_sw n_nonzero_diff > 0` 시 `sys.exit(1)`. 이전엔 stats print 만 하고 0 종료 → `run_*.sh` 가 false-positive PASS 가능. 회귀 방지 pytest 4 case 추가 (`tests/test_cli_compare.py`, 총 49 케이스).
-  - **Important**: `Accumulator_Col.v::impl_a` not-pipelined 이유 주석 + `impl_w_q*` `(* INIT="0" *)`. TB cycle-alignment self-check (`drive_w_event_count` / `drive_scale_event_count` 범위 assertion). TOGGLE_VAL first-m_in W proxy 정당화 주석.
-  - **Minor**: `gen_mixed.py` impl_a LUT 벡터화, `compare.py` greppable PASS/FAIL one-liner, `hwio.py` host-endian caveat 미러링, protocol §7.4 cycle table q3 timestamp off-by-one fix.
-- **commit `b3bbf79`** `feat(sim)` — Python orchestrator `sim/runner.py`:
-  - VSCode "Run Python File" 호환 (no-args = `mixed-one --A 8` random mixed). subcommand: `mixed-one`, `integration-one`, `integration-sweep`.
-  - bash 스크립트 dispatch 패턴 (`subprocess.run(["bash", "sim/run_*.sh", ...])`) — Python 으로 xsim 직접 호출 시 xsimk.exe 가 orphan 되어 bank.mem 잠그는 issue 회피 (메모리 `feedback_xsim_zombie_windows.md` 참고).
-  - 자동 viz: 단발 run → `work/<LABEL>/result.png` (4-row: 입력 W/A/prec_map · 출력 C_hw/C_sw/C_fp32 · diff log10 · PASS/FAIL verdict + 통계). sweep → `work/sweep_summary.png` (9-mode rmse matrix). `gen_mixed.py` 가 inputs_mixed.npz 도 저장.
-  - 기존 bash 스크립트는 그대로 유지. `bash sim/run_*.sh` 도 계속 동작.
+3-row layout (단순화):
+- Row 1: W (FP32) | A (FP32) | C_hw (HW output)
+- Row 2: W_PREC map (per-row, per-K-block) | A_PREC map (layer-uniform) | log10|C_hw − C_fp32|
+- Row 3: stats (`hw_sw` PASS/FAIL + `hw_fp32` max/rmse/snr)
 
-### 본 세션 디버그 lesson (메모리 신규)
+W_PREC map 과 |C_hw − C_fp32| 가 Row 2 의 양끝 → M-axis 정렬 → 시각적 비교 가능. C_sw / sw_fp32 시각화 제거 (hw_sw PASS 시 C_sw 와 동일이라 redundant).
 
-- **xsim 좀비 (Windows)**: Python subprocess 로 xsim.bat 직접 호출 시 xsim 실패하면 xsimk.exe 가 orphan → 후속 bash sim 의 bank.mem 잠금 → false-positive FAIL (n_diff 대량). 복구: `taskkill //F //IM xsim.exe && taskkill //F //IM xsimk.exe && rm -rf work sim/build`. 메모리 `feedback_xsim_zombie_windows.md`.
-- **ASCII-only 출력**: TB `$display` 와 Python `print` 의 user-facing string 에 em-dash (—), `∈`, `→` 같은 unicode 금지. Windows cp949 console 은 `UnicodeEncodeError` 로 죽고, xsim 은 silent drop. 메모리 `feedback_ascii_only_displays.md`.
+### TB stage cycle 출력 추가 (`tb/gemm_sram_top_mixed_tb.v`)
 
-### 기존 4 단계 mixed-prec fix chain (reference)
+각 stage 끝에 `[CYC] STAGE done t=... cyc=...` 1줄씩 print. 향후 dataflow 최적화 / wall-clock 비교 시 stage 별 cycle 측정 즉시 가능.
 
-### 4 단계 fix chain
+### 다음 세션 후보 작업
+
+1. **Production dataflow 최적화** — 본 mixed TB 는 verification-oriented (DRAIN + DUMP 가 wall-clock 의 87%~97% 차지). production 으로 streaming RMW + multi-tile pipeline + no-DUMP 로 옮기면 MAC throughput 가속 (A=2 가 A=8 대비 4×) 이 그대로 노출. 별도 spec 필요.
+2. **Vivado timing closure / 합성** — 250 MHz wrapper / xc7vx485 target. MXP standalone 의 closure 패턴 답습.
+3. **9-mode + mixed-sweep CI 자동화** — `sim/run_integration_sweep.sh` + `sim/runner.py mixed-sweep` 묶어서 CI.
+4. **Loop order explorer** — 메모리 `project_next_loop_order_explorer.md` 참조. 행렬 크기 → DRAM/SRAM/SA traffic 코스트 모델로 optimal (loop_order, tile) 탐색 software.
+5. **SRAM weight storage** (future scope) — 통합 spec § 1.
+
+### 핵심 RTL 매핑 사실 (참조)
+
+SA 의 row=K, col=N, cycle=M 진행. 자세한 표는 본 CLAUDE.md `## MXP control surface` 의 첫 subsection. mixed-prec 디버그 시 row=M 으로 단정 금지 (메모리 `feedback_sa_dimension_mapping.md` 참조).
+
+### Fix chain (mixed-prec 진화 history, 참조용)
 
 | # | Commit | 위치 | 내용 |
 |---|---|---|---|
 | 1 | `b0cb974` | TB | `in_scale_weight` cadence 일반화: `drive_cyc[k] = 18 + A_FIRE_DELAY + Σ_{j=0..k} W[j]` |
 | 2 | `405f4ec` | TB | `in_Wcontrol` cum_W exclusive schedule: `drive_w_cyc[k] = 18 + Σ_{j=0..k-1} W[j]` |
 | 3 | `d03771c` | TB | dynamic TOGGLE_VAL: K-tile 별 W lookup (`18 + A_FIRE_DELAY + W[k_t·M_T·TILE_SIZE]/2`) |
-| 4 | (이번 commit) | **RTL** | `Accumulator_Col.v`: `impl_w` fire-chain 파이프라인 (`impl_w_q1/q2/q3`) — mode-별 effective impl_w |
-
-### Fix #4 (RTL, 본 세션): impl_w 파이프라인
-
-**Root cause**: `in_Wcontrol` 은 m_in 진입 cycle 에 W 갱신 (cnt rollover 제어용). 그러나 fire chain (acc_fire/fire_q1/fire_q2) 이 m_in=k 결과를 `out_scale` 로 캡처하는 cycle 에선 `in_Wcontrol` 이 이미 m_in=k+1 의 W. `comb_s` 의 `impl_w` 가 m_in=k+1 값으로 오염 → mixed-W 결과 catastrophic fail (uniform W 에선 impl_w 안 바뀌어서 masked).
-
-**Fix**: `impl_w` 를 fire chain 깊이 + 1 만큼 지연시켜 mode-별 effective 값 사용.
-- A=2 (out_scale 가 acc_fire 캡처): `impl_w_q1` (1-cyc lag)
-- A=4 (out_scale 가 fire_q1 캡처): `impl_w_q2` (2-cyc lag)
-- A=8 (out_scale 가 fire_q2 캡처): `impl_w_q3` (3-cyc lag)
-
-```verilog
-// Accumulator_Col.v 추가분
-reg [3:0] impl_w_q1, impl_w_q2, impl_w_q3;
-wire [3:0] impl_w_eff = is_A8 ? impl_w_q3 :
-                        is_A4 ? impl_w_q2 :
-                        is_A2 ? impl_w_q1 : impl_w;
-wire [4:0] implicit_total = impl_a + impl_w_eff;
-// always block: impl_w_q1 <= impl_w; impl_w_q2 <= impl_w_q1; impl_w_q3 <= impl_w_q2;
-```
-
-uniform W 시 `q1=q2=q3=impl_w` 라 9-mode 회귀 영향 없음.
-
-### 검증 결과 (모두 PASS)
-
-| Test | 명령 | 결과 |
-|---|---|---|
-| uniform W=8 isolation | `MIXED_W_UNIFORM=8 bash sim/run_mixed_one.sh 8` | hw_sw n_diff=0/16384 |
-| K-tile granular `[8,4,2,8]` | `MIXED_W_K_TILE=8,4,2,8 bash sim/run_mixed_one.sh 8` | hw_sw n_diff=0/16384 |
-| random mixed (full) | `bash sim/run_mixed_one.sh 8` | hw_sw n_diff=0/16384, max=0 |
-| 9-mode integration sweep | `bash sim/run_integration_sweep.sh` | ALL 9 PASS |
-
-### 다음 세션 = ~~본 commit 코드 리뷰~~ → **DONE** (2026-05-18, c8deb32)
-
-본 commit (RTL fix #4 + 문서) 의 3-agent 독립 리뷰 완료. 결과는 위 "본 세션 산출" 참고. 이하 원본 리뷰 대비 정보 (아카이브):
-
-다음 세션에서 사용자가 본 commit (RTL fix #4 + 문서) 을 직접 리뷰 예정. 리뷰 대비 핵심 정보:
-
-**문제 (random mixed bit-exact fail)**:
-- `bash sim/run_mixed_one.sh 8` (random per-(M,K-block) W_PREC) 결과 `hw_sw max=6.5e4, n_diff=16384/16384, SNR=-43dB` (전 세션 측정값). uniform W (9-mode) 는 PASS 였으므로 mixed-pattern 특화 bug.
-- 진단 흐름: emit/golden 분리 검증 (Python sanity OK) → isolation (`MIXED_W_UNIFORM=8` PASS) → mismatch 위치를 mixed-W 영역에 좁힘 → fire chain 캡처 cycle vs `in_Wcontrol` cadence 의 cycle 단위 도식화 → root cause 확정.
-
-**Root cause**: `Accumulator_Col.v::impl_w` 가 combinational 로 `in_Wcontrol` 에서 decode. 그러나 `out_scale` 의 fire chain 캡처 (A=8 fire_q2, A=4 fire_q1, A=2 acc_fire) 는 m_in=k 의 결과를 latch 하는데, 그 cycle 에는 `in_Wcontrol` 이 이미 m_in=k+1 의 W 로 전환돼 있음 (cnt rollover 제어 때문에 m_in 진입 시점에 갱신). → `comb_s` 의 `implicit_total` 에 m_in=k+1 의 `impl_w` 가 섞여 m_in=k 의 scale 계산 catastrophic 오염. uniform W 에선 `impl_w` 안 바뀌어서 masked → 9-mode 통과는 정상.
-
-**Fix**: `impl_w` 를 fire chain 깊이 + 1 만큼 reg 지연. mode-별 effective `impl_w_eff` 사용 (A8→q3, A4→q2, A2→q1). 4 lines reg + 5 lines wire mux. uniform W 시 `q1=q2=q3=impl_w` 라 9-mode 회귀 영향 없음 (검증됨).
-
-**문서 산출물** (commit 에 포함):
-- `precision_modes_protocol.md` v1.0 → v1.1 (§7 mixed-W support 신규 + §1 invariant 정정 + 부록 B v1.1 validation).
-- `docs/mixed-precision-tutorial.html` 신규 (16.5KB, 9-section end-to-end 튜토리얼 — quick start / data gen / precision map / sim / variants / verify / 9-mode / dataflow / 트러블슈팅).
-
-**리뷰 시 의심해볼만한 점들**:
-1. `impl_w_q1/q2/q3` 의 rst 처리 — rst branch 에서 0 으로 초기화. start_accumulate 시점 (in_start_accumulate 펄스) 에 별도 reset 필요한가? (현재 안 함. 답: in_start_accumulate 는 Accumulator 의 cnt/accumulate 만 리셋. impl_w 는 in_Wcontrol 의 함수라 그 자체로 IDLE→W 전환 시 자연스레 propagate. K-tile 사이 in_Wcontrol = IDLE 구간 있으면 q chain 에 IDLE=0 끼어들 수 있는데, 본 TB driver 는 K-tile 사이 IDLE 안 끼움 → OK.)
-2. impl_a 도 같은 timing 정합 필요한가? — 본 프로젝트는 A_PREC layer-wide fixed 라 impl_a 가 cycle 마다 안 바뀜 → 불필요. 만약 미래에 per-m_in A_PREC 도 mix 한다면 impl_a 도 같은 파이프라인 필요할 수 있음.
-3. comb_s 4개 (s0/s1/s2/s3) 모두 같은 `impl_w_eff` 사용 — A=2 모드 일 때 4 lane 동시 fire 라 mode-aware lag 가 acc_fire 기준 (q1) 이면 모두 정합. OK.
-4. mode 가 sim 중 바뀌면 `impl_w_eff` mux 가 잘못된 q stage 선택 가능 — 본 프로젝트 A_PREC 은 sim 시작 시 fix. 미래 mid-sim mode 변경 시 재검증 필요.
-
-### 추가 후보 작업
-
-1. **P-Task9 — mixed sweep (A_PREC ∈ {2,4,8})** → infrastructure DONE (`python sim/runner.py mixed-sweep`, commit `fbbb70c`), 그러나 **결과 1/3 PASS only — A=2/A=4 BLOCKER** (위 kickoff 섹션 참조).
-2. ~~mxp_tools.compare fail-gate~~ → **DONE** (commit `c8deb32`, pytest 검증).
-3. **Throughput/area 잠정값 재검토** (통합 spec § 9), **timing closure (Vivado 합성)**, **SRAM weight storage** (future scope), **9-mode CI 자동화**.
-
-### 핵심 RTL 매핑 사실 (참조)
-
-SA 의 row=K, col=N, cycle=M 진행. 자세한 표는 본 CLAUDE.md `## MXP control surface` 의 첫 subsection. mixed-prec 디버그 시 row=M 으로 단정 금지 (메모리 `feedback_sa_dimension_mapping.md` 참조).
+| 4 | `5beb24c` | **RTL** | `Accumulator_Col.v`: `impl_w` fire-chain 파이프라인 (`impl_w_q1/q2/q3`) — mode-별 effective impl_w |
+| 5 | (본 세션) | **Python golden** | `mxint_gemm_golden` mixed-aware + `gen_mixed.py` prec_B 명시 전달 |
 
 ---
 

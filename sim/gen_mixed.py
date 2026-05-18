@@ -22,7 +22,8 @@ if str(_MXP_TOOLS) not in sys.path:
     sys.path.insert(0, str(_MXP_TOOLS))
 
 from mxp_tools.quant import quantize_block_mx, quantize_matrix_mx  # noqa: E402
-from mxp_tools.const import BLOCK_SIZE, IMPLICIT_SCALE_EXP  # noqa: E402
+from mxp_tools.gemm import mxint_gemm_golden  # noqa: E402
+from mxp_tools.const import BLOCK_SIZE  # noqa: E402
 
 
 def build_w_prec_map(seed: int = 0, M: int = 128, K_T: int = 4) -> np.ndarray:
@@ -276,71 +277,23 @@ def emit_hex(W_int: np.ndarray, W_scale: np.ndarray,
     (out_dir / "w_prec_per_block.hex").write_text(emit_hex_w_prec_only(prec_map))
 
 
+# ---------------------------------------------------------------------------
+# Golden GEMM is delegated to MXP_Tools' mxint_gemm_golden, which accepts
+# an ndarray prec_A for mixed-precision weights (see MXP_Tools/mxp_tools/gemm.py).
+# Wrapper retained for backward-compatibility callers that still import
+# compute_golden_mixed from this module.
+# ---------------------------------------------------------------------------
+
 def compute_golden_mixed(
     W_int: np.ndarray,
     W_scale: np.ndarray,
     A_int: np.ndarray,
     A_scale: np.ndarray,
     prec_map: np.ndarray,
-    prec_b: int = 8,
+    prec_b: int,
 ) -> np.ndarray:
-    """FP32 GEMM 골든 — K-block 단위 누적, mxint_gemm_golden 의 accumulation 미러.
-
-    mxint_gemm_golden 과 동일한 방식으로 누적하되 weight 의 implicit_scale 이
-    (M, K_T) block 단위로 달라지는 점만 다름.
-
-    Args:
-      W_int    : int8,  (M, K)   — weight (mxp_tools 의 int_A 역할)
-      W_scale  : uint8, (M, K_T) — per-block E8M0 weight scale
-      A_int    : int8,  (K, N)   — activation (mxp_tools 의 int_B 역할)
-      A_scale  : uint8, (K_T, N) — per-block E8M0 activation scale
-      prec_map : uint8, (M, K_T) — per-(row,block) W_PREC ∈ {2,4,8}
-      prec_b   : int            — activation precision (uniform), default 8
-
-    Returns:
-      C : float32, (M, N)
-    """
-    M, K = W_int.shape
-    _, N = A_int.shape
-    K_T = K // BLOCK_SIZE
-    assert prec_map.shape == (M, K_T), f"prec_map shape {prec_map.shape} != ({M}, {K_T})"
-    assert W_scale.shape == (M, K_T)
-    assert A_scale.shape == (K_T, N)
-
-    # E8M0 → FP32: 2^(e - 127) — mirrors mxint_gemm_golden._e8m0_to_fp32
-    w_scale_fp = (2.0 ** (W_scale.astype(np.float64) - 127.0)).astype(np.float32)  # (M, K_T)
-    a_scale_fp = (2.0 ** (A_scale.astype(np.float64) - 127.0)).astype(np.float32)  # (K_T, N)
-
-    # Activation implicit_scale is uniform (same prec_b for all blocks).
-    impl_b = IMPLICIT_SCALE_EXP[prec_b]
-
-    # Vectorized LUT: prec ∈ {2,4,8} → IMPLICIT_SCALE_EXP[prec]. Used per-block
-    # per-row, so build a max-index lookup once instead of per-row dict lookups.
-    impl_lut = np.zeros(9, dtype=np.float64)
-    for p, v in IMPLICIT_SCALE_EXP.items():
-        impl_lut[p] = v
-
-    C = np.zeros((M, N), dtype=np.float32)
-    for blk in range(K_T):
-        sl = slice(blk * BLOCK_SIZE, (blk + 1) * BLOCK_SIZE)
-        # int32 block matmul — shape (M, N). int8 @ int8 must promote to int32
-        # to hold up to ±32·127·127 ≈ 5e5 per element (block_size=32).
-        block_int = W_int[:, sl].astype(np.int32) @ A_int[sl, :].astype(np.int32)  # (M, N)
-
-        # Per-row implicit scale for weight: depends on per-block prec_map[m, blk].
-        # Build a (M, 1) FP32 array of 2^-(impl_a[m] + impl_b).
-        impl_a_vec = impl_lut[prec_map[:, blk]]  # (M,) float64
-        # FP32 scalar per row: mirrors np.float32(2.0 ** -(impl_a + impl_b))
-        implicit_scale_vec = (2.0 ** -(impl_a_vec + np.float64(impl_b))).astype(np.float32)  # (M,)
-
-        block_fp = (
-            block_int.astype(np.float32)
-            * w_scale_fp[:, blk : blk + 1]       # (M, 1) broadcast
-            * a_scale_fp[blk : blk + 1, :]       # (1, N) broadcast
-            * implicit_scale_vec[:, np.newaxis]   # (M, 1) broadcast
-        )
-        C += block_fp
-    return C
+    """Thin wrapper around mxint_gemm_golden with prec_A=prec_map (ndarray)."""
+    return mxint_gemm_golden(W_int, W_scale, prec_map, A_int, A_scale, prec_b)
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +321,10 @@ def main():
     W_fp, A_fp = build_raw_data(seed=args.seed, M=args.M, K=args.K, N=args.N)
     W_int, W_scale = quantize_weight_mixed(W_fp, prec_map)
     A_int, A_scale = quantize_activation_uniform(A_fp, prec=args.A)
-    C_golden = compute_golden_mixed(W_int, W_scale, A_int, A_scale, prec_map)
+    # mxint_gemm_golden 의 prec_A=ndarray 분기로 위임. prec_B=args.A 가 필수 —
+    # default 8 이 들어가면 A=2/A=4 에서 activation implicit_scale 계산이
+    # IMPLICIT_SCALE_EXP[8]=6 로 잘못 고정돼 RTL 결과와 2^6 = 64 배 차이.
+    C_golden = mxint_gemm_golden(W_int, W_scale, prec_map, A_int, A_scale, args.A)
 
     # FP32 reference matmul — unquantized truth for compare's 3-way diff.
     # Use single-precision matmul to match the dtype convention used by
