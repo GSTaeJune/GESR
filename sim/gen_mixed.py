@@ -30,9 +30,12 @@ def build_w_prec_map(seed: int = 0, M: int = 128, K_T: int = 4) -> np.ndarray:
 
     seed 고정 시 재현 가능. dtype=uint8.
 
-    Debug override: env MIXED_W_UNIFORM=<2|4|8> set 시 random 대신 전체 균일 W.
-    isolation test 용 — mixed TB 의 W=균일 path 가 9-mode sweep 과 일치하는지
-    분기 검증할 때 사용. CLAUDE.md 의 P-Task8 debug protocol 참고.
+    Debug overrides (priority 순):
+      MIXED_W_UNIFORM=<2|4|8>     — 전체 (M, K_T) 균일 W. isolation test 용.
+      MIXED_W_K_TILE=<v0,v1,v2,v3> — K-tile 별 W 지정. 한 K-tile 안의 모든 M-row 는 같은 W.
+                                     예: "8,4,2,8" → K-tile 0=W=8, 1=4, 2=2, 3=8.
+                                     mixed-W granularity 분기 테스트 용.
+    둘 다 unset 이면 random (M, K_T).
     """
     import os
     uniform = os.environ.get("MIXED_W_UNIFORM")
@@ -40,6 +43,14 @@ def build_w_prec_map(seed: int = 0, M: int = 128, K_T: int = 4) -> np.ndarray:
         p = int(uniform)
         assert p in (2, 4, 8), f"MIXED_W_UNIFORM must be 2/4/8, got {p}"
         return np.full((M, K_T), p, dtype=np.uint8)
+    k_tile = os.environ.get("MIXED_W_K_TILE")
+    if k_tile is not None:
+        vals = [int(v) for v in k_tile.split(",")]
+        assert len(vals) == K_T, f"MIXED_W_K_TILE must have {K_T} vals, got {len(vals)}"
+        for v in vals:
+            assert v in (2, 4, 8), f"W must be 2/4/8, got {v}"
+        # 한 K-tile 안의 128 M-row 가 모두 같은 W (M-row 차원 mix 없음).
+        return np.tile(np.array(vals, dtype=np.uint8), (M, 1))
     rng = np.random.default_rng(seed)
     choices = np.array([2, 4, 8], dtype=np.uint8)
     return choices[rng.integers(0, 3, size=(M, K_T), dtype=np.int64)]

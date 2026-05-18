@@ -355,6 +355,16 @@ module gemm_sram_top_mixed_tb;
     integer drive_cyc_target;     // 다음 a_scale[] 드라이브 cyc_global
     integer drive_idx_target;     // 다음 드라이브할 a_scale[] 인덱스 (0..K_T*M_T*TILE-1)
 
+    // in_Wcontrol 드라이브 schedule — col 16 의 m_in=k MAC 시작 cycle (= cnt=0)
+    // 에 맞춰 in_Wcontrol = W[k] 가 settle 되도록.
+    // drive_w_cyc[k] = 18 + Σ W_PREC[0..k-1]  (cum_W_exclusive[k]).
+    // col 16 의 m_in=k fire (= P_(18+cum_W[k])) pre-edge = TB iter 17+cum_W[k] = W[k] ✓.
+    // 단순 iter 인덱스 기반 (loop's m_in_idx) 드라이브와 다르게, SA pipeline
+    // depth 만큼 offset 된 schedule — K-tile 경계에서 col 16 의 마지막 fire 가
+    // 잘못된 in_control 로 fail 하는 것을 막음.
+    integer drive_w_cyc_target;
+    integer drive_w_idx_target;
+
     // 인덱스 → W (cycle 수) 매핑. drive_idx_target 의 m_in 위치 W_PREC lookup.
     function integer lookup_w_for_idx;
         input integer idx;
@@ -371,6 +381,18 @@ module gemm_sram_top_mixed_tb;
                 W_INT2:  lookup_w_for_idx = 2;
                 default: lookup_w_for_idx = 8;
             endcase
+        end
+    endfunction
+
+    // 인덱스 → W_CTRL_CODE 매핑. in_Wcontrol 드라이브용.
+    function [1:0] lookup_wctrl_for_idx;
+        input integer idx;
+        integer kt_v, mt_v, mi_v;
+        begin
+            kt_v = idx / (M_T * TILE_SIZE);
+            mt_v = (idx / TILE_SIZE) % M_T;
+            mi_v = idx % TILE_SIZE;
+            lookup_wctrl_for_idx = w_prec_packed[mt_v*TILE_SIZE + mi_v][2*kt_v +: 2];
         end
     endfunction
 
@@ -556,6 +578,11 @@ module gemm_sram_top_mixed_tb;
             drive_idx_target = 0;
             drive_cyc_target = 18 + A_FIRE_DELAY + lookup_w_for_idx(0);
 
+            // in_Wcontrol schedule 초기화 — col 16 의 m_in=0 MAC cnt 시작 cyc.
+            // drive_cyc[k] = 18 + cum_W_exclusive[k]. m_in=0 → iter 18 (cum=0).
+            drive_w_idx_target = 0;
+            drive_w_cyc_target = 18;
+
             for (n_t = 0; n_t < N_T_LOGICAL; n_t = n_t + 1) begin
                 for (k_t = 0; k_t < K_T; k_t = k_t + 1) begin
                     for (m_t = 0; m_t < M_T; m_t = m_t + 1) begin
@@ -588,11 +615,17 @@ module gemm_sram_top_mixed_tb;
                                     in_start_accumulate <= 1'b0;
                                 end
 
-                                // Wcontrol: cyc_global=17 전엔 W_IDLE, 이후 w_ctrl_now.
-                                if (n_t == 0 && k_t == 0 && cyc_global < 17) begin
-                                    in_Wcontrol <= W_IDLE;
-                                end else begin
-                                    in_Wcontrol <= w_ctrl_now;
+                                // in_Wcontrol 드라이브 — schedule 기반.
+                                // drive_w_cyc_target = 18 + cum_W_exclusive[k] = col 16 의
+                                // m_in=k MAC cnt 시작 cyc. iter 0..17 동안은 schedule 아직
+                                // 안 fire → in_Wcontrol = W_IDLE (CONFIG 초기값).
+                                if (cyc_global == drive_w_cyc_target) begin
+                                    in_Wcontrol <= lookup_wctrl_for_idx(drive_w_idx_target);
+                                    drive_w_cyc_target = drive_w_cyc_target
+                                                         + lookup_w_for_idx(drive_w_idx_target);
+                                    drive_w_idx_target = drive_w_idx_target + 1;
+                                    if (drive_w_idx_target >= K_T*M_T*TILE_SIZE)
+                                        drive_w_idx_target = 0;
                                 end
 
                                 // PE in_control toggle: K-tile 진입 첫 cycle.
@@ -665,7 +698,8 @@ module gemm_sram_top_mixed_tb;
             in_b                <= 0;
             in_Scale_Activation <= 0;
             for (i = 0; i < TAIL_CYC; i = i + 1) begin
-                // tail 동안에도 scale_weight schedule 이어감 — in-flight fire 의 scale capture.
+                // tail 동안에도 scale_weight + in_Wcontrol schedule 이어감 — in-flight
+                // fire 의 scale 및 wControl capture.
                 if (cyc_global == drive_cyc_target) begin
                     in_scale_weight <= a_scale[drive_idx_target];
                     drive_idx_target = drive_idx_target + 1;
@@ -673,6 +707,14 @@ module gemm_sram_top_mixed_tb;
                         drive_idx_target = 0;
                     drive_cyc_target = drive_cyc_target
                                        + lookup_w_for_idx(drive_idx_target);
+                end
+                if (cyc_global == drive_w_cyc_target) begin
+                    in_Wcontrol <= lookup_wctrl_for_idx(drive_w_idx_target);
+                    drive_w_cyc_target = drive_w_cyc_target
+                                         + lookup_w_for_idx(drive_w_idx_target);
+                    drive_w_idx_target = drive_w_idx_target + 1;
+                    if (drive_w_idx_target >= K_T*M_T*TILE_SIZE)
+                        drive_w_idx_target = 0;
                 end
                 @(posedge clk);
                 cyc_global = cyc_global + 1;
