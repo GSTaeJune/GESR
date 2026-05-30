@@ -43,6 +43,11 @@ work/
 # Reference papers / PDFs (not source)
 References/
 
+# Claude Code local artifacts
+.claude/worktrees/
+.claude/settings.local.json
+.claude/stamp.txt
+
 # Editor / OS
 .vscode/
 .idea/
