@@ -2,7 +2,30 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Next session kickoff (2026-05-18, **mixed-sweep BLOCKER 해소** — root cause = golden side prec_b 누락)
+## Next session kickoff (2026-06-04, **전체 코드리뷰 + 회귀 확인 완료** — commit `8a0e673`)
+
+**진행 상태**: 멀티에이전트 파일단위 리뷰→수정 루프 1회 수렴 (88 agents). 21건 수정 / 15파일. **연산 로직 버그는 없었음** — 고친 건 전부 주변부(빌드·실행 스크립트, 테스트 게이트, 데드코드). 검증된 데이터패스(`int_to_fp32` 클램프, `fp32_adder` 파이프라인)는 PASS 깨질 위험으로 시니어 에이전트가 의도적으로 거절 → timing-closure 단계로 보류.
+
+### 이번 세션 적용 (commit `8a0e673`)
+- **Linux 실행 블로커**: `run_integration_one|smoke|mixed_one.sh` 의 `cmd //c xsim` (윈도우 전용) → `case $(uname -s)` 분기. repo 가 Linux 로 클론돼서 그대로면 죽었음.
+- **빌드 누락**: `run_integration_smoke.sh` xvlog 리스트에 `sram_1rw_banked_mp.v` 추가.
+- **가짜 green**: 단위 TB 5개 ($finish 로 항상 exit 0) → run_*.sh 에 pass-sentinel grep 게이트.
+- **테스트/데드코드**: test_gen_mixed prec_b 인자, int_to_fp32_tb 음수 scale, sram_mp_tb idle-bank 검증, GEMM.v `sc_bcast` 데드넷 제거(동작 무변).
+
+### 회귀 확인 (2026-06-04)
+- `bash sim/run_integration_sweep.sh` → **ALL 9 MODES PASSED**
+- `python sim/runner.py mixed-sweep` → **ALL 3 MIXED MODES PASSED**
+- `sim/tests` 10 PASS · `MXP_Tools` 53 PASS. 회귀 0.
+
+### 다음 세션 후보: 보고-only 항목 업스트림 반영 (수정 안 됨)
+리뷰가 imports/vendored/MXP_Tools(fork)에서 발견했으나 정책상 미수정 (full 목록은 워크플로 결과 참조):
+- **HIGH** `MXP_Tools/examples/01_smoke.py`: `cli_main()` 가 항상 SystemExit → 스모크가 1단계 후 죽는데 exit 0.
+- **MEDIUM** `MXP_Tools/tests/test_gemm.py`: prec_B 고정 + K-block 내 prec 불변 → 64× A=2 버그 회귀 방어 안 됨.
+- **MEDIUM** `viz.py` NaN vmin/vmax, `rmw_gen.py` MAX_N=128 오버플로, imported `PE_feeder/PE_naive` 8-bit 슬라이스 하드코딩(latent).
+
+기타 후보(기존): production dataflow 최적화 · Vivado timing closure · 9-mode+mixed CI 자동화 · loop order explorer.
+
+## 직전 세션 (2026-05-18, **mixed-sweep BLOCKER 해소** — root cause = golden side prec_b 누락)
 
 **진행 상태**: mixed-sweep A=2/A=4/A=8 **전 모드 PASS** (hw_sw n_diff=0/16384). 이전 세션에서 RTL fix #4 (`impl_w` 파이프라인) 가 A=8 만 검증된 채 BLOCKER 로 마킹됐던 건 RTL 문제가 아니라 **golden 측 bug** 였음. 사용자 직관 (RTL 수정 불필요) 정확.
 
