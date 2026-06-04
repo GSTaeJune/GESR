@@ -65,3 +65,24 @@ def test_out_in_factors_roundtrip():
     assert out["M"] * inn["M"] == w.MT
     assert out["K"] * inn["K"] == w.KT
     assert out["N"] * inn["N"] == w.NT
+
+
+def test_dram_bits_all_resident():
+    # G1: 64^3, all-resident (K_out=1 -> no spill), uniform wbits=8, act=8
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    m = s.Mapping(perm=("N", "K", "M"), m_in=2, k_in=2, n_in=2)
+    d = s.dram_bits(m, w)
+    assert d["A"] == 64 * 64 * 8 * 1        # K*N*act * M_out(=1) = 32768
+    assert d["W"] == 32768 * 1              # total_w_bits * N_out(=1)
+    assert d["Cw"] == 64 * 64 * 32 * 1      # M*N*32 * K_out(=1) = 131072
+    assert d["Cr"] == 0                     # K_out-1 = 0 (first touch zero-init)
+    assert d["total"] == 32768 + 32768 + 131072 + 0  # 196608
+
+
+def test_dram_bits_kspill():
+    # G2: force K_out=2 (k_in=1) -> psum spill doubles C write, adds C read
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    m = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=2)
+    d = s.dram_bits(m, w)
+    assert d["Cw"] == 64 * 64 * 32 * 2     # K_out=2 -> 262144
+    assert d["Cr"] == 64 * 64 * 32 * 1     # (K_out-1)=1 -> 131072

@@ -93,3 +93,13 @@ def footprint_bits(m, w):
 
 def feasible(m, w, hw):
     return footprint_bits(m, w) <= hw.cap_bits
+
+
+def dram_bits(m, w):
+    out, _ = _out_in(m, w)
+    a = (w.K * w.N * w.act_bits) * out["M"]            # reload(A) = M_out
+    wt = w.total_w_bits * out["N"]                      # reload(W) = N_out
+    cw = (w.M * w.N * 32) * out["K"]                    # each outer-K writes partial
+    cr = (w.M * w.N * 32) * (out["K"] - 1)              # reload for accumulate; first touch zero-init
+    return {"A": int(a), "W": int(wt), "Cw": int(cw), "Cr": int(cr),
+            "total": int(a + wt + cw + cr)}
