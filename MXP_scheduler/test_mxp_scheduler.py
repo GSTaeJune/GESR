@@ -86,3 +86,24 @@ def test_dram_bits_kspill():
     d = s.dram_bits(m, w)
     assert d["Cw"] == 64 * 64 * 32 * 2     # K_out=2 -> 262144
     assert d["Cr"] == 64 * 64 * 32 * 1     # (K_out-1)=1 -> 131072
+
+
+def test_onchip_mac_rmw_and_compute_work():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    m = s.Mapping(perm=("N", "K", "M"), m_in=2, k_in=2, n_in=2)
+    # MAC = M*K*N
+    assert s.mac_ops(w) == 64 * 64 * 64                   # 262144
+    # RMW = T * 1024 * disp; T=8, disp(act=8)=1
+    assert s.rmw_ops(w) == 8 * 1024 * 1                   # 8192
+    # compute_work = 32 * NT * sum(all wbits) = 32 * 2 * 32 = 2048
+    assert s.compute_work(w) == 2048
+    # onchip (G1 all-resident): A_rd=T*1024*act=8*1024*8=65536 ; W_rd=NT*total_w=2*32768=65536 ;
+    # refill = DRAM(A)+DRAM(W)+DRAM(Cr) = 32768+32768+0 = 65536 ; total=196608
+    assert s.onchip_bits(m, w) == 65536 + 65536 + 65536   # 196608
+
+
+def test_rmw_disp_low_precision():
+    w2 = s.Work(M=64, K=64, N=64, wbits=[[2, 2], [2, 2]], act_bits=2)
+    assert s.rmw_ops(w2) == 8 * 1024 * 4                   # disp(act=2)=4
+    w4 = s.Work(M=64, K=64, N=64, wbits=[[4, 4], [4, 4]], act_bits=4)
+    assert s.rmw_ops(w4) == 8 * 1024 * 2                   # disp(act=4)=2 (middle dispatch value)

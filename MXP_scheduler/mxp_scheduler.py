@@ -103,3 +103,31 @@ def dram_bits(m, w):
     cr = (w.M * w.N * 32) * (out["K"] - 1)              # reload for accumulate; first touch zero-init
     return {"A": int(a), "W": int(wt), "Cw": int(cw), "Cr": int(cr),
             "total": int(a + wt + cw + cr)}
+
+
+_DISP = {8: 1, 4: 2, 2: 4}   # RMW dispatches per col fire by activation mode
+
+
+def mac_ops(w):
+    return w.M * w.K * w.N
+
+
+def rmw_ops(w):
+    return w.MT * w.KT * w.NT * TILE * TILE * _DISP[w.act_bits]
+
+
+def compute_work(w):
+    # Σ_cube 32·b = 32 · NT · Σ_{m,k} wbits  (order-independent ideal lower bound)
+    return int(TILE * w.NT * sum(sum(row) for row in w.wbits))
+
+
+def onchip_bits(m, w):
+    # All three terms are on-chip buffer accesses and share the single "onchip" energy
+    # coefficient (spec §7): SA-facing reads (a_rd, w_rd) PLUS the on-chip write of data
+    # refilled from DRAM. The DRAM-side transfer energy of that refill is counted
+    # separately in dram_bits (weighted by the "dram" coeff) — this is the on-chip side.
+    a_rd = (w.MT * w.KT * w.NT) * TILE * TILE * w.act_bits   # A read once per cube
+    w_rd = w.NT * w.total_w_bits                              # W tile read once per n_t
+    d = dram_bits(m, w)
+    refill = d["A"] + d["W"] + d["Cr"]                        # DRAM -> on-chip loads (mapping-variable)
+    return int(a_rd + w_rd + refill)
