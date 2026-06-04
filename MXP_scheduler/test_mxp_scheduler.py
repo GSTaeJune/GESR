@@ -27,3 +27,41 @@ def test_work_validates_wbits_shape():
 def test_hw_capacity_bits():
     hw = s.HW(bank_size=1024, banks=32, dram_bw=64)
     assert hw.cap_bits == 1024 * 32 * 32  # bank_size*banks*word_bits = 1048576
+
+
+def test_gen_mappings_count():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    ms = s.gen_mappings(w)
+    # 6 perms x divisors(2)^3 = 6 x 2^3 = 48
+    assert len(ms) == 48
+    # every blocking factor divides its tile count
+    for m in ms:
+        assert w.MT % m.m_in == 0 and w.KT % m.k_in == 0 and w.NT % m.n_in == 0
+        assert set(m.perm) == {"M", "K", "N"}
+
+
+def test_footprint_and_feasible():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    # all-resident mapping: m_in=k_in=n_in=2
+    m = s.Mapping(perm=("N", "K", "M"), m_in=2, k_in=2, n_in=2)
+    # foot(A)=k_in*n_in*TILE^2*act = 2*2*1024*8 = 32768
+    # foot(W)=m_in*k_in*TILE^2*max_wbits = 2*2*1024*8 = 32768
+    # foot(C)=m_in*n_in*TILE^2*32 = 2*2*1024*32 = 131072
+    assert s.footprint_bits(m, w) == 32768 + 32768 + 131072  # 196608
+    big = s.HW(bank_size=1024, banks=32, dram_bw=64)   # cap=1048576
+    tiny = s.HW(bank_size=1, banks=2, dram_bw=64)       # cap=64
+    assert s.feasible(m, w, big) is True
+    assert s.feasible(m, w, tiny) is False
+
+
+def test_out_in_factors_roundtrip():
+    w = s.Work(M=128, K=64, N=96, wbits=[[8] * 2 for _ in range(4)], act_bits=8)
+    # tile counts: MT=4, KT=2, NT=3
+    m = s.Mapping(perm=("M", "K", "N"), m_in=2, k_in=1, n_in=3)
+    out, inn = s._out_in(m, w)
+    assert inn == {"M": 2, "K": 1, "N": 3}
+    assert out == {"M": 2, "K": 2, "N": 1}   # MT//m_in, KT//k_in, NT//n_in
+    # outer*inner reconstructs the tile count along every dim
+    assert out["M"] * inn["M"] == w.MT
+    assert out["K"] * inn["K"] == w.KT
+    assert out["N"] * inn["N"] == w.NT

@@ -56,3 +56,40 @@ class Work:
     @property
     def total_w_bits(self):
         return TILE * TILE * sum(sum(row) for row in self.wbits)
+
+
+@dataclass(frozen=True)
+class Mapping:
+    perm: tuple             # permutation of ("M","K","N"), perm[0] = outermost
+    m_in: int               # resident (inner) tile count per dim
+    k_in: int
+    n_in: int
+
+
+def _out_in(m, w):
+    """Return (out, inn) dicts of outer/inner factors per dimension."""
+    inn = {"M": m.m_in, "K": m.k_in, "N": m.n_in}
+    out = {"M": w.MT // m.m_in, "K": w.KT // m.k_in, "N": w.NT // m.n_in}
+    return out, inn
+
+
+def gen_mappings(w):
+    ms = []
+    for perm in itertools.permutations(("M", "K", "N")):
+        for mi in divisors(w.MT):
+            for ki in divisors(w.KT):
+                for ni in divisors(w.NT):
+                    ms.append(Mapping(perm=perm, m_in=mi, k_in=ki, n_in=ni))
+    return ms
+
+
+def footprint_bits(m, w):
+    max_wbits = max(max(row) for row in w.wbits)   # conservative resident W storage (A7)
+    foot_a = m.k_in * m.n_in * TILE * TILE * w.act_bits
+    foot_w = m.m_in * m.k_in * TILE * TILE * max_wbits
+    foot_c = m.m_in * m.n_in * TILE * TILE * 32
+    return int(foot_a + foot_w + foot_c)
+
+
+def feasible(m, w, hw):
+    return footprint_bits(m, w) <= hw.cap_bits
