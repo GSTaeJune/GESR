@@ -165,3 +165,28 @@ def test_energy_breakdown_g1():
     assert e["mac"] == 262144 * 1         # 262144
     assert e["rmw"] == 8192 * 5           # 40960
     assert e["total"] == 39321600 + 1179648 + 262144 + 40960   # 40804352
+
+
+def test_stall_fill_g3():
+    # G3: low-bit blocks cannot hide an A-reload -> stall>0
+    w = s.Work(M=64, K=64, N=64, wbits=[[2, 2], [2, 2]], act_bits=8)
+    # perm N outer, n_in=1 (N_out=2); m_in=2,k_in=2 (M_out=K_out=1); bw=32
+    m = s.Mapping(perm=("N", "M", "K"), m_in=2, k_in=2, n_in=1)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    stall, fill = s.stall_fill(m, w, hw)
+    # block compute = 32*N_in(1)*sum(2,2,2,2=8) = 256 each
+    # j0 fetch = A_blk + W_blk = (2*1*1024*8=16384) + (8*1024=8192) = 24576 ; fill=24576/32=768
+    # j1: N changed -> A reload 16384 ; W same -> 0 ; stall=max(0,16384/32 - 256)=max(0,512-256)=256
+    assert fill == 768.0
+    assert stall == 256.0
+    # actual = compute_work + fill + stall = 512 + 768 + 256 = 1536
+    assert s.actual_cycle(m, w, hw) == 1536.0
+
+
+def test_stall_zero_when_bw_huge():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    m = s.Mapping(perm=("M", "K", "N"), m_in=2, k_in=2, n_in=2)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=10 ** 12)   # effectively infinite BW
+    stall, fill = s.stall_fill(m, w, hw)
+    assert stall == 0.0
+    assert fill < 1.0   # fetch/huge-bw ~ 0

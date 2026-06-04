@@ -163,3 +163,42 @@ def energy_breakdown(m, w, hw):
     e_rmw = rmw_ops(w) * c["rmw"]
     return {"dram": e_dram, "onchip": e_onchip, "mac": e_mac, "rmw": e_rmw,
             "total": e_dram + e_onchip + e_mac + e_rmw}
+
+
+def stall_fill(m, w, hw):
+    """Sequence-aware stall over outer-iteration blocks. Inputs (A,W) only (spec §8)."""
+    out, inn = _out_in(m, w)
+    bw = hw.dram_bw
+    a_blk = inn["K"] * inn["N"] * TILE * TILE * w.act_bits
+    # iterate outer index tuples in perm order (perm[0] outermost)
+    ranges = [range(out[d]) for d in m.perm]
+    prev = None
+    prev_compute = 0.0
+    fill = 0.0
+    total_stall = 0.0
+    for combo in itertools.product(*ranges):
+        idx = dict(zip(m.perm, combo))                     # outer indices per dim
+        mo, ko = idx["M"], idx["K"]
+        # resident W tiles for this block, summed avg bits
+        w_sum = sum(w.wbits[mt][kt]
+                    for mt in range(mo * inn["M"], (mo + 1) * inn["M"])
+                    for kt in range(ko * inn["K"], (ko + 1) * inn["K"]))
+        w_blk = w_sum * TILE * TILE
+        compute_blk = TILE * inn["N"] * w_sum              # 32 * N_in * Σ wbits(block)
+        if prev is None:
+            fill = (a_blk + w_blk) / bw
+        else:
+            fetch = 0
+            if (idx["K"], idx["N"]) != (prev["K"], prev["N"]):
+                fetch += a_blk                              # A reloads (A indexed K,N)
+            if (idx["M"], idx["K"]) != (prev["M"], prev["K"]):
+                fetch += w_blk                              # W reloads (W indexed M,K)
+            total_stall += max(0.0, fetch / bw - prev_compute)
+        prev = idx
+        prev_compute = compute_blk
+    return total_stall, fill
+
+
+def actual_cycle(m, w, hw):
+    stall, fill = stall_fill(m, w, hw)
+    return float(compute_work(w)) + fill + stall
