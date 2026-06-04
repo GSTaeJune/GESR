@@ -13,4 +13,4 @@ xvlog -nolog \
     ../tb/int_to_fp32_tb.v
 
 xelab -nolog -debug typical int_to_fp32_tb -s int_to_fp32_tb_sim
-xsim int_to_fp32_tb_sim -nolog -R
+out=$(xsim int_to_fp32_tb_sim -nolog -R 2>&1); echo "$out"; echo "$out" | grep -q 'int_to_fp32_tb: ALL TESTS PASSED' || { echo 'run_int_to_fp32.sh: int_to_fp32 TB FAILED' >&2; exit 1; }

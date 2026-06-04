@@ -4,8 +4,9 @@
 //
 // station chain: col 31 entry, single-direction left propagation (matches in_b
 // wave). Each station broadcasts out_local_Lane_ctrl (4-bit pre-decoded) to
-// SystolicArray's per-column lane-ctrl bus → PE adder_lane.ctrl direct, and
-// out_local_Station_control (2-bit raw) to its Accumulator_Col in_Acontrol only.
+// SystolicArray's per-column lane-ctrl bus → PE adder_lane.ctrl direct. Each
+// station also broadcasts out_local_Mode_oh (3-bit one-hot) to its
+// Accumulator_Col in_Mode_oh and out_local_Scale_Activation to in_scale_act.
 //
 // Accumulator_Col chain: middle entry at col num_col/2, fanning outward
 // (left half: i+1→i, right half: i→i+1) — mirrors reference BitSerial_Systolic
@@ -83,7 +84,6 @@ localparam Mode_oh_len   = 3;   // pre-decoded one-hot {A2,A4,A8} for Acc_Col
 
 // Broadcast wires (combinational buffer mux from each station — stable per-column
 // during MAC since they read latched buffer values, not the propagating chain).
-wire [Station_control_len-1:0]  sc_bcast   [num_col-1:0];
 wire [4*scale_len-1:0]          sa_bcast   [num_col-1:0];
 wire [Lane_ctrl_len-1:0]        lc_bcast   [num_col-1:0];
 wire [Mode_oh_len-1:0]          mo_bcast   [num_col-1:0];
@@ -113,7 +113,7 @@ generate
                         .out_loadEN                (sld_chain [j]),
                         .out_Station_control       (sc_chain  [j]),
                         .out_Scale_Activation      (sa_chain  [j]),
-                        .out_local_Station_control (sc_bcast  [j]),
+                        .out_local_Station_control (),
                         .out_local_Scale_Activation(sa_bcast  [j]),
                         .out_local_Lane_ctrl       (lc_bcast  [j]),
                         .out_local_Mode_oh         (mo_bcast  [j])
@@ -136,7 +136,7 @@ generate
                         .out_loadEN                (sld_chain [j]),
                         .out_Station_control       (sc_chain  [j]),
                         .out_Scale_Activation      (sa_chain  [j]),
-                        .out_local_Station_control (sc_bcast  [j]),
+                        .out_local_Station_control (),
                         .out_local_Scale_Activation(sa_bcast  [j]),
                         .out_local_Lane_ctrl       (lc_bcast  [j]),
                         .out_local_Mode_oh         (mo_bcast  [j])

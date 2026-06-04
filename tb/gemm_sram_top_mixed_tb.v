@@ -23,7 +23,7 @@
 //   WORK_DIR  : sim/gen_mixed.py 의 --out 디렉토리 (필수)
 //   DUMP_DIR  : SRAM .mem dump 출력 디렉토리 (필수)
 //
-// 회귀 게이트: `bash sim/run_mixed_sweep.sh` → "ALL 3 MIXED SCENARIOS PASSED".
+// 회귀 게이트: python sim/runner.py mixed-sweep → "ALL 3 MIXED MODES PASSED" (단발: bash sim/run_mixed_one.sh <A_PREC>).
 //////////////////////////////////////////////////////////////////////////////
 
 module gemm_sram_top_mixed_tb;
@@ -342,8 +342,8 @@ module gemm_sram_top_mixed_tb;
     end
 
     // ─── DRIVE 스크래치 reg ────────────────────────────────────────
-    integer n_t, k_t, m_t, o;
-    integer cyc_in_K, cyc_global, m_idx_scale;
+    integer n_t, k_t, m_t;
+    integer cyc_in_K, cyc_global;
     integer k_t_start_cycle;       // mixed drive 에서 현재 K-tile 의 cyc_global 기준점
     reg     cur_pp;       // PE in_control 토글 상태 (Buf1/Buf2)
     reg     cur_st_pp;    // Station selector 토글 상태

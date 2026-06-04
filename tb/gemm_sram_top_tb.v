@@ -104,11 +104,6 @@ module gemm_sram_top_tb;
     integer total_captured;
     integer total_drained;
 
-    // ─── RMW 파이프라인 타이밍 보조 상수 ──────────────────────────
-    // RMW latency = L_CONV + L_ADD = 2 + 3 = 5 cy. RMW 입력 드라이브 후
-    // write-back 까지 8 cy 대기:
-    //   = L_CONV + L_ADD + 3 cy slack (신호 전파 여유분).
-    localparam integer RMW_WAIT_CYC = 8;
     // X-prime: drain 시작 전 파이프라인 X 채움 cycle. 가장 깊은 파이프라인
     // (RMW.sram_dly + fp32_adder.recFN_b_dly) 보다 길어야 함.
     localparam integer PRIME_CYC    = 16;

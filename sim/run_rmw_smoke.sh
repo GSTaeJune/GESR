@@ -11,4 +11,4 @@ xvlog -nolog \
     ../tb/rmw_smoke_tb.v
 
 xelab -nolog -debug typical rmw_smoke_tb -s rmw_smoke_tb_sim
-xsim rmw_smoke_tb_sim -nolog -R
+out=$(xsim rmw_smoke_tb_sim -nolog -R 2>&1); echo "$out"; echo "$out" | grep -q 'rmw_smoke_tb: ALL TESTS PASSED' || { echo 'run_rmw_smoke.sh: rmw_smoke FAILED' >&2; exit 1; }

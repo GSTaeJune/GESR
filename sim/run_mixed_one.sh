@@ -35,7 +35,7 @@ HF_ROOT="third_party/berkeley-hardfloat"
         ../../../$SRC_ROOT/new/gemm_sram_top.v \
         ../../../tb/gemm_sram_top_mixed_tb.v && \
     xelab -L work gemm_sram_top_mixed_tb -snapshot mixed_snap && \
-    cmd //c "xsim mixed_snap -runall -testplusarg \"A_PREC=$A_PREC\" -testplusarg \"WORK_DIR=../../../$WORK\" -testplusarg \"DUMP_DIR=../../../$DUMP\"")
+    { case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) cmd //c "xsim mixed_snap -runall -testplusarg \"A_PREC=$A_PREC\" -testplusarg \"WORK_DIR=../../../$WORK\" -testplusarg \"DUMP_DIR=../../../$DUMP\"";; *) xsim mixed_snap -runall -testplusarg "A_PREC=$A_PREC" -testplusarg "WORK_DIR=../../../$WORK" -testplusarg "DUMP_DIR=../../../$DUMP";; esac; })
 
 # 3) bit-exact compare.
 BANKS=$(printf "../work/${LABEL}/hw_out/bank%d.mem " {0..31})

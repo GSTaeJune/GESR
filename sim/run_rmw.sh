@@ -15,4 +15,4 @@ xvlog -nolog \
     ../tb/rmw_tb.v
 
 xelab -nolog -debug typical rmw_tb -s rmw_tb_sim
-xsim rmw_tb_sim -nolog -R
+out=$(xsim rmw_tb_sim -nolog -R 2>&1); echo "$out"; echo "$out" | grep -q 'rmw_tb: ALL .* TESTS PASSED' || { echo 'run_rmw.sh: RMW vector test FAILED' >&2; exit 1; }
