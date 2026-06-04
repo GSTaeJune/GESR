@@ -190,3 +190,36 @@ def test_stall_zero_when_bw_huge():
     stall, fill = s.stall_fill(m, w, hw)
     assert stall == 0.0
     assert fill < 1.0   # fetch/huge-bw ~ 0
+
+
+def test_evaluate_keys():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    m = s.Mapping(perm=("N", "K", "M"), m_in=2, k_in=2, n_in=2)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=64)
+    r = s.evaluate(m, w, hw)
+    assert r["feasible"] is True
+    assert r["energy"] == 40804352.0
+    assert r["actual_cycle"] == s.actual_cycle(m, w, hw)
+    assert r["mapping"] is m
+
+
+def test_optimize_picks_min_energy_feasible():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=64)
+    ranked = s.optimize(w, hw)
+    assert all(r["feasible"] for r in ranked)
+    # sorted ascending by energy
+    assert ranked == sorted(ranked, key=lambda r: r["energy"])
+    # min-energy mapping must be all-resident (no spill, no input reload): out factors all 1
+    best = ranked[0]["mapping"]
+    assert (best.m_in, best.k_in, best.n_in) == (w.MT, w.KT, w.NT)
+
+
+def test_optimize_cycle_constraint_filters():
+    w = s.Work(M=64, K=64, N=64, wbits=[[2, 2], [2, 2]], act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    tight = min(s.actual_cycle(m, w, hw)
+                for m in s.gen_mappings(w) if s.feasible(m, w, hw))
+    ranked = s.optimize(w, hw, max_cycle=tight)
+    assert len(ranked) >= 1
+    assert all(r["actual_cycle"] <= tight + 1e-9 for r in ranked)

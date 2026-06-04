@@ -202,3 +202,32 @@ def stall_fill(m, w, hw):
 def actual_cycle(m, w, hw):
     stall, fill = stall_fill(m, w, hw)
     return float(compute_work(w)) + fill + stall
+
+
+def evaluate(m, w, hw):
+    feas = feasible(m, w, hw)
+    eb = energy_breakdown(m, w, hw)
+    stall, fill = stall_fill(m, w, hw)
+    cw = compute_work(w)
+    return {
+        "mapping": m,
+        "feasible": feas,
+        "energy": eb["total"],
+        "energy_breakdown": eb,
+        "dram": dram_bits(m, w),
+        "compute_work": cw,
+        "stall": stall,
+        "fill": fill,
+        "actual_cycle": float(cw) + fill + stall,
+    }
+
+
+def optimize(w, hw, max_cycle=None):
+    """Exhaustive over (perm x blocking). Return feasible results sorted by energy asc.
+    If max_cycle given, further filters to actual_cycle <= max_cycle BEFORE the sort."""
+    results = [evaluate(m, w, hw) for m in gen_mappings(w)]
+    results = [r for r in results if r["feasible"]]
+    if max_cycle is not None:
+        results = [r for r in results if r["actual_cycle"] <= max_cycle + 1e-9]
+    results.sort(key=lambda r: r["energy"])
+    return results
