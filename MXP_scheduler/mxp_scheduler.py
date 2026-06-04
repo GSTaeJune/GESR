@@ -153,3 +153,13 @@ def onchip_bits(m, w):
     d = dram_bits(m, w)
     refill = d["A"] + d["W"] + d["Cr"]                        # DRAM -> on-chip loads (mapping-variable)
     return int(a_rd + w_rd + refill)
+
+
+def energy_breakdown(m, w, hw):
+    c = hw.coeffs
+    e_dram = dram_bits(m, w)["total"] * c["dram"]
+    e_onchip = onchip_bits(m, w) * c["onchip"]
+    e_mac = mac_ops(w) * c["mac"]
+    e_rmw = rmw_ops(w) * c["rmw"]
+    return {"dram": e_dram, "onchip": e_onchip, "mac": e_mac, "rmw": e_rmw,
+            "total": e_dram + e_onchip + e_mac + e_rmw}

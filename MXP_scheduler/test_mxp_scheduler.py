@@ -153,3 +153,15 @@ def test_out_in_rejects_non_divisor_mapping():
     # the corruption it used to cause (negative Cr / total<0) is now blocked at the source
     with pytest.raises(ValueError):
         s.dram_bits(bad, w)
+
+
+def test_energy_breakdown_g1():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    m = s.Mapping(perm=("N", "K", "M"), m_in=2, k_in=2, n_in=2)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=64)   # default coeffs 200/6/1/5
+    e = s.energy_breakdown(m, w, hw)
+    assert e["dram"] == 196608 * 200      # 39321600
+    assert e["onchip"] == 196608 * 6      # 1179648
+    assert e["mac"] == 262144 * 1         # 262144
+    assert e["rmw"] == 8192 * 5           # 40960
+    assert e["total"] == 39321600 + 1179648 + 262144 + 40960   # 40804352
