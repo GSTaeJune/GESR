@@ -1,5 +1,4 @@
 # MXP_scheduler/test_mxp_scheduler.py
-import math
 import pytest
 import mxp_scheduler as s
 
@@ -21,7 +20,26 @@ def test_work_validates_wbits_shape():
     with pytest.raises(ValueError):
         s.Work(M=64, K=64, N=64, wbits=[[8, 8]], act_bits=8)  # wrong rows (MT=2)
     with pytest.raises(ValueError):
+        s.Work(M=64, K=64, N=64, wbits=[[8], [8]], act_bits=8)  # wrong cols (KT=2)
+    with pytest.raises(ValueError):
         s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=3)  # act not in {2,4,8}
+
+
+def test_work_rejects_non_tile_multiple_and_out_of_range_wbits():
+    with pytest.raises(ValueError):
+        s.Work(M=40, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)   # 40 not multiple of 32
+    with pytest.raises(ValueError):
+        s.Work(M=0, K=64, N=64, wbits=[], act_bits=8)                  # zero dim
+    with pytest.raises(ValueError):
+        s.Work(M=64, K=64, N=64, wbits=[[9, 8], [8, 8]], act_bits=8)   # 9 out of [2,8]
+    with pytest.raises(ValueError):
+        s.Work(M=64, K=64, N=64, wbits=[[0, 8], [8, 8]], act_bits=8)   # 0 out of [2,8]
+
+
+def test_work_accepts_fractional_avg_wbits():
+    # per-tile AVERAGE bits can be fractional and in-range (mixed weights in a tile)
+    w = s.Work(M=64, K=64, N=64, wbits=[[2.5, 7.5], [8, 2]], act_bits=8)
+    assert (w.MT, w.KT) == (2, 2)
 
 
 def test_hw_capacity_bits():
@@ -107,3 +125,31 @@ def test_rmw_disp_low_precision():
     assert s.rmw_ops(w2) == 8 * 1024 * 4                   # disp(act=2)=4
     w4 = s.Work(M=64, K=64, N=64, wbits=[[4, 4], [4, 4]], act_bits=4)
     assert s.rmw_ops(w4) == 8 * 1024 * 2                   # disp(act=4)=2 (middle dispatch value)
+
+
+def test_onchip_kspill_refill():
+    # onchip with K-spill (Cr>0): refill must include the psum reload (live code path)
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    m = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=2)   # K_out=2 -> Cr>0
+    # a_rd=65536 ; w_rd=65536 ; refill=A(32768)+W(32768)+Cr(131072)=196608
+    assert s.onchip_bits(m, w) == 65536 + 65536 + 196608   # 327680
+
+
+def test_mixed_wbits_compute_and_footprint():
+    # non-uniform per-tile avg bits: compute_work sums EVERY tile; footprint uses global max
+    w = s.Work(M=64, K=64, N=64, wbits=[[2, 8], [8, 2]], act_bits=8)
+    # compute_work = TILE * NT * Σwbits = 32 * 2 * (2+8+8+2=20) = 1280
+    assert s.compute_work(w) == 1280
+    m = s.Mapping(perm=("N", "K", "M"), m_in=2, k_in=2, n_in=2)
+    # foot W term uses max_wbits=8 (global max), so same as uniform-8: 196608
+    assert s.footprint_bits(m, w) == 32768 + 32768 + 131072  # 196608
+
+
+def test_out_in_rejects_non_divisor_mapping():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)   # MT=KT=NT=2
+    bad = s.Mapping(perm=("M", "K", "N"), m_in=3, k_in=3, n_in=3)       # 3 does not divide 2
+    with pytest.raises(ValueError):
+        s._out_in(bad, w)
+    # the corruption it used to cause (negative Cr / total<0) is now blocked at the source
+    with pytest.raises(ValueError):
+        s.dram_bits(bad, w)

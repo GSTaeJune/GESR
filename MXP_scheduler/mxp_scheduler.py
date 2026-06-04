@@ -6,7 +6,8 @@ Standard (clean) build. stdlib only.
 from dataclasses import dataclass, field
 import itertools
 
-TILE = 32
+TILE = 32                # physical systolic-array dim = spatial mapping (HW-fixed)
+FP32_BITS = 32           # FP32 psum word width (DRAM C traffic + on-chip C storage)
 DEFAULT_COEFFS = {"dram": 200.0, "onchip": 6.0, "mac": 1.0, "rmw": 5.0}
 
 
@@ -36,10 +37,19 @@ class Work:
     act_bits: int           # layer-uniform activation precision (2/4/8)
 
     def __post_init__(self):
+        # M/K/N must be positive multiples of TILE: wbits is a per-32x32-tile map, so a
+        # partial last tile is not representable, and this keeps every count on ONE basis
+        # (raw M*K*N == tiled MT*TILE*...), removing the raw-vs-tiled mismatch.
+        for name, v in (("M", self.M), ("K", self.K), ("N", self.N)):
+            if v <= 0 or v % TILE != 0:
+                raise ValueError(f"{name} must be a positive multiple of TILE={TILE}, got {v}")
         if self.act_bits not in (2, 4, 8):
             raise ValueError(f"act_bits must be 2/4/8, got {self.act_bits}")
         if len(self.wbits) != self.MT or any(len(r) != self.KT for r in self.wbits):
             raise ValueError(f"wbits must be {self.MT}x{self.KT}")
+        # per-tile AVERAGE weight bits — may be fractional, must lie in [2, 8]
+        if any(not (2 <= b <= 8) for row in self.wbits for b in row):
+            raise ValueError("each wbits entry (average weight bits) must be in [2, 8]")
 
     @property
     def MT(self):
@@ -67,7 +77,15 @@ class Mapping:
 
 
 def _out_in(m, w):
-    """Return (out, inn) dicts of outer/inner factors per dimension."""
+    """Return (out, inn) dicts of outer/inner factors per dimension.
+
+    Blocking factors must divide their tile counts exactly. gen_mappings only emits
+    such factors; this guard rejects a hand-built Mapping that would otherwise
+    floor-divide to a wrong or zero outer count and silently corrupt the cost
+    (e.g. out["K"]==0 -> negative Cr -> total<0 winning the optimizer)."""
+    for dim, T, f in (("M", w.MT, m.m_in), ("K", w.KT, m.k_in), ("N", w.NT, m.n_in)):
+        if f < 1 or T % f != 0:
+            raise ValueError(f"{dim} blocking factor {f} must be a divisor of tile count {T}")
     inn = {"M": m.m_in, "K": m.k_in, "N": m.n_in}
     out = {"M": w.MT // m.m_in, "K": w.KT // m.k_in, "N": w.NT // m.n_in}
     return out, inn
@@ -84,10 +102,14 @@ def gen_mappings(w):
 
 
 def footprint_bits(m, w):
-    max_wbits = max(max(row) for row in w.wbits)   # conservative resident W storage (A7)
+    # Conservative GLOBAL upper bound for resident W bit-width: max over ALL tiles, not
+    # just the resident m_in x k_in window. Safe direction (never marks an infeasible
+    # mapping feasible); for mixed-precision partial blocking it can over-estimate W and
+    # over-prune. A resident-window-aware refinement is a spec-level modeling decision.
+    max_wbits = max(max(row) for row in w.wbits)
     foot_a = m.k_in * m.n_in * TILE * TILE * w.act_bits
     foot_w = m.m_in * m.k_in * TILE * TILE * max_wbits
-    foot_c = m.m_in * m.n_in * TILE * TILE * 32
+    foot_c = m.m_in * m.n_in * TILE * TILE * FP32_BITS
     return int(foot_a + foot_w + foot_c)
 
 
@@ -99,8 +121,8 @@ def dram_bits(m, w):
     out, _ = _out_in(m, w)
     a = (w.K * w.N * w.act_bits) * out["M"]            # reload(A) = M_out
     wt = w.total_w_bits * out["N"]                      # reload(W) = N_out
-    cw = (w.M * w.N * 32) * out["K"]                    # each outer-K writes partial
-    cr = (w.M * w.N * 32) * (out["K"] - 1)              # reload for accumulate; first touch zero-init
+    cw = (w.M * w.N * FP32_BITS) * out["K"]             # each outer-K writes partial (FP32 psum)
+    cr = (w.M * w.N * FP32_BITS) * (out["K"] - 1)       # reload for accumulate; first touch zero-init
     return {"A": int(a), "W": int(wt), "Cw": int(cw), "Cr": int(cr),
             "total": int(a + wt + cw + cr)}
 
@@ -117,7 +139,7 @@ def rmw_ops(w):
 
 
 def compute_work(w):
-    # Σ_cube 32·b = 32 · NT · Σ_{m,k} wbits  (order-independent ideal lower bound)
+    # Σ_cube 32·b = TILE · NT · Σ_{mt,kt} wbits[mt][kt]  (order-independent ideal lower bound)
     return int(TILE * w.NT * sum(sum(row) for row in w.wbits))
 
 
