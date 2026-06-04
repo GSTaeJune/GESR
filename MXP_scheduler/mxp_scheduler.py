@@ -165,38 +165,51 @@ def energy_breakdown(m, w, hw):
             "total": e_dram + e_onchip + e_mac + e_rmw}
 
 
-def stall_fill(m, w, hw):
-    """Sequence-aware stall over outer-iteration blocks. Inputs (A,W) only (spec §8)."""
+def _blocks(m, w):
+    """Yield (idx, compute_blk, a_blk, w_blk) per outer block in perm order (perm[0] outermost).
+    idx = outer index dict per dim; compute_blk = 32*N_in*Σwbits(resident M_in x K_in window);
+    a_blk = A fetch bits (mapping-constant: same inner A tile every block);
+    w_blk = W fetch bits for this block (varies — depends on the block's resident wbits)."""
     out, inn = _out_in(m, w)
-    bw = hw.dram_bw
-    a_blk = inn["K"] * inn["N"] * TILE * TILE * w.act_bits
-    # iterate outer index tuples in perm order (perm[0] outermost)
+    a_blk = inn["K"] * inn["N"] * TILE * TILE * w.act_bits   # mapping-constant, same every block
     ranges = [range(out[d]) for d in m.perm]
-    prev = None
-    prev_compute = 0.0
-    fill = 0.0
-    total_stall = 0.0
     for combo in itertools.product(*ranges):
-        idx = dict(zip(m.perm, combo))                     # outer indices per dim
+        idx = dict(zip(m.perm, combo))
         mo, ko = idx["M"], idx["K"]
-        # resident W tiles for this block, summed avg bits
         w_sum = sum(w.wbits[mt][kt]
                     for mt in range(mo * inn["M"], (mo + 1) * inn["M"])
                     for kt in range(ko * inn["K"], (ko + 1) * inn["K"]))
-        w_blk = w_sum * TILE * TILE
-        compute_blk = TILE * inn["N"] * w_sum              # 32 * N_in * Σ wbits(block)
-        if prev is None:
-            fill = (a_blk + w_blk) / bw
-        else:
-            fetch = 0
+        yield idx, TILE * inn["N"] * w_sum, a_blk, w_sum * TILE * TILE
+
+
+def _stall_of_order(blocks, bw):
+    """Sum of double-buffer stalls for a given block ORDER. Inputs (A,W) only (spec §8):
+    each block's input fetch is hidden behind the PREVIOUS block's compute.
+    A reloads when (K_idx, N_idx) changes; W reloads when (M_idx, K_idx) changes."""
+    prev = None
+    prev_compute = 0.0
+    total = 0.0
+    for idx, compute_blk, a_blk, w_blk in blocks:
+        if prev is not None:
+            fetch = 0.0
             if (idx["K"], idx["N"]) != (prev["K"], prev["N"]):
                 fetch += a_blk                              # A reloads (A indexed K,N)
             if (idx["M"], idx["K"]) != (prev["M"], prev["K"]):
                 fetch += w_blk                              # W reloads (W indexed M,K)
-            total_stall += max(0.0, fetch / bw - prev_compute)
+            total += max(0.0, fetch / bw - prev_compute)
         prev = idx
         prev_compute = compute_blk
-    return total_stall, fill
+    return total
+
+
+def stall_fill(m, w, hw):
+    """Sequence-aware stall over outer-iteration blocks. Inputs (A,W) only (spec §8).
+    fill = first block's input fetch time (unhidable); stall = natural perm-order stall."""
+    blocks = list(_blocks(m, w))
+    bw = hw.dram_bw
+    _, _, a0, w0 = blocks[0]
+    fill = (a0 + w0) / bw
+    return _stall_of_order(blocks, bw), fill
 
 
 def actual_cycle(m, w, hw):
@@ -231,3 +244,13 @@ def optimize(w, hw, max_cycle=None):
         results = [r for r in results if r["actual_cycle"] <= max_cycle + 1e-9]
     results.sort(key=lambda r: r["energy"])
     return results
+
+
+def lpt_headroom(m, w, hw):
+    """Headroom indicator (spec §9.2): natural perm-order stall vs the stall if outer blocks
+    were reordered Longest-Processing-Time-first (descending block compute). LPT is NOT a
+    drop-in optimum here (tiles are reuse-coupled), so headroom may be <= 0."""
+    blocks = list(_blocks(m, w))
+    natural = _stall_of_order(blocks, hw.dram_bw)
+    lpt = _stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.dram_bw)  # b[1] = compute_blk, desc
+    return {"natural_stall": natural, "lpt_stall": lpt, "headroom": natural - lpt}

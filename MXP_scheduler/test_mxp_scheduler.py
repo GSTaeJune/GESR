@@ -223,3 +223,13 @@ def test_optimize_cycle_constraint_filters():
     ranked = s.optimize(w, hw, max_cycle=tight)
     assert len(ranked) >= 1
     assert all(r["actual_cycle"] <= tight + 1e-9 for r in ranked)
+
+
+def test_lpt_headroom_runs_and_reports_both():
+    w = s.Work(M=128, K=128, N=128, wbits=[[2, 8, 2, 8]] * 4, act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    best = s.optimize(w, hw)[0]["mapping"]
+    h = s.lpt_headroom(best, w, hw)
+    assert set(h) == {"natural_stall", "lpt_stall", "headroom"}
+    assert h["headroom"] == h["natural_stall"] - h["lpt_stall"]
+    assert h["natural_stall"] >= 0 and h["lpt_stall"] >= 0
