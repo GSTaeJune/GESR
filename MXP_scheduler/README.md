@@ -109,7 +109,9 @@ the stall model so the two never disagree:
 - `stall` is a sequence-aware **shared-DRAM-bandwidth** model: one DRAM channel of bandwidth
   `eff_bw` is shared by A/W input fetch **and** C psum spill-writes / reload-reads. Each block's
   compute window hides the transfers around it; leftover transfer time is stall (plus a trailing
-  C drain for the last tile).
+  C drain for the last tile). The compute/fetch overlap is only modeled when the on-chip memory
+  has room to prefetch (cap ≥ footprint + a second copy of the streamed A+W windows); otherwise
+  the mapping is still feasible but its fetches are **fully exposed** (no hiding) per spec §8.
 - `freq_ratio = f_chip / f_dram` converts DRAM transfer time into on-chip cycles via
   `eff_bw = dram_bw / freq_ratio`. With `freq_ratio = 1` it is back-compatible (`eff_bw == dram_bw`).
   Energy is unaffected by `freq_ratio`.
