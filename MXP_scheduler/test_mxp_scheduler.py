@@ -98,9 +98,10 @@ def test_dram_bits_all_resident():
 
 
 def test_dram_bits_kspill():
-    # G2: force K_out=2 (k_in=1) -> psum spill doubles C write, adds C read
+    # G2: real psum spill needs K_out=2 (k_in=1) AND a non-trivial loop inner to K so the
+    # C tile is re-touched. perm=("K","M","N") with n_in=1 -> N (inner to K) has out=2 -> spill.
     w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
-    m = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=2)
+    m = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=1)
     d = s.dram_bits(m, w)
     assert d["Cw"] == 64 * 64 * 32 * 2     # K_out=2 -> 262144
     assert d["Cr"] == 64 * 64 * 32 * 1     # (K_out-1)=1 -> 131072
@@ -128,9 +129,10 @@ def test_rmw_disp_low_precision():
 
 
 def test_onchip_kspill_refill():
-    # onchip with K-spill (Cr>0): refill must include the psum reload (live code path)
+    # onchip with K-spill (Cr>0): refill must include the psum reload (live code path).
+    # perm=("K","M","N") n_in=1 -> N inner to K is non-trivial -> genuine spill.
     w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
-    m = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=2)   # K_out=2 -> Cr>0
+    m = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=1)   # K_out=2, N inner -> Cr>0
     # a_rd=65536 ; w_rd=65536 ; refill=A(32768)+W(32768)+Cr(131072)=196608
     assert s.onchip_bits(m, w) == 65536 + 65536 + 196608   # 327680
 
@@ -306,7 +308,7 @@ def test_energy_breakdown_kspill_costs_more():
     w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
     hw = s.HW(bank_size=1024, banks=32, dram_bw=64)
     resident = s.energy_breakdown(s.Mapping(("N", "K", "M"), 2, 2, 2), w, hw)
-    kspill = s.energy_breakdown(s.Mapping(("K", "M", "N"), 2, 1, 2), w, hw)  # K_out=2 -> Cr>0
+    kspill = s.energy_breakdown(s.Mapping(("K", "M", "N"), 2, 1, 1), w, hw)  # K_out=2, N inner -> spill
     assert kspill["dram"] > resident["dram"]
     assert kspill["total"] > resident["total"]
 
@@ -346,21 +348,23 @@ def test_dram_A_reload_depends_on_M_position():
 
 def test_dram_C_no_spill_when_K_innermost():
     # K tiled (k_in=1 -> K_out=2). K innermost = output-stationary -> no psum spill.
+    # A genuine spill needs K outer AND a non-trivial loop inside K (here N, n_in=1 -> out=2).
     w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
     k_inner = s.Mapping(perm=("M", "N", "K"), m_in=2, k_in=1, n_in=2)   # K innermost
-    k_outer = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=2)   # K outermost
+    k_outer = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=1)   # K outer, N inner -> spill
     di, do = s.dram_bits(k_inner, w), s.dram_bits(k_outer, w)
     assert di["Cw"] == 64 * 64 * 32 and di["Cr"] == 0          # one write, no reload
     assert do["Cw"] == 64 * 64 * 32 * 2 and do["Cr"] == 64 * 64 * 32   # spill per K_out
 
 
 def test_energy_is_perm_dependent():
-    # same blocking, K innermost vs K outermost -> different energy (spill differs).
+    # K innermost (output-stationary, no spill) vs a perm that genuinely spills psum
+    # -> different energy. Proves energy now depends on loop order, not just blocking.
     w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
     hw = s.HW(bank_size=1024, banks=32, dram_bw=64)
-    e_kin = s.energy_breakdown(s.Mapping(("M", "N", "K"), 2, 1, 2), w, hw)["total"]
-    e_kout = s.energy_breakdown(s.Mapping(("K", "M", "N"), 2, 1, 2), w, hw)["total"]
-    assert e_kin < e_kout
+    e_kin = s.energy_breakdown(s.Mapping(("M", "N", "K"), 2, 1, 2), w, hw)["total"]   # no spill
+    e_spill = s.energy_breakdown(s.Mapping(("K", "M", "N"), 2, 1, 1), w, hw)["total"]  # spill
+    assert e_kin < e_spill
 
 
 def test_dram_and_stall_share_reload_basis():

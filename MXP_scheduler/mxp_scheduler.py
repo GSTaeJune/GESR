@@ -161,11 +161,19 @@ def dram_bits(m, w):
             w_dram += w_blk                             # W reload (W indexed M,K)
         prev = idx
     full_c = w.M * w.N * FP32_BITS
-    if m.perm[-1] == "K":
-        cw, cr = full_c, 0                              # output-stationary: no psum spill
-    else:
+    # A C tile accumulates over all outer-K visits. It stays resident for the whole
+    # accumulation (one final write, no spill) UNLESS it is evicted and re-touched, which
+    # happens only when K is tiled (K_out>1) AND some loop INNER to K is non-trivial (out>1)
+    # so other (M,N) tiles interleave the K visits. K innermost (no inner loops) and K_out==1
+    # are both output-stationary. (Binary "K innermost" alone would over-count the case where
+    # K is outer but every loop nested inside it is trivial.)
+    k_pos = m.perm.index("K")
+    interleaved = any(out[d] > 1 for d in m.perm[k_pos + 1:])
+    if out["K"] > 1 and interleaved:
         cw = full_c * out["K"]                          # one partial write per outer-K visit
         cr = full_c * (out["K"] - 1)                    # reload prior partial; first touch zero-init
+    else:
+        cw, cr = full_c, 0                              # output-stationary: no psum spill
     return {"A": a, "W": w_dram, "Cw": cw, "Cr": cr, "total": a + w_dram + cw + cr}
 
 
