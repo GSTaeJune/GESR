@@ -233,3 +233,97 @@ def test_lpt_headroom_runs_and_reports_both():
     assert set(h) == {"natural_stall", "lpt_stall", "headroom"}
     assert h["headroom"] == h["natural_stall"] - h["lpt_stall"]
     assert h["natural_stall"] >= 0 and h["lpt_stall"] >= 0
+
+
+# --- cross-model review hardening (Tasks 5-8) ---
+
+def test_compute_work_fractional_no_truncation():
+    # fractional avg wbits must NOT be int()-truncated (would desync from per-block compute)
+    w = s.Work(M=32, K=32, N=32, wbits=[[2.1]], act_bits=8)
+    cw = s.compute_work(w)
+    assert cw == pytest.approx(32 * 1 * 2.1)   # 67.2
+    assert cw > 67                             # exactly 67 if int()-truncated -> would fail
+
+
+def test_dram_bits_fractional_no_truncation():
+    # W traffic is fractional when avg wbits is fractional; must stay exact
+    w = s.Work(M=32, K=32, N=32, wbits=[[2.1]], act_bits=8)
+    m = s.Mapping(perm=("M", "K", "N"), m_in=1, k_in=1, n_in=1)
+    d = s.dram_bits(m, w)
+    assert d["W"] == pytest.approx(1024 * 2.1)  # 2150.4
+    assert d["W"] > 2150                         # 2150 if int()-truncated
+
+
+def test_optimize_tiebreak_by_cycle():
+    # energy is perm-independent -> ties exist; they must break by ascending actual_cycle,
+    # not by gen_mappings() insertion order (a hidden preference)
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    ranked = s.optimize(w, hw)
+    assert ranked == sorted(ranked, key=lambda r: (r["energy"], r["actual_cycle"]))
+    energies = [r["energy"] for r in ranked]
+    assert len(energies) != len(set(energies))   # ties really are present
+
+
+def test_hw_rejects_nonpositive_fields():
+    with pytest.raises(ValueError):
+        s.HW(bank_size=1024, banks=32, dram_bw=0)      # div-by-zero in stall
+    with pytest.raises(ValueError):
+        s.HW(bank_size=1024, banks=32, dram_bw=-8)     # negative -> impossible cycles
+    with pytest.raises(ValueError):
+        s.HW(bank_size=0, banks=32, dram_bw=64)        # zero capacity
+
+
+def test_mapping_rejects_bad_perm():
+    with pytest.raises(ValueError):
+        s.Mapping(perm=("M", "K", "K"), m_in=1, k_in=1, n_in=1)   # not a permutation
+    with pytest.raises(ValueError):
+        s.Mapping(perm=("M", "K"), m_in=1, k_in=1, n_in=1)        # wrong length
+
+
+def test_optimize_feasibility_filter_drops_infeasible():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    hw = s.HW(bank_size=100, banks=32, dram_bw=64)   # cap=100*32*32=102400: some fit, some don't
+    ranked = s.optimize(w, hw)
+    assert 0 < len(ranked) < len(s.gen_mappings(w))   # filter keeps some AND drops some
+    assert all(r["feasible"] for r in ranked)
+
+
+def test_evaluate_infeasible_still_costs():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    tiny = s.HW(bank_size=1, banks=2, dram_bw=64)     # cap=64 bits, nothing fits
+    m = s.Mapping(perm=("N", "K", "M"), m_in=2, k_in=2, n_in=2)
+    r = s.evaluate(m, w, tiny)
+    assert r["feasible"] is False
+    assert r["energy"] > 0 and r["actual_cycle"] > 0  # still a finite cost
+
+
+def test_energy_breakdown_kspill_costs_more():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=64)
+    resident = s.energy_breakdown(s.Mapping(("N", "K", "M"), 2, 2, 2), w, hw)
+    kspill = s.energy_breakdown(s.Mapping(("K", "M", "N"), 2, 1, 2), w, hw)  # K_out=2 -> Cr>0
+    assert kspill["dram"] > resident["dram"]
+    assert kspill["total"] > resident["total"]
+
+
+def test_lpt_headroom_nontrivial_stall():
+    # multi-block mapping + low bw -> real (non-zero) stalls, exercising the actual walk
+    w = s.Work(M=64, K=64, N=64, wbits=[[2, 8], [8, 2]], act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=8)
+    m = s.Mapping(perm=("M", "K", "N"), m_in=1, k_in=1, n_in=1)   # out=(2,2,2) -> 8 blocks
+    h = s.lpt_headroom(m, w, hw)
+    assert h["natural_stall"] > 0
+    assert h["headroom"] == h["natural_stall"] - h["lpt_stall"]
+
+
+def test_optimize_cycle_filter_reduces_set():
+    w = s.Work(M=64, K=64, N=64, wbits=[[2, 2], [2, 2]], act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    full = s.optimize(w, hw)
+    cycles = sorted(r["actual_cycle"] for r in full)
+    assert cycles[0] < cycles[-1]                       # there is a spread to filter on
+    cutoff = (cycles[0] + cycles[-1]) / 2
+    mid = s.optimize(w, hw, max_cycle=cutoff)
+    assert len(mid) < len(full)
+    assert all(r["actual_cycle"] <= cutoff + 1e-9 for r in mid)

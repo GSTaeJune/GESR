@@ -23,6 +23,16 @@ class HW:
     word_bits: int = 32     # FP32 psum word
     coeffs: dict = field(default_factory=lambda: dict(DEFAULT_COEFFS))
 
+    def __post_init__(self):
+        for name, v in (("bank_size", self.bank_size), ("banks", self.banks),
+                        ("word_bits", self.word_bits)):
+            if v <= 0:
+                raise ValueError(f"{name} must be positive, got {v}")
+        # dram_bw divides every fetch in stall_fill/_stall_of_order; 0 would crash and a
+        # negative value would yield impossibly low (negative) cycles. Require positive.
+        if self.dram_bw <= 0:
+            raise ValueError(f"dram_bw must be positive (bits/cycle), got {self.dram_bw}")
+
     @property
     def cap_bits(self):
         return self.bank_size * self.banks * self.word_bits
@@ -75,6 +85,12 @@ class Mapping:
     k_in: int
     n_in: int
 
+    def __post_init__(self):
+        # _blocks/_stall_of_order index by idx["M"/"K"/"N"]; a non-permutation perm would
+        # raise a late KeyError or silently mis-walk. Validate at construction.
+        if tuple(sorted(self.perm)) != ("K", "M", "N"):
+            raise ValueError(f"perm must be a permutation of ('M','K','N'), got {self.perm}")
+
 
 def _out_in(m, w):
     """Return (out, inn) dicts of outer/inner factors per dimension.
@@ -110,7 +126,9 @@ def footprint_bits(m, w):
     foot_a = m.k_in * m.n_in * TILE * TILE * w.act_bits
     foot_w = m.m_in * m.k_in * TILE * TILE * max_wbits
     foot_c = m.m_in * m.n_in * TILE * TILE * FP32_BITS
-    return int(foot_a + foot_w + foot_c)
+    # exact (may be fractional when avg wbits is fractional); do NOT int()-truncate, which
+    # would round a footprint DOWN and could mark an over-capacity mapping feasible.
+    return foot_a + foot_w + foot_c
 
 
 def feasible(m, w, hw):
@@ -123,8 +141,9 @@ def dram_bits(m, w):
     wt = w.total_w_bits * out["N"]                      # reload(W) = N_out
     cw = (w.M * w.N * FP32_BITS) * out["K"]             # each outer-K writes partial (FP32 psum)
     cr = (w.M * w.N * FP32_BITS) * (out["K"] - 1)       # reload for accumulate; first touch zero-init
-    return {"A": int(a), "W": int(wt), "Cw": int(cw), "Cr": int(cr),
-            "total": int(a + wt + cw + cr)}
+    # exact bit counts: W traffic is fractional when avg wbits is fractional; keeping it exact
+    # (no int() truncation) keeps energy on the same basis as the per-block compute in _blocks.
+    return {"A": a, "W": wt, "Cw": cw, "Cr": cr, "total": a + wt + cw + cr}
 
 
 _DISP = {8: 1, 4: 2, 2: 4}   # RMW dispatches per col fire by activation mode
@@ -139,8 +158,10 @@ def rmw_ops(w):
 
 
 def compute_work(w):
-    # Σ_cube 32·b = TILE · NT · Σ_{mt,kt} wbits[mt][kt]  (order-independent ideal lower bound)
-    return int(TILE * w.NT * sum(sum(row) for row in w.wbits))
+    # Σ_cube 32·b = TILE · NT · Σ_{mt,kt} wbits[mt][kt]  (order-independent ideal lower bound).
+    # Exact (no int()): with fractional avg wbits this must equal Σ per-block compute in _blocks,
+    # otherwise actual_cycle (= compute_work + fill + stall) would mix a truncated and an exact base.
+    return TILE * w.NT * sum(sum(row) for row in w.wbits)
 
 
 def onchip_bits(m, w):
@@ -152,7 +173,7 @@ def onchip_bits(m, w):
     w_rd = w.NT * w.total_w_bits                              # W tile read once per n_t
     d = dram_bits(m, w)
     refill = d["A"] + d["W"] + d["Cr"]                        # DRAM -> on-chip loads (mapping-variable)
-    return int(a_rd + w_rd + refill)
+    return a_rd + w_rd + refill                               # exact (fractional when avg wbits is)
 
 
 def energy_breakdown(m, w, hw):
@@ -236,13 +257,19 @@ def evaluate(m, w, hw):
 
 
 def optimize(w, hw, max_cycle=None):
-    """Exhaustive over (perm x blocking). Return feasible results sorted by energy asc.
-    If max_cycle given, further filters to actual_cycle <= max_cycle BEFORE the sort."""
+    """Exhaustive over (perm x blocking). Return feasible results sorted by energy asc,
+    ties broken by ascending actual_cycle. If max_cycle given, further filters to
+    actual_cycle <= max_cycle BEFORE the sort.
+
+    The (energy, actual_cycle) key matters because energy depends only on the blocking
+    (out factors), so all 6 perms of a given blocking tie on energy; without the cycle
+    tiebreak the winner would fall to gen_mappings() insertion order — an arbitrary hidden
+    preference. At equal energy, fewer cycles is strictly better, so it is the right key."""
     results = [evaluate(m, w, hw) for m in gen_mappings(w)]
     results = [r for r in results if r["feasible"]]
     if max_cycle is not None:
         results = [r for r in results if r["actual_cycle"] <= max_cycle + 1e-9]
-    results.sort(key=lambda r: r["energy"])
+    results.sort(key=lambda r: (r["energy"], r["actual_cycle"]))
     return results
 
 
