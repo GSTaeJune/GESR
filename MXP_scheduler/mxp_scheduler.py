@@ -390,6 +390,41 @@ def _load_wbits(path, MT, KT):
     return wb
 
 
+def crosscheck(verbose=False):
+    """Assert the annotated twin produces identical evaluate() output on a sweep (drift guard)."""
+    import importlib, os, sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    ann = importlib.import_module("mxp_scheduler_annotated")
+    # (M, K, N, wbits, act, bank_size, banks, dram_bw, freq_ratio, coeffs|None). The cases
+    # deliberately cover all the drift-prone surfaces: every perm/blocking (via gen_mappings),
+    # spill + no-spill, freq_ratio != 1, FRACTIONAL wbits (int()-truncation footgun) and a
+    # NON-default coeffs override (energy-coeff plumbing). A one-sided edit to any of these
+    # paths must trip the equivalence check.
+    cases = [
+        (64, 64, 64, [[2, 8], [8, 2]], 8, 1024, 32, 32.0, 1.0, None),
+        # M=128 -> MT=4, K=96 -> KT=3 matches the 4x3 wbits map (asymmetric, mixed-prec, freq_ratio=2)
+        (128, 96, 64, [[4, 2, 8], [8, 8, 2], [2, 4, 4], [8, 2, 8]], 4, 512, 16, 48.0, 2.0, None),
+        # fractional avg wbits — guards the no-int()-truncation invariant on both files
+        (64, 64, 64, [[2.5, 7.5], [6.0, 3.5]], 8, 1024, 32, 32.0, 1.0, None),
+        # non-default coeffs + freq_ratio<1 — guards energy-coeff plumbing and eff_bw scaling
+        (64, 64, 64, [[2, 8], [8, 2]], 8, 1024, 32, 32.0, 0.5,
+         {"dram": 137.0, "onchip": 11.0, "mac": 2.0, "rmw": 3.0}),
+    ]
+    for (M, K, N, wb, act, bs, bk, bw, fr, co) in cases:
+        w_s, w_a = Work(M, K, N, wb, act), ann.Work(M, K, N, wb, act)
+        hw_s = HW(bs, bk, bw, freq_ratio=fr, coeffs=dict(co)) if co else HW(bs, bk, bw, freq_ratio=fr)
+        hw_a = ann.HW(bs, bk, bw, freq_ratio=fr, coeffs=dict(co)) if co else ann.HW(bs, bk, bw, freq_ratio=fr)
+        for m_s in gen_mappings(w_s):
+            m_a = ann.Mapping(perm=m_s.perm, m_in=m_s.m_in, k_in=m_s.k_in, n_in=m_s.n_in)
+            r_s, r_a = evaluate(m_s, w_s, hw_s), ann.evaluate(m_a, w_a, hw_a)
+            for key in ("feasible", "energy", "actual_cycle", "stall", "fill"):
+                assert r_s[key] == r_a[key], f"mismatch {key}: {r_s[key]} != {r_a[key]} @ {m_s}"
+            assert r_s["dram"] == r_a["dram"], f"mismatch dram @ {m_s}"
+            assert r_s["energy_breakdown"] == r_a["energy_breakdown"], f"mismatch energy_breakdown @ {m_s}"
+            assert lpt_headroom(m_s, w_s, hw_s) == ann.lpt_headroom(m_a, w_a, hw_a), f"mismatch lpt @ {m_s}"
+    print("crosscheck: OK")
+
+
 def main(argv=None):
     import argparse
     p = argparse.ArgumentParser(description="MXP_scheduler — GEMM mapping cost-model + optimizer")

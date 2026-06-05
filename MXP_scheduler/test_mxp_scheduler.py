@@ -479,3 +479,35 @@ def test_hw_rejects_nonpositive_freq_ratio():
         s.HW(bank_size=1024, banks=32, dram_bw=64, freq_ratio=0)
     with pytest.raises(ValueError):
         s.HW(bank_size=1024, banks=32, dram_bw=64, freq_ratio=-1.0)
+
+
+# --- annotated twin equivalence (Task 10) ---
+
+def test_crosscheck_passes():
+    s.crosscheck()   # raises AssertionError if the two files disagree on any swept mapping
+
+
+def test_annotated_imports_and_matches_one_case():
+    import importlib, pathlib, sys
+    sys.path.insert(0, str(pathlib.Path(s.__file__).parent))
+    ann = importlib.import_module("mxp_scheduler_annotated")
+    w_args = dict(M=64, K=64, N=64, wbits=[[2, 8], [8, 2]], act_bits=8)
+    hw_args = dict(bank_size=1024, banks=32, dram_bw=32, freq_ratio=2.0)
+    a_w, b_w = s.Work(**w_args), ann.Work(**w_args)
+    a_hw, b_hw = s.HW(**hw_args), ann.HW(**hw_args)
+    m_a = s.Mapping(perm=("N", "K", "M"), m_in=2, k_in=2, n_in=1)
+    m_b = ann.Mapping(perm=("N", "K", "M"), m_in=2, k_in=2, n_in=1)
+    ea, eb = s.evaluate(m_a, a_w, a_hw), ann.evaluate(m_b, b_w, b_hw)
+    assert ea["energy"] == eb["energy"]
+    assert ea["actual_cycle"] == eb["actual_cycle"]
+    assert ea["dram"] == eb["dram"]
+
+
+def test_annotated_explain_cli_exit0():
+    import subprocess, sys, pathlib
+    here = pathlib.Path(s.__file__).parent
+    r = subprocess.run([sys.executable, "mxp_scheduler_annotated.py", "--explain",
+                        "--M", "64", "--K", "64", "--N", "64", "--dram-bw", "32"],
+                       cwd=here, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "compute_work" in r.stdout and "stall" in r.stdout
