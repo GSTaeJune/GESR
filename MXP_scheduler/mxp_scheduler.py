@@ -378,6 +378,12 @@ def selftest():
     hw3 = HW(bank_size=1024, banks=32, dram_bw=32)
     assert stall_fill(m3, w3, hw3) == (4352.0, 768.0)
     assert actual_cycle(m3, w3, hw3) == 5632.0
+    # Pareto / tradeoff sanity
+    wt = Work(M=128, K=128, N=128, wbits=[[2, 8, 2, 8]] * 4, act_bits=8)
+    hwt = HW(bank_size=1024, banks=32, dram_bw=32)
+    t = tradeoff(wt, hwt)
+    assert t["off"]["energy"] <= t["on"]["energy"] + 1e-9
+    assert t["on"]["actual_cycle"] <= t["off"]["actual_cycle"] + 1e-9
     print("selftest: OK")
 
 
@@ -388,6 +394,31 @@ def _load_wbits(path, MT, KT):
     if len(wb) != MT or any(len(r) != KT for r in wb):
         raise ValueError(f"wbits file must be {MT}x{KT}")
     return wb
+
+
+def pareto_front(ranked):
+    """Non-dominated set on (energy, actual_cycle), sorted by energy asc. After sorting by
+    (energy, cycle), a point is on the front iff its cycle strictly improves on every
+    lower-energy point kept so far."""
+    pts = sorted(ranked, key=lambda r: (r["energy"], r["actual_cycle"]))
+    front = []
+    best_cycle = float("inf")
+    for r in pts:
+        if r["actual_cycle"] < best_cycle - 1e-9:
+            front.append(r)
+            best_cycle = r["actual_cycle"]
+    return front
+
+
+def tradeoff(w, hw):
+    """OFF = global min-energy mapping (cycle ignored). ON = min-energy among the
+    minimum-actual-cycle mappings (the fastest schedule, cheapest energy at that speed)."""
+    ranked = optimize(w, hw)
+    off = ranked[0]
+    min_cycle = min(r["actual_cycle"] for r in ranked)
+    on = min((r for r in ranked if r["actual_cycle"] <= min_cycle + 1e-9),
+             key=lambda r: r["energy"])
+    return {"off": off, "on": on, "pareto": pareto_front(ranked)}
 
 
 def crosscheck(verbose=False):
@@ -422,6 +453,16 @@ def crosscheck(verbose=False):
             assert r_s["dram"] == r_a["dram"], f"mismatch dram @ {m_s}"
             assert r_s["energy_breakdown"] == r_a["energy_breakdown"], f"mismatch energy_breakdown @ {m_s}"
             assert lpt_headroom(m_s, w_s, hw_s) == ann.lpt_headroom(m_a, w_a, hw_a), f"mismatch lpt @ {m_s}"
+        # pareto/tradeoff parity across the twins (Mapping classes differ -> compare signatures)
+        def _sig(r):
+            mm = r["mapping"]
+            return (mm.perm, mm.m_in, mm.k_in, mm.n_in, r["energy"], r["actual_cycle"])
+        ranked_s, ranked_a = optimize(w_s, hw_s), ann.optimize(w_a, hw_a)
+        assert [_sig(r) for r in pareto_front(ranked_s)] == [_sig(r) for r in ann.pareto_front(ranked_a)], \
+            f"pareto mismatch @ case M={M}"
+        ts, ta = tradeoff(w_s, hw_s), ann.tradeoff(w_a, hw_a)
+        assert _sig(ts["off"]) == _sig(ta["off"]) and _sig(ts["on"]) == _sig(ta["on"]), \
+            f"tradeoff mismatch @ case M={M}"
     print("crosscheck: OK")
 
 

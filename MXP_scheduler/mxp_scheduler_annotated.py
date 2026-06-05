@@ -396,6 +396,31 @@ def report(ranked, w, hw, top=10):
     return "\n".join(lines)
 
 
+def pareto_front(ranked):
+    """(energy, actual_cycle) 상의 비지배(non-dominated) 집합. energy 오름차순 정렬 후 반환.
+    (energy, cycle) 로 정렬하면, 한 점이 front 에 드는 조건은 '지금까지 유지된 더 낮은 energy
+    의 모든 점보다 cycle 이 엄밀히 개선'되는 것뿐이다."""
+    pts = sorted(ranked, key=lambda r: (r["energy"], r["actual_cycle"]))
+    front = []
+    best_cycle = float("inf")
+    for r in pts:
+        if r["actual_cycle"] < best_cycle - 1e-9:
+            front.append(r)
+            best_cycle = r["actual_cycle"]
+    return front
+
+
+def tradeoff(w, hw):
+    """OFF = 전역 최소 energy 매핑(cycle 무시). ON = 최소 actual_cycle 매핑들 중 최소 energy
+    (가장 빠른 스케줄, 그 속도에서 가장 싼 energy)."""
+    ranked = optimize(w, hw)
+    off = ranked[0]
+    min_cycle = min(r["actual_cycle"] for r in ranked)
+    on = min((r for r in ranked if r["actual_cycle"] <= min_cycle + 1e-9),
+             key=lambda r: r["energy"])
+    return {"off": off, "on": on, "pareto": pareto_front(ranked)}
+
+
 # ── 주석판 전용: 단계별 중간값을 인쇄하는 explain ────────────────────────────
 def explain(m, w, hw):
     """한 매핑의 비용을 단계별 중간값으로 풀어서 인쇄(학습/디버그용). 표준판의 수식을

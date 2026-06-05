@@ -511,3 +511,26 @@ def test_annotated_explain_cli_exit0():
                        cwd=here, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert "compute_work" in r.stdout and "stall" in r.stdout
+
+
+# --- Pareto front + constraint ON/OFF tradeoff (Task 11) ---
+
+def test_pareto_front_is_nondominated():
+    w = s.Work(M=128, K=128, N=128, wbits=[[2, 8, 2, 8]] * 4, act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    ranked = s.optimize(w, hw)
+    front = s.pareto_front(ranked)
+    # no point dominates a front point in BOTH energy and cycle
+    for p in front:
+        for q in ranked:
+            assert not (q["energy"] < p["energy"] and q["actual_cycle"] < p["actual_cycle"])
+    assert front == sorted(front, key=lambda r: r["energy"])
+
+
+def test_tradeoff_on_off():
+    w = s.Work(M=128, K=128, N=128, wbits=[[2, 8, 2, 8]] * 4, act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    t = s.tradeoff(w, hw)
+    assert "off" in t and "on" in t            # off = global min energy; on = min energy at min cycle
+    assert t["off"]["energy"] <= t["on"]["energy"] + 1e-9   # constraint can only raise energy
+    assert t["on"]["actual_cycle"] <= t["off"]["actual_cycle"] + 1e-9
