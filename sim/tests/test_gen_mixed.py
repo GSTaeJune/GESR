@@ -71,6 +71,8 @@ def test_quant_per_block_mixed_uses_per_block_prec():
     # block (0, 0) 는 W=2 라 INT 값 범위 ≤ MAX_INT[2].
     block_00 = W_int[0, 0:32]
     assert np.max(np.abs(block_00.astype(np.int32))) <= MAX_INT[2]
+    assert np.max(np.abs(W_int[0, 32:64].astype(np.int32))) > MAX_INT[2], \
+        'W=8 block should exceed the INT2 bound; per-block prec collapsed'
 
 
 def test_golden_matches_mxp_tools_when_uniform():
@@ -84,7 +86,7 @@ def test_golden_matches_mxp_tools_when_uniform():
     W_int, W_scale = quantize_weight_mixed(W_fp, pm_uniform)
     A_int, A_scale = quantize_activation_uniform(A_fp, prec=8)
 
-    C_ours = compute_golden_mixed(W_int, W_scale, A_int, A_scale, pm_uniform)
+    C_ours = compute_golden_mixed(W_int, W_scale, A_int, A_scale, pm_uniform, 8)
     # mxint_gemm_golden(int_A, scale_A, prec_A, int_B, scale_B, prec_B)
     # prec_A = WEIGHT prec (우리의 W_int), prec_B = ACTIVATION prec (우리의 A_int).
     C_ref = mxint_gemm_golden(W_int, W_scale, 8, A_int, A_scale, 8)
@@ -103,7 +105,7 @@ def test_golden_shape_and_dtype():
     pm = build_w_prec_map(seed=0)
     W_int, W_scale = quantize_weight_mixed(W_fp, pm)
     A_int, A_scale = quantize_activation_uniform(A_fp, prec=4)
-    C = compute_golden_mixed(W_int, W_scale, A_int, A_scale, pm)
+    C = compute_golden_mixed(W_int, W_scale, A_int, A_scale, pm, 4)
     assert C.shape == (128, 128)
     assert C.dtype == np.float32
 

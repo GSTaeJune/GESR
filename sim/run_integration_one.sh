@@ -44,6 +44,6 @@ HF_ROOT="third_party/berkeley-hardfloat"
         ../../../$SRC_ROOT/new/gemm_sram_top.v \
         ../../../tb/gemm_sram_top_tb.v && \
     xelab -L work gemm_sram_top_tb -snapshot gemm_sram_top_tb_snap && \
-    cmd //c "xsim gemm_sram_top_tb_snap -runall -testplusarg \"A_PREC=$A_PREC\" -testplusarg \"B_PREC=$B_PREC\" -testplusarg \"WORK_DIR=../../../$WORK\" -testplusarg \"DUMP_DIR=../../../$DUMP\"")
+    { case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) cmd //c "xsim gemm_sram_top_tb_snap -runall -testplusarg \"A_PREC=$A_PREC\" -testplusarg \"B_PREC=$B_PREC\" -testplusarg \"WORK_DIR=../../../$WORK\" -testplusarg \"DUMP_DIR=../../../$DUMP\"";; *) xsim gemm_sram_top_tb_snap -runall -testplusarg "A_PREC=$A_PREC" -testplusarg "B_PREC=$B_PREC" -testplusarg "WORK_DIR=../../../$WORK" -testplusarg "DUMP_DIR=../../../$DUMP";; esac; })
 
 echo "Integration sim ${LABEL} done. Check $DUMP/bank{0..31}.mem"

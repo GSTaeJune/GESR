@@ -21,10 +21,11 @@ HF_ROOT="third_party/berkeley-hardfloat"
         ../../../$SRC_ROOT/new/int_to_fp32.v \
         ../../../$SRC_ROOT/new/fp32_adder.v \
         ../../../$SRC_ROOT/new/RMW.v \
+        ../../../$SRC_ROOT/new/sram_1rw_banked_mp.v \
         ../../../$SRC_ROOT/new/GEMM.v \
         ../../../$SRC_ROOT/new/gemm_sram_top.v \
         ../../../tb/gemm_sram_top_tb.v && \
     xelab -L work gemm_sram_top_tb -snapshot gemm_sram_top_tb_snap && \
-    cmd //c "xsim gemm_sram_top_tb_snap -runall -testplusarg \"DUMP_DIR=../../../$DUMP\"")
+    { case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) cmd //c "xsim gemm_sram_top_tb_snap -runall -testplusarg \"DUMP_DIR=../../../$DUMP\"";; *) xsim gemm_sram_top_tb_snap -runall -testplusarg "DUMP_DIR=../../../$DUMP";; esac; })
 
-echo "Smoke sim done. Check $DUMP/bank{0..15}.mem"
+echo "Smoke sim done. Check $DUMP/bank{0..31}.mem"

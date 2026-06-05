@@ -51,7 +51,7 @@ module sram_1rw_banked_mp_tb;
     );
 
     integer pass = 0, fail = 0;
-    integer b, w;
+    integer b;
     reg [DATA_WIDTH-1:0] expected, got;
 
     // 슬라이스 헬퍼
@@ -135,6 +135,19 @@ module sram_1rw_banked_mp_tb;
         end else begin
             fail = fail + 1;
             $display("[FAIL] bank 0 isolated write = %h", get_bank_Q(0));
+        end
+        // idle bank (1..N-1) 은 Scenario 2/3 에서 addr 0 의 값을 마지막으로 read
+        // 한 뒤 CEB=1 로 유지됐으므로 Q 가 변하면 안 됨 (active bank 0 의 오염 검출).
+        for (b = 1; b < NUM_BANKS; b = b + 1) begin
+            expected = 32'hDEADBE00 + b;
+            got      = get_bank_Q(b);
+            if (got === expected) begin
+                pass = pass + 1;
+                $display("[PASS] idle bank %0d held Q = %h", b, got);
+            end else begin
+                fail = fail + 1;
+                $display("[FAIL] idle bank %0d Q = %h, expected %h (corrupted by active bank)", b, got, expected);
+            end
         end
 
         // ─── 최종 보고 ────────────────────────────────────────────────

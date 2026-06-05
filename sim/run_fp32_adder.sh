@@ -13,4 +13,4 @@ xvlog -nolog \
     ../tb/fp32_adder_tb.v
 
 xelab -nolog -debug typical fp32_adder_tb -s fp32_adder_tb_sim
-xsim fp32_adder_tb_sim -nolog -R
+out=$(xsim fp32_adder_tb_sim -nolog -R 2>&1); echo "$out"; echo "$out" | grep -q 'fp32_adder_tb: ALL TESTS PASSED' || { echo 'run_fp32_adder.sh: fp32_adder TB FAILED' >&2; exit 1; }

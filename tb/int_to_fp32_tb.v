@@ -15,7 +15,7 @@
 //          (scale-127) 더하기로 손상돼 inf/subnormal 이 튀어나오던 버그를
 //          int_to_fp32.v 에서 `int_is_zero` 가드로 막음. Case 7-10 이 그 회귀를 잡음.
 //
-// 검증 시나리오 (10 케이스, L_CONV=2 사이클 후 출력 체킹):
+// 검증 시나리오 (11 케이스, L_CONV=2 사이클 후 출력 체킹):
 //   일반:
 //     Case 1:  int=1   scale=127  → +1.0           (가장 기본, bias 중심)
 //     Case 2:  int=-1  scale=127  → -1.0           (부호 비트 처리)
@@ -23,6 +23,7 @@
 //     Case 4:  int=0   scale=127  → +0.0           (zero 정상 경로)
 //     Case 5:  int=1   scale=128  → +2.0           (1 × 2^1, exp 이동 up)
 //     Case 6:  int=4   scale=125  → +1.0           (4 × 2^-2, exp 이동 down)
+//     Case 6b: int=256 scale=-2   → 2^-121         (음수 signed scale, exp 큰 폭 down)
 //   Zero passthrough 회귀 (int=0 + scale≠127):
 //     Case 7:  int=0   scale=125  → +0.0
 //     Case 8:  int=0   scale=128  → +0.0
@@ -102,6 +103,11 @@ module int_to_fp32_tb;
         @(negedge clk); in_int = 32'sd4;   scale = 9'sd125;
         for (i = 0; i < L_CONV; i = i + 1) @(posedge clk);
         check(32'h3F800000, "int=4 scale=125 -> 1.0");
+
+        // Case 6b: int=256, scale=-2 (9'h1FE) -> 2^8 * 2^-129 = 2^-121 (signed scale, exp down)
+        @(negedge clk); in_int = 32'sd256;  scale = 9'h1FE;
+        for (i = 0; i < L_CONV; i = i + 1) @(posedge clk);
+        check(32'h03000000, "int=256 scale=-2 -> 2^-121 (signed)");
 
         // ───── Zero passthrough 회귀 케이스 (int=0 + scale≠127) ─────
         // 버그 히스토리: int=0 일 때 HardFloat recoded 표현의 특수 zero

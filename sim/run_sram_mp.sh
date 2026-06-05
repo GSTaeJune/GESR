@@ -14,4 +14,4 @@ xvlog -sv \
     ../../../tb/sram_1rw_banked_mp_tb.v
 
 xelab -L work sram_1rw_banked_mp_tb -snapshot sram_mp_snap
-xsim sram_mp_snap -runall
+out=$(xsim sram_mp_snap -runall 2>&1); echo "$out"; echo "$out" | grep -q 'sram_1rw_banked_mp_tb: ALL .* TESTS PASSED' || { echo 'run_sram_mp.sh: sram_mp TB FAILED' >&2; exit 1; }
