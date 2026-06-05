@@ -448,3 +448,34 @@ def test_cli_selftest_exit0():
     r = subprocess.run([sys.executable, "mxp_scheduler.py", "--selftest"],
                        cwd=here, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+# --- DRAM/on-chip frequency ratio: converts DRAM transfer time into on-chip cycles ---
+
+def test_freq_ratio_default_is_one():
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=64)
+    assert hw.freq_ratio == 1.0
+    assert hw.eff_bw == 64.0          # eff_bw == dram_bw when same clock
+
+
+def test_freq_ratio_scales_dram_time():
+    # freq_ratio = f_chip/f_dram. A slower DRAM (chip 2x faster) doubles every DRAM transfer
+    # time in on-chip cycles -> fill doubles, stall grows. compute_work and energy are unchanged.
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    m = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=1)   # spills -> nonzero stall
+    base = s.HW(bank_size=1024, banks=32, dram_bw=32)                  # freq_ratio default 1.0
+    slow = s.HW(bank_size=1024, banks=32, dram_bw=32, freq_ratio=2.0)  # DRAM 2x slower vs chip
+    sb, fb = s.stall_fill(m, w, base)
+    ss, fs = s.stall_fill(m, w, slow)
+    assert fs == pytest.approx(2 * fb)               # fill is pure DRAM transfer -> exactly 2x
+    assert ss > sb                                   # more un-hidden DRAM time -> more stall
+    # compute term is freq-independent: actual_cycle minus the DRAM (fill+stall) part is equal
+    assert s.actual_cycle(m, w, slow) - (ss + fs) == pytest.approx(s.actual_cycle(m, w, base) - (sb + fb))
+    assert s.energy_breakdown(m, w, base) == s.energy_breakdown(m, w, slow)  # energy freq-independent
+
+
+def test_hw_rejects_nonpositive_freq_ratio():
+    with pytest.raises(ValueError):
+        s.HW(bank_size=1024, banks=32, dram_bw=64, freq_ratio=0)
+    with pytest.raises(ValueError):
+        s.HW(bank_size=1024, banks=32, dram_bw=64, freq_ratio=-1.0)

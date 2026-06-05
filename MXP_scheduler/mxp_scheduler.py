@@ -19,8 +19,9 @@ def divisors(n):
 class HW:
     bank_size: int          # words per bank
     banks: int
-    dram_bw: float          # bits per cycle
+    dram_bw: float          # bits per DRAM cycle (bus throughput)
     word_bits: int = 32     # FP32 psum word
+    freq_ratio: float = 1.0  # on-chip cycles per DRAM cycle (= f_chip / f_dram)
     coeffs: dict = field(default_factory=lambda: dict(DEFAULT_COEFFS))
 
     def __post_init__(self):
@@ -32,6 +33,17 @@ class HW:
         # negative value would yield impossibly low (negative) cycles. Require positive.
         if self.dram_bw <= 0:
             raise ValueError(f"dram_bw must be positive (bits/cycle), got {self.dram_bw}")
+        # freq_ratio converts DRAM transfer time into on-chip cycles (the cycle unit of
+        # compute_work). 0/negative would invert or zero the conversion. Require positive.
+        if self.freq_ratio <= 0:
+            raise ValueError(f"freq_ratio must be positive (f_chip/f_dram), got {self.freq_ratio}")
+
+    @property
+    def eff_bw(self):
+        # effective DRAM bandwidth in ON-CHIP cycle terms (bits per on-chip cycle):
+        # bits/DRAM-cycle * (DRAM-cycles per on-chip cycle) = dram_bw / freq_ratio.
+        # freq_ratio=1 (same clock) -> eff_bw == dram_bw (back-compatible).
+        return self.dram_bw / self.freq_ratio
 
     @property
     def cap_bits(self):
@@ -282,7 +294,7 @@ def stall_fill(m, w, hw):
     fetch time (unhidable startup); stall = the rest (per-block un-hidden transfer + the
     trailing C drain)."""
     blocks = list(_blocks(m, w))
-    bw = hw.dram_bw
+    bw = hw.eff_bw                                          # DRAM bw in on-chip cycle terms
     _, _, a0, w0, _c0 = blocks[0]
     fill = (a0 + w0) / bw                                   # first-block C read is 0 (first touch)
     return _stall_of_order(blocks, bw), fill
@@ -334,8 +346,8 @@ def lpt_headroom(m, w, hw):
     the full bandwidth model (A/W fetch + C psum spill/reload). LPT is NOT a drop-in optimum
     here (tiles are reuse-coupled, and reordering perturbs C residency), so headroom may be <= 0."""
     blocks = list(_blocks(m, w))
-    natural = _stall_of_order(blocks, hw.dram_bw)
-    lpt = _stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.dram_bw)  # b[1] = compute_blk, desc
+    natural = _stall_of_order(blocks, hw.eff_bw)
+    lpt = _stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.eff_bw)  # b[1] = compute_blk, desc
     return {"natural_stall": natural, "lpt_stall": lpt, "headroom": natural - lpt}
 
 
@@ -386,7 +398,9 @@ def main(argv=None):
     p.add_argument("--M", type=int); p.add_argument("--K", type=int); p.add_argument("--N", type=int)
     p.add_argument("--bank-size", type=int, default=1024)
     p.add_argument("--banks", type=int, default=32)
-    p.add_argument("--dram-bw", type=float, default=64.0)
+    p.add_argument("--dram-bw", type=float, default=64.0, help="bits per DRAM cycle")
+    p.add_argument("--freq-ratio", type=float, default=1.0,
+                   help="on-chip cycles per DRAM cycle (f_chip/f_dram); 1.0 = same clock")
     p.add_argument("--act", type=int, default=8)
     p.add_argument("--bits-file", help="JSON MT x KT avg-weight-bits; default all=act")
     p.add_argument("--max-cycle", type=float, default=None)
@@ -405,7 +419,8 @@ def main(argv=None):
         import json
         coeffs.update(json.load(open(a.coeffs)))
     w = Work(M=a.M, K=a.K, N=a.N, wbits=wbits, act_bits=a.act)
-    hw = HW(bank_size=a.bank_size, banks=a.banks, dram_bw=a.dram_bw, coeffs=coeffs)
+    hw = HW(bank_size=a.bank_size, banks=a.banks, dram_bw=a.dram_bw,
+            freq_ratio=a.freq_ratio, coeffs=coeffs)
     ranked = optimize(w, hw, max_cycle=a.max_cycle)
     print(report(ranked, w, hw))
     return 0
