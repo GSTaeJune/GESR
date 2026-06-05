@@ -119,9 +119,10 @@ get there). `wbits` is an MT×KT map of *average* weight bits per 32×32 tile, e
 (may be **fractional**; the model never int()-truncates a footprint or a compute count).
 
 **Ranking.** `optimize` keeps only feasible mappings (resident A/W/C footprint ≤ bank capacity),
-optionally filters by `--max-cycle`, and sorts by `(energy, actual_cycle)`. Because energy
-depends only on the blocking (the outer factors), all perms of a given blocking tie on energy
-and the cycle tiebreak picks the genuinely faster schedule. `pareto_front` returns the
+optionally filters by `--max-cycle`, and sorts by `(energy, actual_cycle)`. Energy depends on
+the loop order **and** the blocking (DRAM traffic is order-dependent), so perms generally
+differ; where two mappings still tie on energy, the `actual_cycle` tiebreak picks the genuinely
+faster schedule. `pareto_front` returns the
 non-dominated `(energy, cycle)` set; `tradeoff` exposes the min-energy mapping (OFF) vs. the
 cheapest-energy mapping among the fastest schedules (ON).
 

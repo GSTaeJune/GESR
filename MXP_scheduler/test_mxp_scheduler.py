@@ -143,8 +143,8 @@ def test_mixed_wbits_compute_and_footprint():
     # compute_work = TILE * NT * Σwbits = 32 * 2 * (2+8+8+2=20) = 1280
     assert s.compute_work(w) == 1280
     m = s.Mapping(perm=("N", "K", "M"), m_in=2, k_in=2, n_in=2)
-    # foot W term uses max_wbits=8 (global max), so same as uniform-8: 196608
-    assert s.footprint_bits(m, w) == 32768 + 32768 + 131072  # 196608
+    # foot W term now uses the RESIDENT-WINDOW sum (spec §6.1): all 4 tiles resident -> 2+8+8+2=20
+    assert s.footprint_bits(m, w) == 32768 + 20480 + 131072  # 184320
 
 
 def test_out_in_rejects_non_divisor_mapping():
@@ -155,6 +155,20 @@ def test_out_in_rejects_non_divisor_mapping():
     # the corruption it used to cause (negative Cr / total<0) is now blocked at the source
     with pytest.raises(ValueError):
         s.dram_bits(bad, w)
+    with pytest.raises(ValueError):
+        s.footprint_bits(bad, w)
+    with pytest.raises(ValueError):
+        s.feasible(bad, w, s.HW(1024, 32, 64))
+
+
+def test_footprint_resident_window_below_global_max():
+    w = s.Work(M=64, K=64, N=64, wbits=[[2, 2], [2, 8]], act_bits=8)
+    m = s.Mapping(perm=("N", "K", "M"), m_in=2, k_in=1, n_in=2)  # window = one K-column (2 tiles)
+    # worst K-column resident window = tiles [2,8] -> sum 10 -> foot_w = 10*1024 = 10240
+    # (the old global-max would have used m_in*k_in*8 = 16 -> 16384, an over-count)
+    foot_a = 1 * 2 * 1024 * 8     # k_in*n_in*TILE^2*act = 16384
+    foot_c = 2 * 2 * 1024 * 32    # m_in*n_in*TILE^2*FP32 = 131072
+    assert s.footprint_bits(m, w) == foot_a + 10240 + foot_c   # 157696
 
 
 def test_energy_breakdown_g1():
@@ -534,3 +548,17 @@ def test_tradeoff_on_off():
     assert "off" in t and "on" in t            # off = global min energy; on = min energy at min cycle
     assert t["off"]["energy"] <= t["on"]["energy"] + 1e-9   # constraint can only raise energy
     assert t["on"]["actual_cycle"] <= t["off"]["actual_cycle"] + 1e-9
+
+
+def test_tradeoff_raises_on_no_feasible():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    tiny = s.HW(bank_size=1, banks=2, dram_bw=64)   # nothing fits
+    with pytest.raises(ValueError):
+        s.tradeoff(w, tiny)
+
+
+def test_hw_rejects_bad_coeffs():
+    with pytest.raises(ValueError):
+        s.HW(bank_size=1024, banks=32, dram_bw=64, coeffs={"dram": -1.0, "onchip": 6.0, "mac": 1.0, "rmw": 5.0})
+    with pytest.raises(ValueError):
+        s.HW(bank_size=1024, banks=32, dram_bw=64, coeffs={"dram": 200.0, "onchip": 6.0, "mac": 1.0})  # missing rmw

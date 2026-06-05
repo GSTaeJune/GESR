@@ -37,6 +37,14 @@ class HW:
         # compute_work). 0/negative would invert or zero the conversion. Require positive.
         if self.freq_ratio <= 0:
             raise ValueError(f"freq_ratio must be positive (f_chip/f_dram), got {self.freq_ratio}")
+        # coeffs feed the optimizer's objective: a negative coeff would let a HIGH-traffic mapping
+        # win (negative energy), and a missing key would crash deep inside energy_breakdown. Require
+        # all four keys present and each a non-negative number.
+        for k in ("dram", "onchip", "mac", "rmw"):
+            if k not in self.coeffs:
+                raise ValueError(f"coeffs missing required key {k!r}")
+            if not isinstance(self.coeffs[k], (int, float)) or self.coeffs[k] < 0:
+                raise ValueError(f"coeffs[{k!r}] must be a non-negative number, got {self.coeffs[k]!r}")
 
     @property
     def eff_bw(self):
@@ -130,17 +138,15 @@ def gen_mappings(w):
 
 
 def footprint_bits(m, w):
-    # Conservative GLOBAL upper bound for resident W bit-width: max over ALL tiles, not
-    # just the resident m_in x k_in window. Safe direction (never marks an infeasible
-    # mapping feasible); for mixed-precision partial blocking it can over-estimate W and
-    # over-prune. A resident-window-aware refinement is a spec-level modeling decision.
-    max_wbits = max(max(row) for row in w.wbits)
-    foot_a = m.k_in * m.n_in * TILE * TILE * w.act_bits
-    foot_w = m.m_in * m.k_in * TILE * TILE * max_wbits
-    foot_c = m.m_in * m.n_in * TILE * TILE * FP32_BITS
-    # exact (may be fractional when avg wbits is fractional); do NOT int()-truncate, which
-    # would round a footprint DOWN and could mark an over-capacity mapping feasible.
-    return foot_a + foot_w + foot_c
+    # Resident on-chip storage that must hold simultaneously (spec §6.1). foot_a and foot_c are
+    # the (mapping-constant) resident A and C windows; foot_w is the RESIDENT-WINDOW W bits,
+    # maxed over the outer blocks (NOT a global-max over all tiles, which would over-count and
+    # over-prune low-bit-resident mixed-precision mappings). Walking _blocks also validates the
+    # mapping's blocking factors (via _out_in) so feasible() rejects invalid mappings consistently.
+    blocks = list(_blocks(m, w))
+    _, _, a_blk, _w_blk0, c_blk = blocks[0]
+    foot_w = max(b[3] for b in blocks)   # b[3] = w_blk = resident M_in x K_in window bits
+    return a_blk + foot_w + c_blk
 
 
 def feasible(m, w, hw):
@@ -328,10 +334,10 @@ def optimize(w, hw, max_cycle=None):
     ties broken by ascending actual_cycle. If max_cycle given, further filters to
     actual_cycle <= max_cycle BEFORE the sort.
 
-    The (energy, actual_cycle) key matters because energy depends only on the blocking
-    (out factors), so all 6 perms of a given blocking tie on energy; without the cycle
-    tiebreak the winner would fall to gen_mappings() insertion order — an arbitrary hidden
-    preference. At equal energy, fewer cycles is strictly better, so it is the right key."""
+    Energy is order-dependent (DRAM traffic depends on the loop order), so perms generally
+    differ; where two mappings still tie on energy, ascending actual_cycle breaks the tie
+    deterministically (instead of gen_mappings insertion order). At equal energy, fewer cycles
+    is strictly better, so it is the right key."""
     results = [evaluate(m, w, hw) for m in gen_mappings(w)]
     results = [r for r in results if r["feasible"]]
     if max_cycle is not None:
@@ -414,6 +420,8 @@ def tradeoff(w, hw):
     """OFF = global min-energy mapping (cycle ignored). ON = min-energy among the
     minimum-actual-cycle mappings (the fastest schedule, cheapest energy at that speed)."""
     ranked = optimize(w, hw)
+    if not ranked:
+        raise ValueError("no feasible mapping for this HW (check capacity)")
     off = ranked[0]
     min_cycle = min(r["actual_cycle"] for r in ranked)
     on = min((r for r in ranked if r["actual_cycle"] <= min_cycle + 1e-9),

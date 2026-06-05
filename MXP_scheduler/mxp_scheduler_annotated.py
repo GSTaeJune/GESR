@@ -59,6 +59,14 @@ class HW:
         # 0 이 되거나 부호가 뒤집힌다 → 양수 강제.
         if self.freq_ratio <= 0:
             raise ValueError(f"freq_ratio must be positive (f_chip/f_dram), got {self.freq_ratio}")
+        # coeffs 는 optimizer 의 목적함수에 들어간다: 음수 계수면 트래픽 많은 매핑이 음수 에너지로
+        # 이기고, 키가 빠지면 energy_breakdown 깊숙한 곳에서 crash. 4개 키 모두 존재 + 각각
+        # 비음수(non-negative) 숫자임을 강제.
+        for k in ("dram", "onchip", "mac", "rmw"):
+            if k not in self.coeffs:
+                raise ValueError(f"coeffs missing required key {k!r}")
+            if not isinstance(self.coeffs[k], (int, float)) or self.coeffs[k] < 0:
+                raise ValueError(f"coeffs[{k!r}] must be a non-negative number, got {self.coeffs[k]!r}")
 
     @property
     def eff_bw(self):
@@ -157,16 +165,15 @@ def gen_mappings(w):
 
 
 def footprint_bits(m, w):
-    # resident 작업집합의 on-chip 비트 상한(보수적). W 정밀도는 resident m_in×k_in 창이
-    # 아니라 '모든 타일'의 GLOBAL 최대값을 쓴다 — feasible 을 결코 거짓-가능으로 표시하지
-    # 않는 안전 방향(과대추정 → 과도 prune 가능). resident-window 정밀화는 spec 수준 결정.
-    max_wbits = max(max(row) for row in w.wbits)                  # 전 타일 최대 weight 비트
-    foot_a = m.k_in * m.n_in * TILE * TILE * w.act_bits           # resident A (=act[K,N]) 비트
-    foot_w = m.m_in * m.k_in * TILE * TILE * max_wbits            # resident W (=weight[M,K]) 비트
-    foot_c = m.m_in * m.n_in * TILE * TILE * FP32_BITS            # resident C (=out[M,N]) psum 비트
-    # 평균 wbits 가 분수면 결과도 분수일 수 있음. int() 로 자르면 footprint 를 '아래로' 반올림해
-    # 용량초과 매핑을 feasible 로 오인할 수 있으므로 절대 절단하지 않는다.
-    return foot_a + foot_w + foot_c
+    # 동시에 on-chip 에 상주해야 하는 작업집합 저장량(spec §6.1). a_blk·c_blk 은 (매핑 상수인)
+    # resident A·C 창; foot_w 는 RESIDENT-WINDOW W 비트를 외부 블록들에 대해 max 한 값
+    # (모든 타일의 GLOBAL 최대값이 아님 — 그러면 과대계상으로 저비트 resident mixed-precision
+    # 매핑을 과도 prune 한다). _blocks 를 도는 김에 blocking factor 도 (_out_in 으로) 검증해
+    # feasible() 이 잘못된 매핑을 dram_bits 와 일관되게 거부하게 한다.
+    blocks = list(_blocks(m, w))
+    _, _, a_blk, _w_blk0, c_blk = blocks[0]
+    foot_w = max(b[3] for b in blocks)   # b[3] = w_blk = resident M_in×K_in 창 비트
+    return a_blk + foot_w + c_blk
 
 
 def feasible(m, w, hw):
@@ -362,10 +369,9 @@ def optimize(w, hw, max_cycle=None):
     """(perm × blocking) 전수 탐색. feasible 결과를 energy 오름차순, 동률은 actual_cycle
     오름차순으로 정렬. max_cycle 주어지면 정렬 '전에' actual_cycle <= max_cycle 로 추가 필터.
 
-    (energy, actual_cycle) 키가 중요한 이유: energy 는 blocking(out factor)에만 의존하므로
-    한 blocking 의 6 순열이 모두 energy 동률. cycle tiebreak 없으면 승자가 gen_mappings()
-    삽입순서(임의의 숨은 선호)로 결정된다. 동일 energy 면 적은 사이클이 엄밀히 더 좋으므로
-    올바른 키다."""
+    energy 는 순서 의존(DRAM 트래픽이 루프 순서에 의존)이라 순열마다 대개 다르다. 그래도 두
+    매핑이 energy 동률이면 actual_cycle 오름차순이 (gen_mappings 삽입순서가 아니라) 결정적으로
+    동률을 깬다. 동일 energy 면 적은 사이클이 엄밀히 더 좋으므로 올바른 키다."""
     results = [evaluate(m, w, hw) for m in gen_mappings(w)]
     results = [r for r in results if r["feasible"]]
     if max_cycle is not None:
@@ -414,6 +420,8 @@ def tradeoff(w, hw):
     """OFF = 전역 최소 energy 매핑(cycle 무시). ON = 최소 actual_cycle 매핑들 중 최소 energy
     (가장 빠른 스케줄, 그 속도에서 가장 싼 energy)."""
     ranked = optimize(w, hw)
+    if not ranked:
+        raise ValueError("no feasible mapping for this HW (check capacity)")
     off = ranked[0]
     min_cycle = min(r["actual_cycle"] for r in ranked)
     on = min((r for r in ranked if r["actual_cycle"] <= min_cycle + 1e-9),
