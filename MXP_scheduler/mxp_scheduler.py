@@ -255,7 +255,19 @@ def _blocks(m, w):
         yield idx, TILE * inn["N"] * w_sum, a_blk, w_sum * TILE * TILE, c_blk
 
 
-def _stall_of_order(blocks, bw):
+def _double_buffered(m, w, hw):
+    """True iff the on-chip memory can hold the resident footprint PLUS a second copy of the
+    streamed A+W windows (needed to prefetch the next block while computing the current one).
+    C is read-modify-write in place (single buffer), so only A and W are double-buffered.
+    When False, fetches cannot overlap compute and are fully exposed (spec §8)."""
+    blocks = list(_blocks(m, w))
+    a_blk, c_blk = blocks[0][2], blocks[0][4]
+    foot_w = max(b[3] for b in blocks)
+    footprint = a_blk + foot_w + c_blk
+    return hw.cap_bits >= footprint + a_blk + foot_w
+
+
+def _stall_of_order(blocks, bw, double_buffered=True):
     """Total stall for a given block ORDER. One DRAM channel of bandwidth bw is shared by
     ALL traffic: input fetch (A,W reloads), C psum reload-reads, and C psum spill-writes.
     Each block's compute window hides the transfers around it -- the next block's inputs and
@@ -265,7 +277,9 @@ def _stall_of_order(blocks, bw):
 
     A reloads on (K,N) change, W on (M,K) change, C reloads when an (M,N) tile is re-entered
     after a spill, C spills when an (M,N) tile is left (every episode-end, incl. the final
-    write). (Supersedes the inputs-only spec §8 stall: C psum bandwidth is now modeled.)"""
+    write). (Supersedes the inputs-only spec §8 stall: C psum bandwidth is now modeled.)
+    If double_buffered is False there is no room to prefetch, so each block's fetch is fully
+    exposed (compute cannot hide it)."""
     n = len(blocks)
     if n == 0:
         return 0.0
@@ -286,7 +300,8 @@ def _stall_of_order(blocks, bw):
                 fetch += c_blk                              # prev block left its C tile -> spill drains
                 if mn in seen:
                     fetch += c_blk                          # re-entering a spilled C tile -> reload read
-            total += max(0.0, fetch / bw - prev_compute)
+            hide = prev_compute if double_buffered else 0.0
+            total += max(0.0, fetch / bw - hide)
         seen.add(mn)
         prev = idx
         prev_compute = compute_blk
@@ -298,12 +313,13 @@ def stall_fill(m, w, hw):
     """Sequence-aware stall over outer-iteration blocks. DRAM bandwidth is shared by A/W
     input fetch AND C psum spill/reload (see _stall_of_order). fill = first block's input
     fetch time (unhidable startup); stall = the rest (per-block un-hidden transfer + the
-    trailing C drain)."""
+    trailing C drain). When there's no prefetch headroom (see _double_buffered), fetches
+    are fully exposed (spec §8)."""
     blocks = list(_blocks(m, w))
     bw = hw.eff_bw                                          # DRAM bw in on-chip cycle terms
     _, _, a0, w0, _c0 = blocks[0]
     fill = (a0 + w0) / bw                                   # first-block C read is 0 (first touch)
-    return _stall_of_order(blocks, bw), fill
+    return _stall_of_order(blocks, bw, _double_buffered(m, w, hw)), fill
 
 
 def actual_cycle(m, w, hw):
@@ -352,8 +368,9 @@ def lpt_headroom(m, w, hw):
     the full bandwidth model (A/W fetch + C psum spill/reload). LPT is NOT a drop-in optimum
     here (tiles are reuse-coupled, and reordering perturbs C residency), so headroom may be <= 0."""
     blocks = list(_blocks(m, w))
-    natural = _stall_of_order(blocks, hw.eff_bw)
-    lpt = _stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.eff_bw)  # b[1] = compute_blk, desc
+    db = _double_buffered(m, w, hw)
+    natural = _stall_of_order(blocks, hw.eff_bw, db)
+    lpt = _stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.eff_bw, db)  # b[1] = compute_blk, desc
     return {"natural_stall": natural, "lpt_stall": lpt, "headroom": natural - lpt}
 
 
@@ -448,6 +465,7 @@ def crosscheck(verbose=False):
         # non-default coeffs + freq_ratio<1 — guards energy-coeff plumbing and eff_bw scaling
         (64, 64, 64, [[2, 8], [8, 2]], 8, 1024, 32, 32.0, 0.5,
          {"dram": 137.0, "onchip": 11.0, "mac": 2.0, "rmw": 3.0}),
+        (64, 64, 64, [[8, 8], [8, 8]], 8, 100, 32, 32.0, 1.0, None),  # cap=102400: some mappings can't double-buffer
     ]
     for (M, K, N, wb, act, bs, bk, bw, fr, co) in cases:
         w_s, w_a = Work(M, K, N, wb, act), ann.Work(M, K, N, wb, act)

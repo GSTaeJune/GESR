@@ -444,6 +444,19 @@ def test_stall_c_traffic_matches_dram():
         assert reads == pytest.approx(d["Cr"])
 
 
+def test_no_double_buffer_exposes_fetch():
+    # spec §8: if there's no room to prefetch the next block's inputs alongside the resident
+    # footprint, fetches cannot overlap compute and are fully exposed -> larger stall.
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    m = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=1)   # spills, 4 outer blocks
+    db = s.HW(bank_size=1024, banks=32, dram_bw=32)               # cap huge -> double-buffers
+    nodb = s.HW(bank_size=100, banks=32, dram_bw=32)              # cap=102400: fits 1x, no prefetch room
+    assert s.feasible(m, w, nodb)                                 # still feasible (footprint=90112 <= 102400)
+    s_db, _ = s.stall_fill(m, w, db)
+    s_no, _ = s.stall_fill(m, w, nodb)
+    assert s_no > s_db                                            # no overlap -> strictly more stall
+
+
 def test_selftest_passes():
     s.selftest()   # raises AssertionError on any golden mismatch; returns None on success
 

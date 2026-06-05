@@ -290,7 +290,19 @@ def _blocks(m, w):
         yield idx, TILE * inn["N"] * w_sum, a_blk, w_sum * TILE * TILE, c_blk
 
 
-def _stall_of_order(blocks, bw):
+def _double_buffered(m, w, hw):
+    """on-chip 메모리가 resident footprint PLUS 스트리밍되는 A+W 창의 '두 번째 복제본'까지
+    동시에 담을 수 있으면 True (현재 블록을 연산하는 동안 다음 블록을 prefetch 하려면 필요).
+    C 는 제자리(in-place) read-modify-write(단일 버퍼)라 A 와 W 만 더블버퍼링한다.
+    False 면 fetch 가 compute 와 겹치지 못하고 fully exposed 된다 (spec §8)."""
+    blocks = list(_blocks(m, w))
+    a_blk, c_blk = blocks[0][2], blocks[0][4]               # 매핑 상수 A·C 창
+    foot_w = max(b[3] for b in blocks)                      # resident W 창 (외부 블록 max)
+    footprint = a_blk + foot_w + c_blk                      # 기존 1x resident footprint
+    return hw.cap_bits >= footprint + a_blk + foot_w        # = 2*a_blk + 2*foot_w + c_blk
+
+
+def _stall_of_order(blocks, bw, double_buffered=True):
     """주어진 블록 ORDER 의 총 stall. 대역폭 bw 의 단일 DRAM 채널을 모든 트래픽이 공유:
     입력 fetch(A,W reload) + C psum reload-read + C psum spill-write.
     각 블록의 compute 창이 그 주변 전송을 hide 한다 — 다음 블록의 입력+C reload(연산 전에
@@ -299,7 +311,9 @@ def _stall_of_order(blocks, bw):
 
     A 는 (K,N) 변경 시 reload, W 는 (M,K) 변경 시. C 는 spill 후 (M,N) 타일 재진입 시 reload,
     (M,N) 타일을 떠날 때(매 episode 끝, 최종 write 포함) spill. (입력만 보던 spec §8 stall 을
-    대체 — 이제 C psum 대역폭도 모델링.)"""
+    대체 — 이제 C psum 대역폭도 모델링.)
+    double_buffered 가 False 면 prefetch 할 공간이 없어 각 블록의 fetch 가 fully exposed 된다
+    (compute 가 hide 하지 못함)."""
     n = len(blocks)
     if n == 0:
         return 0.0
@@ -320,8 +334,10 @@ def _stall_of_order(blocks, bw):
                 fetch += c_blk                              # 이전 블록이 C 타일을 떠남 → spill drain
                 if mn in seen:
                     fetch += c_blk                          # spill 된 C 타일 재진입 → reload read
-            # 전송시간(fetch/bw)에서 직전 compute 로 hide 한 만큼 빼고 남는 게 stall (음수면 0).
-            total += max(0.0, fetch / bw - prev_compute)
+            # 더블버퍼 가능하면 직전 compute 로 hide, 불가하면 hide=0 (fully exposed).
+            hide = prev_compute if double_buffered else 0.0
+            # 전송시간(fetch/bw)에서 hide 한 만큼 빼고 남는 게 stall (음수면 0).
+            total += max(0.0, fetch / bw - hide)
         seen.add(mn)
         prev = idx
         prev_compute = compute_blk
@@ -332,12 +348,13 @@ def _stall_of_order(blocks, bw):
 def stall_fill(m, w, hw):
     """외부 반복 블록에 대한 sequence-aware stall. DRAM 대역폭은 A/W 입력 fetch 와 C psum
     spill/reload 가 공유(_stall_of_order 참조). fill = 첫 블록의 입력 fetch 시간(hide 불가
-    startup); stall = 나머지(블록별 hide 안 된 전송 + trailing C drain)."""
+    startup); stall = 나머지(블록별 hide 안 된 전송 + trailing C drain). prefetch 여유가
+    없으면(_double_buffered 참조) fetch 가 fully exposed 된다 (spec §8)."""
     blocks = list(_blocks(m, w))
     bw = hw.eff_bw                                          # on-chip 사이클 기준 DRAM 대역폭
     _, _, a0, w0, _c0 = blocks[0]
     fill = (a0 + w0) / bw                                   # 첫 블록 C read 는 0 (첫 접촉)
-    return _stall_of_order(blocks, bw), fill
+    return _stall_of_order(blocks, bw, _double_buffered(m, w, hw)), fill
 
 
 def actual_cycle(m, w, hw):
@@ -386,8 +403,9 @@ def lpt_headroom(m, w, hw):
     spill/reload) 사용. 여기선 LPT 가 drop-in 최적이 아니다(타일이 재사용으로 결합돼 있고
     재정렬이 C residency 를 교란) → headroom 이 <= 0 일 수도 있음."""
     blocks = list(_blocks(m, w))
-    natural = _stall_of_order(blocks, hw.eff_bw)
-    lpt = _stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.eff_bw)  # b[1] = compute_blk 내림차순
+    db = _double_buffered(m, w, hw)
+    natural = _stall_of_order(blocks, hw.eff_bw, db)
+    lpt = _stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.eff_bw, db)  # b[1] = compute_blk 내림차순
     return {"natural_stall": natural, "lpt_stall": lpt, "headroom": natural - lpt}
 
 
