@@ -337,3 +337,79 @@ def lpt_headroom(m, w, hw):
     natural = _stall_of_order(blocks, hw.dram_bw)
     lpt = _stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.dram_bw)  # b[1] = compute_blk, desc
     return {"natural_stall": natural, "lpt_stall": lpt, "headroom": natural - lpt}
+
+
+def report(ranked, w, hw, top=10):
+    lines = [f"# GEMM ({w.M}x{w.K}x{w.N})  cap_bits={hw.cap_bits}  dram_bw={hw.dram_bw}",
+             f"{'perm':<10}{'m_in':>5}{'k_in':>5}{'n_in':>5}{'energy':>16}{'actual_cycle':>16}{'stall':>12}"]
+    for r in ranked[:top]:
+        m = r["mapping"]
+        lines.append(f"{''.join(m.perm):<10}{m.m_in:>5}{m.k_in:>5}{m.n_in:>5}"
+                     f"{r['energy']:>16.0f}{r['actual_cycle']:>16.1f}{r['stall']:>12.1f}")
+    return "\n".join(lines)
+
+
+def selftest():
+    # G1: all-resident (single block) -- DRAM + compute_work + energy (unchanged by order/C model)
+    w1 = Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    m1 = Mapping(perm=("N", "K", "M"), m_in=2, k_in=2, n_in=2)
+    hw1 = HW(bank_size=1024, banks=32, dram_bw=64)
+    assert dram_bits(m1, w1)["total"] == 196608
+    assert compute_work(w1) == 2048
+    assert energy_breakdown(m1, w1, hw1)["total"] == 40804352.0
+    # G2: genuine psum spill needs K_out>1 AND a non-trivial loop inner to K (here N, n_in=1)
+    m2 = Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=1)
+    assert dram_bits(m2, w1)["Cw"] == 262144 and dram_bits(m2, w1)["Cr"] == 131072
+    # G3: 2-bit weights -> tiny compute, FP32 C psum dominates the shared-bandwidth stall
+    w3 = Work(M=64, K=64, N=64, wbits=[[2, 2], [2, 2]], act_bits=8)
+    m3 = Mapping(perm=("N", "M", "K"), m_in=2, k_in=2, n_in=1)
+    hw3 = HW(bank_size=1024, banks=32, dram_bw=32)
+    assert stall_fill(m3, w3, hw3) == (4352.0, 768.0)
+    assert actual_cycle(m3, w3, hw3) == 5632.0
+    print("selftest: OK")
+
+
+def _load_wbits(path, MT, KT):
+    import json
+    with open(path) as f:
+        wb = json.load(f)
+    if len(wb) != MT or any(len(r) != KT for r in wb):
+        raise ValueError(f"wbits file must be {MT}x{KT}")
+    return wb
+
+
+def main(argv=None):
+    import argparse
+    p = argparse.ArgumentParser(description="MXP_scheduler — GEMM mapping cost-model + optimizer")
+    p.add_argument("--selftest", action="store_true")
+    p.add_argument("--crosscheck", action="store_true")
+    p.add_argument("--M", type=int); p.add_argument("--K", type=int); p.add_argument("--N", type=int)
+    p.add_argument("--bank-size", type=int, default=1024)
+    p.add_argument("--banks", type=int, default=32)
+    p.add_argument("--dram-bw", type=float, default=64.0)
+    p.add_argument("--act", type=int, default=8)
+    p.add_argument("--bits-file", help="JSON MT x KT avg-weight-bits; default all=act")
+    p.add_argument("--max-cycle", type=float, default=None)
+    p.add_argument("--coeffs", help="JSON override of energy coeffs")
+    a = p.parse_args(argv)
+    if a.selftest:
+        selftest(); return 0
+    if a.crosscheck:
+        crosscheck(); return 0
+    if not (a.M and a.K and a.N):
+        p.error("provide --M --K --N (or --selftest/--crosscheck)")
+    MT, KT = -(-a.M // TILE), -(-a.K // TILE)
+    wbits = _load_wbits(a.bits_file, MT, KT) if a.bits_file else [[a.act] * KT for _ in range(MT)]
+    coeffs = dict(DEFAULT_COEFFS)
+    if a.coeffs:
+        import json
+        coeffs.update(json.load(open(a.coeffs)))
+    w = Work(M=a.M, K=a.K, N=a.N, wbits=wbits, act_bits=a.act)
+    hw = HW(bank_size=a.bank_size, banks=a.banks, dram_bw=a.dram_bw, coeffs=coeffs)
+    ranked = optimize(w, hw, max_cycle=a.max_cycle)
+    print(report(ranked, w, hw))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

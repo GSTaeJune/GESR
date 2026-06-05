@@ -428,3 +428,23 @@ def test_stall_c_traffic_matches_dram():
         d = s.dram_bits(m, w)
         assert writes == pytest.approx(d["Cw"])
         assert reads == pytest.approx(d["Cr"])
+
+
+def test_selftest_passes():
+    s.selftest()   # raises AssertionError on any golden mismatch; returns None on success
+
+
+def test_report_contains_mapping_and_energy():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=64)
+    ranked = s.optimize(w, hw)
+    txt = s.report(ranked[:3], w, hw)
+    assert "perm" in txt and "energy" in txt and "actual_cycle" in txt
+
+
+def test_cli_selftest_exit0():
+    import subprocess, sys, pathlib
+    here = pathlib.Path(s.__file__).parent
+    r = subprocess.run([sys.executable, "mxp_scheduler.py", "--selftest"],
+                       cwd=here, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
