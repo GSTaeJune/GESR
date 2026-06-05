@@ -136,14 +136,37 @@ def feasible(m, w, hw):
 
 
 def dram_bits(m, w):
+    """Order-DEPENDENT DRAM traffic (bits). Counts the loads/stores that actually happen
+    in this loop order, on the SAME outer-block walk as the stall model — so the A/W DRAM
+    volume equals stall_fill's total input fetch by construction (no two-model mismatch).
+
+    Supersedes the spec §6.2 order-independent reload factors (reload A=M_out, W=N_out,
+    C=K_out), which only hold for the worst-case order (reused dim outermost). Decision
+    2026-06-05: energy must reflect the actual loop order so the optimizer can choose it.
+
+      A (=activation[K,N], reused over M): (re)load when the (K,N) outer index changes
+        (first block always loads). M inner to both K,N -> A stays resident -> fewer loads.
+      W (=weight[M,K], reused over N): (re)load when the (M,K) outer index changes.
+      C (=output[M,N], reduced over K): output-stationary when K is the INNERMOST loop
+        -> the psum accumulates fully resident, one final write, no reload. Otherwise the
+        C tile is evicted and re-touched once per outer-K -> spill (K_out writes, K_out-1
+        reads; first touch zero-init)."""
     out, _ = _out_in(m, w)
-    a = (w.K * w.N * w.act_bits) * out["M"]            # reload(A) = M_out
-    wt = w.total_w_bits * out["N"]                      # reload(W) = N_out
-    cw = (w.M * w.N * FP32_BITS) * out["K"]             # each outer-K writes partial (FP32 psum)
-    cr = (w.M * w.N * FP32_BITS) * (out["K"] - 1)       # reload for accumulate; first touch zero-init
-    # exact bit counts: W traffic is fractional when avg wbits is fractional; keeping it exact
-    # (no int() truncation) keeps energy on the same basis as the per-block compute in _blocks.
-    return {"A": a, "W": wt, "Cw": cw, "Cr": cr, "total": a + wt + cw + cr}
+    a = w_dram = 0.0
+    prev = None
+    for idx, _compute, a_blk, w_blk in _blocks(m, w):
+        if prev is None or (idx["K"], idx["N"]) != (prev["K"], prev["N"]):
+            a += a_blk                                  # A reload (A indexed K,N)
+        if prev is None or (idx["M"], idx["K"]) != (prev["M"], prev["K"]):
+            w_dram += w_blk                             # W reload (W indexed M,K)
+        prev = idx
+    full_c = w.M * w.N * FP32_BITS
+    if m.perm[-1] == "K":
+        cw, cr = full_c, 0                              # output-stationary: no psum spill
+    else:
+        cw = full_c * out["K"]                          # one partial write per outer-K visit
+        cr = full_c * (out["K"] - 1)                    # reload prior partial; first touch zero-init
+    return {"A": a, "W": w_dram, "Cw": cw, "Cr": cr, "total": a + w_dram + cw + cr}
 
 
 _DISP = {8: 1, 4: 2, 2: 4}   # RMW dispatches per col fire by activation mode

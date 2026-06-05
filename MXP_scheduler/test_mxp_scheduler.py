@@ -208,11 +208,15 @@ def test_optimize_picks_min_energy_feasible():
     hw = s.HW(bank_size=1024, banks=32, dram_bw=64)
     ranked = s.optimize(w, hw)
     assert all(r["feasible"] for r in ranked)
-    # sorted ascending by energy
-    assert ranked == sorted(ranked, key=lambda r: r["energy"])
-    # min-energy mapping must be all-resident (no spill, no input reload): out factors all 1
-    best = ranked[0]["mapping"]
-    assert (best.m_in, best.k_in, best.n_in) == (w.MT, w.KT, w.NT)
+    assert ranked == sorted(ranked, key=lambda r: (r["energy"], r["actual_cycle"]))
+    # Order-dependent energy: the min-energy mapping hits the full-reuse DRAM floor (each of
+    # A, W, C moved through DRAM exactly once, no psum spill). NOTE this is NOT uniquely the
+    # all-resident mapping any more -- a K-tiled mapping with K innermost is output-stationary
+    # so it spills nothing and ties the floor at a smaller footprint.
+    best = ranked[0]
+    floor = 64 * 64 * 8 + 32768 + 64 * 64 * 32   # A + W + C, each once = 196608
+    assert best["dram"]["total"] == floor
+    assert best["dram"]["Cr"] == 0               # no psum spill in the optimum
 
 
 def test_optimize_cycle_constraint_filters():
@@ -327,3 +331,51 @@ def test_optimize_cycle_filter_reduces_set():
     mid = s.optimize(w, hw, max_cycle=cutoff)
     assert len(mid) < len(full)
     assert all(r["actual_cycle"] <= cutoff + 1e-9 for r in mid)
+
+
+# --- order-dependent DRAM/energy model (FINDING A: dram now matches the stall reload basis) ---
+
+def test_dram_A_reload_depends_on_M_position():
+    # A=[K,N] reused over M: putting M innermost keeps A resident -> fewer A loads than M outer
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    m_inner = s.Mapping(perm=("K", "N", "M"), m_in=1, k_in=1, n_in=2)   # M innermost
+    m_outer = s.Mapping(perm=("M", "K", "N"), m_in=1, k_in=1, n_in=2)   # M outermost
+    assert s.dram_bits(m_inner, w)["A"] < s.dram_bits(m_outer, w)["A"]
+    assert s.dram_bits(m_inner, w)["A"] == 64 * 64 * 8          # A streamed exactly once
+
+
+def test_dram_C_no_spill_when_K_innermost():
+    # K tiled (k_in=1 -> K_out=2). K innermost = output-stationary -> no psum spill.
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    k_inner = s.Mapping(perm=("M", "N", "K"), m_in=2, k_in=1, n_in=2)   # K innermost
+    k_outer = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=2)   # K outermost
+    di, do = s.dram_bits(k_inner, w), s.dram_bits(k_outer, w)
+    assert di["Cw"] == 64 * 64 * 32 and di["Cr"] == 0          # one write, no reload
+    assert do["Cw"] == 64 * 64 * 32 * 2 and do["Cr"] == 64 * 64 * 32   # spill per K_out
+
+
+def test_energy_is_perm_dependent():
+    # same blocking, K innermost vs K outermost -> different energy (spill differs).
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=64)
+    e_kin = s.energy_breakdown(s.Mapping(("M", "N", "K"), 2, 1, 2), w, hw)["total"]
+    e_kout = s.energy_breakdown(s.Mapping(("K", "M", "N"), 2, 1, 2), w, hw)["total"]
+    assert e_kin < e_kout
+
+
+def test_dram_and_stall_share_reload_basis():
+    # FINDING A regression lock: the A/W DRAM volume must equal the input fetch the stall
+    # model walks (same _blocks, same adjacency). Independently re-count here and compare.
+    w = s.Work(M=64, K=64, N=64, wbits=[[2, 8], [8, 2]], act_bits=8)
+    for m in s.gen_mappings(w):
+        a_vol = w_vol = 0.0
+        prev = None
+        for idx, _c, a_blk, w_blk in s._blocks(m, w):
+            if prev is None or (idx["K"], idx["N"]) != (prev["K"], prev["N"]):
+                a_vol += a_blk
+            if prev is None or (idx["M"], idx["K"]) != (prev["M"], prev["K"]):
+                w_vol += w_blk
+            prev = idx
+        d = s.dram_bits(m, w)
+        assert d["A"] == pytest.approx(a_vol)
+        assert d["W"] == pytest.approx(w_vol)
