@@ -154,7 +154,7 @@ def dram_bits(m, w):
     out, _ = _out_in(m, w)
     a = w_dram = 0.0
     prev = None
-    for idx, _compute, a_blk, w_blk in _blocks(m, w):
+    for idx, _compute, a_blk, w_blk, _c_blk in _blocks(m, w):
         if prev is None or (idx["K"], idx["N"]) != (prev["K"], prev["N"]):
             a += a_blk                                  # A reload (A indexed K,N)
         if prev is None or (idx["M"], idx["K"]) != (prev["M"], prev["K"]):
@@ -218,12 +218,15 @@ def energy_breakdown(m, w, hw):
 
 
 def _blocks(m, w):
-    """Yield (idx, compute_blk, a_blk, w_blk) per outer block in perm order (perm[0] outermost).
+    """Yield (idx, compute_blk, a_blk, w_blk, c_blk) per outer block in perm order (outermost first).
     idx = outer index dict per dim; compute_blk = 32*N_in*Σwbits(resident M_in x K_in window);
     a_blk = A fetch bits (mapping-constant: same inner A tile every block);
-    w_blk = W fetch bits for this block (varies — depends on the block's resident wbits)."""
+    w_blk = W fetch bits for this block (varies — depends on the block's resident wbits);
+    c_blk = resident C psum window bits (mapping-constant): spilled when its (M,N) tile is
+            evicted, reloaded when re-entered."""
     out, inn = _out_in(m, w)
     a_blk = inn["K"] * inn["N"] * TILE * TILE * w.act_bits   # mapping-constant, same every block
+    c_blk = inn["M"] * inn["N"] * TILE * TILE * FP32_BITS    # mapping-constant resident C window
     ranges = [range(out[d]) for d in m.perm]
     for combo in itertools.product(*ranges):
         idx = dict(zip(m.perm, combo))
@@ -231,36 +234,57 @@ def _blocks(m, w):
         w_sum = sum(w.wbits[mt][kt]
                     for mt in range(mo * inn["M"], (mo + 1) * inn["M"])
                     for kt in range(ko * inn["K"], (ko + 1) * inn["K"]))
-        yield idx, TILE * inn["N"] * w_sum, a_blk, w_sum * TILE * TILE
+        yield idx, TILE * inn["N"] * w_sum, a_blk, w_sum * TILE * TILE, c_blk
 
 
 def _stall_of_order(blocks, bw):
-    """Sum of double-buffer stalls for a given block ORDER. Inputs (A,W) only (spec §8):
-    each block's input fetch is hidden behind the PREVIOUS block's compute.
-    A reloads when (K_idx, N_idx) changes; W reloads when (M_idx, K_idx) changes."""
+    """Total stall for a given block ORDER. One DRAM channel of bandwidth bw is shared by
+    ALL traffic: input fetch (A,W reloads), C psum reload-reads, and C psum spill-writes.
+    Each block's compute window hides the transfers around it -- the next block's inputs and
+    C reload (must arrive before it computes) PLUS the previous block's C spill-write (drains
+    after it computes). Leftover transfer time is stall. The last block's C write has no
+    following compute to hide it -> trailing drain (always added).
+
+    A reloads on (K,N) change, W on (M,K) change, C reloads when an (M,N) tile is re-entered
+    after a spill, C spills when an (M,N) tile is left (every episode-end, incl. the final
+    write). (Supersedes the inputs-only spec §8 stall: C psum bandwidth is now modeled.)"""
+    n = len(blocks)
+    if n == 0:
+        return 0.0
+    seen = set()
     prev = None
     prev_compute = 0.0
     total = 0.0
-    for idx, compute_blk, a_blk, w_blk in blocks:
+    for idx, compute_blk, a_blk, w_blk, c_blk in blocks:
+        mn = (idx["M"], idx["N"])
         if prev is not None:
+            prev_mn = (prev["M"], prev["N"])
             fetch = 0.0
             if (idx["K"], idx["N"]) != (prev["K"], prev["N"]):
                 fetch += a_blk                              # A reloads (A indexed K,N)
             if (idx["M"], idx["K"]) != (prev["M"], prev["K"]):
                 fetch += w_blk                              # W reloads (W indexed M,K)
+            if mn != prev_mn:
+                fetch += c_blk                              # prev block left its C tile -> spill drains
+                if mn in seen:
+                    fetch += c_blk                          # re-entering a spilled C tile -> reload read
             total += max(0.0, fetch / bw - prev_compute)
+        seen.add(mn)
         prev = idx
         prev_compute = compute_blk
+    total += blocks[-1][4] / bw                             # trailing C drain of the last tile
     return total
 
 
 def stall_fill(m, w, hw):
-    """Sequence-aware stall over outer-iteration blocks. Inputs (A,W) only (spec §8).
-    fill = first block's input fetch time (unhidable); stall = natural perm-order stall."""
+    """Sequence-aware stall over outer-iteration blocks. DRAM bandwidth is shared by A/W
+    input fetch AND C psum spill/reload (see _stall_of_order). fill = first block's input
+    fetch time (unhidable startup); stall = the rest (per-block un-hidden transfer + the
+    trailing C drain)."""
     blocks = list(_blocks(m, w))
     bw = hw.dram_bw
-    _, _, a0, w0 = blocks[0]
-    fill = (a0 + w0) / bw
+    _, _, a0, w0, _c0 = blocks[0]
+    fill = (a0 + w0) / bw                                   # first-block C read is 0 (first touch)
     return _stall_of_order(blocks, bw), fill
 
 
@@ -306,8 +330,9 @@ def optimize(w, hw, max_cycle=None):
 
 def lpt_headroom(m, w, hw):
     """Headroom indicator (spec §9.2): natural perm-order stall vs the stall if outer blocks
-    were reordered Longest-Processing-Time-first (descending block compute). LPT is NOT a
-    drop-in optimum here (tiles are reuse-coupled), so headroom may be <= 0."""
+    were reordered Longest-Processing-Time-first (descending block compute). Both stalls use
+    the full bandwidth model (A/W fetch + C psum spill/reload). LPT is NOT a drop-in optimum
+    here (tiles are reuse-coupled, and reordering perturbs C residency), so headroom may be <= 0."""
     blocks = list(_blocks(m, w))
     natural = _stall_of_order(blocks, hw.dram_bw)
     lpt = _stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.dram_bw)  # b[1] = compute_blk, desc

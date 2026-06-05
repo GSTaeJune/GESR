@@ -170,19 +170,21 @@ def test_energy_breakdown_g1():
 
 
 def test_stall_fill_g3():
-    # G3: low-bit blocks cannot hide an A-reload -> stall>0
+    # G3: 2-bit weights -> tiny compute (256/block) but FP32 C psum dominates the DRAM stall.
     w = s.Work(M=64, K=64, N=64, wbits=[[2, 2], [2, 2]], act_bits=8)
-    # perm N outer, n_in=1 (N_out=2); m_in=2,k_in=2 (M_out=K_out=1); bw=32
+    # perm N outer, n_in=1 (N_out=2 -> 2 blocks, each a different (M,N) C tile); m_in=k_in=2; bw=32
     m = s.Mapping(perm=("N", "M", "K"), m_in=2, k_in=2, n_in=1)
     hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
     stall, fill = s.stall_fill(m, w, hw)
-    # block compute = 32*N_in(1)*sum(2,2,2,2=8) = 256 each
-    # j0 fetch = A_blk + W_blk = (2*1*1024*8=16384) + (8*1024=8192) = 24576 ; fill=24576/32=768
-    # j1: N changed -> A reload 16384 ; W same -> 0 ; stall=max(0,16384/32 - 256)=max(0,512-256)=256
+    # a_blk=2*1*1024*8=16384 ; w_blk=8*1024=8192 ; c_blk=2*1*1024*32=65536 ; compute=32*1*8=256
+    # fill = (a0+w0)/bw = (16384+8192)/32 = 768
+    # boundary 0->1: (M,N) tile changes -> A reload(16384) + C write of block0(65536); new tile so
+    #   no C read. demand=81920 ; stall0 = 81920/32 - 256 = 2560-256 = 2304
+    # trailing drain = c_blk(65536)/32 = 2048
     assert fill == 768.0
-    assert stall == 256.0
-    # actual = compute_work + fill + stall = 512 + 768 + 256 = 1536
-    assert s.actual_cycle(m, w, hw) == 1536.0
+    assert stall == 2304.0 + 2048.0   # 4352
+    # actual = compute_work + fill + stall = 512 + 768 + 4352 = 5632
+    assert s.actual_cycle(m, w, hw) == 5632.0
 
 
 def test_stall_zero_when_bw_huge():
@@ -190,8 +192,8 @@ def test_stall_zero_when_bw_huge():
     m = s.Mapping(perm=("M", "K", "N"), m_in=2, k_in=2, n_in=2)
     hw = s.HW(bank_size=1024, banks=32, dram_bw=10 ** 12)   # effectively infinite BW
     stall, fill = s.stall_fill(m, w, hw)
-    assert stall == 0.0
-    assert fill < 1.0   # fetch/huge-bw ~ 0
+    assert stall < 1.0   # all transfers (incl. trailing C drain) / huge-bw ~ 0
+    assert fill < 1.0
 
 
 def test_evaluate_keys():
@@ -374,7 +376,7 @@ def test_dram_and_stall_share_reload_basis():
     for m in s.gen_mappings(w):
         a_vol = w_vol = 0.0
         prev = None
-        for idx, _c, a_blk, w_blk in s._blocks(m, w):
+        for idx, _c, a_blk, w_blk, _cb in s._blocks(m, w):
             if prev is None or (idx["K"], idx["N"]) != (prev["K"], prev["N"]):
                 a_vol += a_blk
             if prev is None or (idx["M"], idx["K"]) != (prev["M"], prev["K"]):
@@ -383,3 +385,46 @@ def test_dram_and_stall_share_reload_basis():
         d = s.dram_bits(m, w)
         assert d["A"] == pytest.approx(a_vol)
         assert d["W"] == pytest.approx(w_vol)
+
+
+# --- C-in-stall: cycle model now charges C psum DRAM bandwidth too ---
+
+def test_stall_includes_c_drain():
+    # even a single all-resident block must drain its FP32 C psum to DRAM (no compute hides it)
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    m = s.Mapping(perm=("M", "K", "N"), m_in=2, k_in=2, n_in=2)   # single block
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    stall, _fill = s.stall_fill(m, w, hw)
+    c_blk = 2 * 2 * 1024 * 32          # m_in*n_in*TILE^2*FP32 = 131072
+    assert stall == c_blk / 32         # only the trailing C drain
+
+
+def test_c_spill_raises_cycle():
+    # a psum-spilling mapping pays C DRAM bandwidth in cycles too, beating an output-stationary one
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    out_stationary = s.actual_cycle(s.Mapping(("M", "N", "K"), 2, 1, 2), w, hw)  # K inner, no spill
+    spilling = s.actual_cycle(s.Mapping(("K", "M", "N"), 2, 1, 1), w, hw)        # spills psum
+    assert spilling > out_stationary
+
+
+def test_stall_c_traffic_matches_dram():
+    # the C reads/writes the stall walk charges must equal dram_bits Cr/Cw (one consistent basis)
+    w = s.Work(M=64, K=64, N=64, wbits=[[2, 8], [8, 2]], act_bits=8)
+    for m in s.gen_mappings(w):
+        blocks = list(s._blocks(m, w))
+        seen = set()
+        reads = writes = 0.0
+        prev = None
+        for idx, _c, _a, _w, c_blk in blocks:
+            mn = (idx["M"], idx["N"])
+            if prev is not None and mn != prev:
+                writes += c_blk                 # prev tile left -> spill write
+                if mn in seen:
+                    reads += c_blk              # re-enter spilled tile -> reload read
+            seen.add(mn)
+            prev = mn
+        writes += blocks[-1][4]                 # trailing drain write of the last tile
+        d = s.dram_bits(m, w)
+        assert writes == pytest.approx(d["Cw"])
+        assert reads == pytest.approx(d["Cr"])
