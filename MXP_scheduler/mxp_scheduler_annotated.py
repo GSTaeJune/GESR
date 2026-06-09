@@ -67,6 +67,11 @@ class HW:
                 raise ValueError(f"coeffs missing required key {k!r}")
             if not isinstance(self.coeffs[k], (int, float)) or self.coeffs[k] < 0:
                 raise ValueError(f"coeffs[{k!r}] must be a non-negative number, got {self.coeffs[k]!r}")
+        # 모르는 키는 거의 항상 네 키 중 하나의 오타("darm" 등): 조용히 무시하면 의도한
+        # 계수가 기본값으로 남아 결과가 통째로 오염된다 → 명시적으로 거부.
+        unknown = set(self.coeffs) - {"dram", "onchip", "mac", "rmw"}
+        if unknown:
+            raise ValueError(f"coeffs has unknown key(s) {sorted(unknown)}; valid: dram/onchip/mac/rmw")
 
     @property
     def eff_bw(self):
@@ -108,15 +113,15 @@ class Work:
 
     @property
     def MT(self):
-        return -(-self.M // TILE)   # ceil(M/TILE). 음수나눗셈 트릭으로 올림.
+        return self.M // TILE   # 정확히 나눠떨어짐: __post_init__ 이 M % TILE == 0 강제.
 
     @property
     def KT(self):
-        return -(-self.K // TILE)
+        return self.K // TILE
 
     @property
     def NT(self):
-        return -(-self.N // TILE)
+        return self.N // TILE
 
     @property
     def total_w_bits(self):
@@ -164,13 +169,15 @@ def gen_mappings(w):
     return ms
 
 
-def footprint_bits(m, w):
+def footprint_bits(m, w, blocks=None):
     # 동시에 on-chip 에 상주해야 하는 작업집합 저장량(spec §6.1). a_blk·c_blk 은 (매핑 상수인)
     # resident A·C 창; foot_w 는 RESIDENT-WINDOW W 비트를 외부 블록들에 대해 max 한 값
     # (모든 타일의 GLOBAL 최대값이 아님 — 그러면 과대계상으로 저비트 resident mixed-precision
     # 매핑을 과도 prune 한다). _blocks 를 도는 김에 blocking factor 도 (_out_in 으로) 검증해
     # feasible() 이 잘못된 매핑을 dram_bits 와 일관되게 거부하게 한다.
-    blocks = list(_blocks(m, w))
+    # blocks: 미리 계산한 list(_blocks(m, w)) — evaluate() 가 블록 walk 를 1회로 공유.
+    if blocks is None:
+        blocks = list(_blocks(m, w))
     _, _, a_blk, _w_blk0, c_blk = blocks[0]
     foot_w = max(b[3] for b in blocks)   # b[3] = w_blk = resident M_in×K_in 창 비트
     return a_blk + foot_w + c_blk
@@ -181,7 +188,7 @@ def feasible(m, w, hw):
     return footprint_bits(m, w) <= hw.cap_bits
 
 
-def dram_bits(m, w):
+def dram_bits(m, w, blocks=None):
     """순서 의존(order-DEPENDENT) DRAM 트래픽(bit). 이 루프 순서에서 실제로 일어나는
     load/store 만 센다. stall 모델과 '같은' 외부블록 walk(_blocks) 위에서 세므로 A/W DRAM
     물량이 stall_fill 의 총 입력 fetch 와 구조적으로 일치한다(두 모델 불일치 없음).
@@ -195,11 +202,13 @@ def dram_bits(m, w):
       W (=weight[M,K], N 에 대해 재사용): (M,K) 외부 인덱스가 바뀔 때 (재)load.
       C (=output[M,N], K 에 대해 reduce): K 가 '최내곽'이면 psum 이 완전 resident 로
         누적 → 마지막 1회 write, reload 없음(output-stationary). 아니면 C 타일이 evict 됐다가
-        외부-K 마다 한 번씩 재접근 → spill (K_out 회 write, K_out-1 회 read; 첫 접촉은 zero-init)."""
+        외부-K 마다 한 번씩 재접근 → spill (K_out 회 write, K_out-1 회 read; 첫 접촉은 zero-init).
+
+    blocks: 미리 계산한 list(_blocks(m, w)) — 같은 walk, 재계산만 생략."""
     out, _ = _out_in(m, w)
     a = w_dram = 0.0
     prev = None
-    for idx, _compute, a_blk, w_blk, _c_blk in _blocks(m, w):
+    for idx, _compute, a_blk, w_blk, _c_blk in (_blocks(m, w) if blocks is None else blocks):
         # A 는 (K,N) 으로 인덱싱 → (K,N) 외부 인덱스가 바뀌면 재load (첫 블록 prev=None 도 load).
         if prev is None or (idx["K"], idx["N"]) != (prev["K"], prev["N"]):
             a += a_blk                                  # A reload (A indexed K,N)
@@ -245,22 +254,27 @@ def compute_work(w):
     return TILE * w.NT * sum(sum(row) for row in w.wbits)
 
 
-def onchip_bits(m, w):
+def onchip_bits(m, w, d=None):
     # 세 항 모두 on-chip 버퍼 접근이라 단일 "onchip" 에너지 계수를 공유(spec §7):
     # SA 가 읽는 a_rd, w_rd PLUS DRAM 에서 refill 한 데이터의 on-chip write.
     # 그 refill 의 DRAM-측 전송 에너지는 dram_bits("dram" 계수)에서 따로 센다 — 여기는 on-chip 측.
+    # d: 미리 계산한 dram_bits(m, w) dict (evaluate() 가 지표들 간에 1개를 공유).
     a_rd = (w.MT * w.KT * w.NT) * TILE * TILE * w.act_bits   # A 는 cube 당 1회 읽힘
     w_rd = w.NT * w.total_w_bits                              # W 타일은 n_t 당 1회 읽힘
-    d = dram_bits(m, w)
+    if d is None:
+        d = dram_bits(m, w)
     refill = d["A"] + d["W"] + d["Cr"]                        # DRAM→on-chip load (매핑 가변)
     return a_rd + w_rd + refill                               # 정확값(평균 wbits 분수면 분수)
 
 
-def energy_breakdown(m, w, hw):
+def energy_breakdown(m, w, hw, d=None):
     # 4개 비용원의 에너지 = 각 카운트 × 해당 계수. total 은 합.
+    # d: 미리 계산한 dram_bits(m, w) dict — onchip_bits 에도 그대로 전달.
     c = hw.coeffs
-    e_dram = dram_bits(m, w)["total"] * c["dram"]
-    e_onchip = onchip_bits(m, w) * c["onchip"]
+    if d is None:
+        d = dram_bits(m, w)
+    e_dram = d["total"] * c["dram"]
+    e_onchip = onchip_bits(m, w, d) * c["onchip"]
     e_mac = mac_ops(w) * c["mac"]
     e_rmw = rmw_ops(w) * c["rmw"]
     return {"dram": e_dram, "onchip": e_onchip, "mac": e_mac, "rmw": e_rmw,
@@ -290,12 +304,14 @@ def _blocks(m, w):
         yield idx, TILE * inn["N"] * w_sum, a_blk, w_sum * TILE * TILE, c_blk
 
 
-def _double_buffered(m, w, hw):
+def _double_buffered(m, w, hw, blocks=None):
     """on-chip 메모리가 resident footprint PLUS 스트리밍되는 A+W 창의 '두 번째 복제본'까지
     동시에 담을 수 있으면 True (현재 블록을 연산하는 동안 다음 블록을 prefetch 하려면 필요).
     C 는 제자리(in-place) read-modify-write(단일 버퍼)라 A 와 W 만 더블버퍼링한다.
-    False 면 fetch 가 compute 와 겹치지 못하고 fully exposed 된다 (spec §8)."""
-    blocks = list(_blocks(m, w))
+    False 면 fetch 가 compute 와 겹치지 못하고 fully exposed 된다 (spec §8).
+    blocks: 미리 계산한 list(_blocks(m, w))."""
+    if blocks is None:
+        blocks = list(_blocks(m, w))
     a_blk, c_blk = blocks[0][2], blocks[0][4]               # 매핑 상수 A·C 창
     foot_w = max(b[3] for b in blocks)                      # resident W 창 (외부 블록 max)
     footprint = a_blk + foot_w + c_blk                      # 기존 1x resident footprint
@@ -345,16 +361,18 @@ def _stall_of_order(blocks, bw, double_buffered=True):
     return total
 
 
-def stall_fill(m, w, hw):
+def stall_fill(m, w, hw, blocks=None):
     """외부 반복 블록에 대한 sequence-aware stall. DRAM 대역폭은 A/W 입력 fetch 와 C psum
     spill/reload 가 공유(_stall_of_order 참조). fill = 첫 블록의 입력 fetch 시간(hide 불가
     startup); stall = 나머지(블록별 hide 안 된 전송 + trailing C drain). prefetch 여유가
-    없으면(_double_buffered 참조) fetch 가 fully exposed 된다 (spec §8)."""
-    blocks = list(_blocks(m, w))
+    없으면(_double_buffered 참조) fetch 가 fully exposed 된다 (spec §8).
+    blocks: 미리 계산한 list(_blocks(m, w))."""
+    if blocks is None:
+        blocks = list(_blocks(m, w))
     bw = hw.eff_bw                                          # on-chip 사이클 기준 DRAM 대역폭
     _, _, a0, w0, _c0 = blocks[0]
     fill = (a0 + w0) / bw                                   # 첫 블록 C read 는 0 (첫 접촉)
-    return _stall_of_order(blocks, bw, _double_buffered(m, w, hw)), fill
+    return _stall_of_order(blocks, bw, _double_buffered(m, w, hw, blocks)), fill
 
 
 def actual_cycle(m, w, hw):
@@ -365,16 +383,21 @@ def actual_cycle(m, w, hw):
 
 def evaluate(m, w, hw):
     # 한 매핑의 전 지표를 dict 로. optimize/report 가 이 결과를 소비.
-    feas = feasible(m, w, hw)
-    eb = energy_breakdown(m, w, hw)
-    stall, fill = stall_fill(m, w, hw)
+    # 블록 walk 1회 + dram_bits 1회를 모든 지표가 공유 (예전엔 footprint/energy/stall 이
+    # 각자 _blocks 를 다시 돌아 매핑당 최대 6회 동일 walk — 외부 블록 수가 큰 워크로드에서
+    # 순수 낭비). 숫자는 어느 쪽이든 동일.
+    blocks = list(_blocks(m, w))
+    d = dram_bits(m, w, blocks)
+    feas = footprint_bits(m, w, blocks) <= hw.cap_bits
+    eb = energy_breakdown(m, w, hw, d)
+    stall, fill = stall_fill(m, w, hw, blocks)
     cw = compute_work(w)
     return {
         "mapping": m,
         "feasible": feas,
         "energy": eb["total"],
         "energy_breakdown": eb,
-        "dram": dram_bits(m, w),
+        "dram": d,
         "compute_work": cw,
         "stall": stall,
         "fill": fill,
@@ -403,7 +426,7 @@ def lpt_headroom(m, w, hw):
     spill/reload) 사용. 여기선 LPT 가 drop-in 최적이 아니다(타일이 재사용으로 결합돼 있고
     재정렬이 C residency 를 교란) → headroom 이 <= 0 일 수도 있음."""
     blocks = list(_blocks(m, w))
-    db = _double_buffered(m, w, hw)
+    db = _double_buffered(m, w, hw, blocks)
     natural = _stall_of_order(blocks, hw.eff_bw, db)
     lpt = _stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.eff_bw, db)  # b[1] = compute_blk 내림차순
     return {"natural_stall": natural, "lpt_stall": lpt, "headroom": natural - lpt}
@@ -411,7 +434,8 @@ def lpt_headroom(m, w, hw):
 
 def report(ranked, w, hw, top=10):
     # 상위 top 매핑을 표 형태 텍스트로. CLI 출력용.
-    lines = [f"# GEMM ({w.M}x{w.K}x{w.N})  cap_bits={hw.cap_bits}  dram_bw={hw.dram_bw}",
+    lines = [f"# GEMM ({w.M}x{w.K}x{w.N})  cap_bits={hw.cap_bits}  dram_bw={hw.dram_bw}"
+             f"  freq_ratio={hw.freq_ratio}  eff_bw={hw.eff_bw}",
              f"{'perm':<10}{'m_in':>5}{'k_in':>5}{'n_in':>5}{'energy':>16}{'actual_cycle':>16}{'stall':>12}"]
     for r in ranked[:top]:
         m = r["mapping"]
@@ -519,15 +543,21 @@ def main(argv=None):
     a = p.parse_args(argv)
     if not (a.M and a.K and a.N):
         p.error("provide --M --K --N")
-    MT, KT = -(-a.M // TILE), -(-a.K // TILE)
-    wbits = _load_wbits(a.bits_file, MT, KT) if a.bits_file else [[a.act] * KT for _ in range(MT)]
+    MT, KT = a.M // TILE, a.K // TILE
     coeffs = dict(DEFAULT_COEFFS)
     if a.coeffs:
         import json
-        coeffs.update(json.load(open(a.coeffs)))
-    w = Work(M=a.M, K=a.K, N=a.N, wbits=wbits, act_bits=a.act)
-    hw = HW(bank_size=a.bank_size, banks=a.banks, dram_bw=a.dram_bw,
-            freq_ratio=a.freq_ratio, coeffs=coeffs)
+        with open(a.coeffs) as f:
+            coeffs.update(json.load(f))
+    # Work/HW 는 잘못된 입력(32 비배수 차원, 범위 밖 wbits, coeff 키 오타 등)에 ValueError 를
+    # 던진다 — traceback 대신 깔끔한 CLI 에러로 노출.
+    try:
+        wbits = _load_wbits(a.bits_file, MT, KT) if a.bits_file else [[a.act] * KT for _ in range(MT)]
+        w = Work(M=a.M, K=a.K, N=a.N, wbits=wbits, act_bits=a.act)
+        hw = HW(bank_size=a.bank_size, banks=a.banks, dram_bw=a.dram_bw,
+                freq_ratio=a.freq_ratio, coeffs=coeffs)
+    except ValueError as e:
+        p.error(str(e))
     ranked = optimize(w, hw, max_cycle=a.max_cycle)
     if a.explain:
         # 최적 매핑(없으면 첫 후보)을 골라 단계별로 설명.

@@ -277,7 +277,8 @@ def test_dram_bits_fractional_no_truncation():
 
 
 def test_optimize_tiebreak_by_cycle():
-    # energy is perm-independent -> ties exist; they must break by ascending actual_cycle,
+    # energy is order-dependent in general, but ties still exist (e.g. all-resident mappings
+    # have identical DRAM traffic across perms); ties must break by ascending actual_cycle,
     # not by gen_mappings() insertion order (a hidden preference)
     w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
     hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
@@ -575,3 +576,36 @@ def test_hw_rejects_bad_coeffs():
         s.HW(bank_size=1024, banks=32, dram_bw=64, coeffs={"dram": -1.0, "onchip": 6.0, "mac": 1.0, "rmw": 5.0})
     with pytest.raises(ValueError):
         s.HW(bank_size=1024, banks=32, dram_bw=64, coeffs={"dram": 200.0, "onchip": 6.0, "mac": 1.0})  # missing rmw
+
+
+def test_hw_rejects_unknown_coeff_key():
+    # a typo'd key (e.g. "darm") must raise, not silently leave the real coeff at its default
+    bad = dict(s.DEFAULT_COEFFS)
+    bad["darm"] = 150.0
+    with pytest.raises(ValueError, match="unknown key"):
+        s.HW(bank_size=1024, banks=32, dram_bw=64, coeffs=bad)
+
+
+def test_cli_friendly_error_on_bad_dims():
+    # bad input must exit via argparse error (rc=2, message on stderr), not a raw traceback
+    import subprocess, sys, pathlib
+    here = pathlib.Path(s.__file__).parent
+    r = subprocess.run([sys.executable, "mxp_scheduler.py", "--M", "100", "--K", "64", "--N", "64"],
+                       cwd=here, capture_output=True, text=True)
+    assert r.returncode == 2
+    assert "multiple of TILE" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+def test_evaluate_shared_walk_matches_public_functions():
+    # evaluate() now computes _blocks/dram_bits once and shares them; results must equal the
+    # standalone public functions (the no-precompute path) exactly
+    w = s.Work(M=64, K=64, N=64, wbits=[[2.5, 7.5], [8, 2]], act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32, freq_ratio=2.0)
+    for m in s.gen_mappings(w):
+        r = s.evaluate(m, w, hw)
+        assert r["feasible"] == s.feasible(m, w, hw)
+        assert r["dram"] == s.dram_bits(m, w)
+        assert r["energy_breakdown"] == s.energy_breakdown(m, w, hw)
+        stall, fill = s.stall_fill(m, w, hw)
+        assert (r["stall"], r["fill"]) == (stall, fill)

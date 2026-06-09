@@ -269,21 +269,21 @@ CLI plumbing. Line numbers are into `mxp_scheduler.py`.
 **The inputs (3 dataclasses)**
 | Function | What it is |
 |---|---|
-| `HW` (`:19`) | The chip: `bank_size`, `banks`, `dram_bw`, `freq_ratio`, `coeffs`. Props `cap_bits` (total SRAM) and `eff_bw` (`dram_bw / freq_ratio`). Validates everything positive. |
-| `Work` (`:62`) | The GEMM: `M, K, N` + the `wbits` map + `act_bits`. Enforces 32-multiples and the `[2,8]` wbits range. Props `MT/KT/NT`. |
-| `Mapping` (`:102`) | One schedule candidate: `perm` (loop order) + `m_in, k_in, n_in` (blocking). Checks `perm` is a real permutation of M/K/N. |
+| `HW` (`:19`) | The chip: `bank_size`, `banks`, `dram_bw`, `freq_ratio`, `coeffs`. Props `cap_bits` (total SRAM) and `eff_bw` (`dram_bw / freq_ratio`). Validates everything positive; rejects unknown coeff keys (typo guard). |
+| `Work` (`:67`) | The GEMM: `M, K, N` + the `wbits` map + `act_bits`. Enforces 32-multiples and the `[2,8]` wbits range. Props `MT/KT/NT`. |
+| `Mapping` (`:107`) | One schedule candidate: `perm` (loop order) + `m_in, k_in, n_in` (blocking). Checks `perm` is a real permutation of M/K/N. |
 
 **Search → cost → rank (the pipeline)**
 | Function | Role | Implements (README §) |
 |---|---|---|
-| `gen_mappings(w)` (`:130`) | Yields **every** candidate: `≤6 perms × divisor blockings`. The enumerator. | *What it searches* |
-| `footprint_bits` / `feasible` (`:140`/`:152`) | Resident A/W/C bits (W = resident-window max), then "fits in `cap_bits`?". The capacity gate. | *Constraints* |
-| **`dram_bits(m,w)`** (`:156`) | **The heart.** Order-dependent DRAM traffic `{A, W, Cw, Cr, total}` — walks the outer-block sequence, reloading A/W on index change and spilling C only when K is split *and* interleaved. | *DRAM is order-dependent* |
-| `energy_breakdown(m,w,hw)` (`:228`) | Turns event counts into energy: `counts × coeffs → {dram, onchip, mac, rmw, total}`. | *Energy = events × cost* |
-| `_blocks` + `_stall_of_order` (`:238`/`:270`) | The cycle engine: `_blocks` walks outer blocks in loop order; `_stall_of_order` hides each block's transfers behind the neighbouring compute and sums the leftover as stall. `_double_buffered` (`:258`) gates whether hiding is even allowed. | *Cycles = compute + fill + stall* |
-| `evaluate(m,w,hw)` (`:330`) | Bundles one mapping's full metric dict (footprint, dram, energy, cycle, stall). One call = one table row. | — |
-| **`optimize(w,hw,max_cycle)`** (`:348`) | **The ranking.** Keep feasible → filter `max_cycle` → sort by `(energy, actual_cycle)`. Returns the ordered list. | *Ranking* |
-| `tradeoff` / `pareto_front` (`:436`/`:422`) | `pareto_front` = the non-dominated `(energy, cycle)` curve; `tradeoff` picks its two ends: OFF (min energy) and ON (fastest, then cheapest). | *Ranking* |
+| `gen_mappings(w)` (`:135`) | Yields **every** candidate: `≤6 perms × divisor blockings`. The enumerator. | *What it searches* |
+| `footprint_bits` / `feasible` (`:145`/`:159`) | Resident A/W/C bits (W = resident-window max), then "fits in `cap_bits`?". The capacity gate. | *Constraints* |
+| **`dram_bits(m,w)`** (`:163`) | **The heart.** Order-dependent DRAM traffic `{A, W, Cw, Cr, total}` — walks the outer-block sequence, reloading A/W on index change and spilling C only when K is split *and* interleaved. | *DRAM is order-dependent* |
+| `energy_breakdown(m,w,hw)` (`:239`) | Turns event counts into energy: `counts × coeffs → {dram, onchip, mac, rmw, total}`. | *Energy = events × cost* |
+| `_blocks` + `_stall_of_order` (`:252`/`:286`) | The cycle engine: `_blocks` walks outer blocks in loop order; `_stall_of_order` hides each block's transfers behind the neighbouring compute and sums the leftover as stall. `_double_buffered` (`:272`) gates whether hiding is even allowed. | *Cycles = compute + fill + stall* |
+| `evaluate(m,w,hw)` (`:347`) | Bundles one mapping's full metric dict (footprint, dram, energy, cycle, stall). Walks `_blocks` **once** and shares it across all metrics. One call = one table row. | — |
+| **`optimize(w,hw,max_cycle)`** (`:370`) | **The ranking.** Keep feasible → filter `max_cycle` → sort by `(energy, actual_cycle)`. Returns the ordered list. | *Ranking* |
+| `tradeoff` / `pareto_front` (`:459`/`:445`) | `pareto_front` = the non-dominated `(energy, cycle)` curve; `tradeoff` picks its two ends: OFF (min energy) and ON (fastest, then cheapest). | *Ranking* |
 
 **If you read only five**, read them in pipeline order: `gen_mappings` → `dram_bits` →
 `energy_breakdown` → `_stall_of_order` → `optimize`. That's the whole tool; everything else
@@ -313,7 +313,7 @@ This is M=K=64 (MT=KT=2): the two diagonal tiles are all-2-bit, the other two al
 `python mxp_scheduler.py --M 128 --K 128 --N 128 --bank-size 1024 --banks 32 --dram-bw 64 --act 8`:
 
 ```
-# GEMM (128x128x128)  cap_bits=1048576  dram_bw=64.0
+# GEMM (128x128x128)  cap_bits=1048576  dram_bw=64.0  freq_ratio=1.0  eff_bw=64.0
 perm       m_in k_in n_in          energy    actual_cycle       stall
 MKN           1    4    4       167575552         20992.0      2048.0
 MKN           4    4    1       167575552         20992.0      2048.0
@@ -356,7 +356,7 @@ lpt_headroom : natural_stall=3776.0  lpt_stall=3776.0  headroom=0.0
 ## Tests
 
 ```bash
-python -m pytest test_mxp_scheduler.py -q   # unit suite (55 cases)
+python -m pytest test_mxp_scheduler.py -q   # unit suite (58 cases)
 python mxp_scheduler.py --selftest          # embedded golden-value asserts -> "selftest: OK"
 python mxp_scheduler.py --crosscheck        # standard == annotated twin -> "crosscheck: OK"
 ```
