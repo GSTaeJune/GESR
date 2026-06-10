@@ -72,6 +72,7 @@ def _cacti_cfg(bank_bytes, word_bits, tech_nm):
     DRAM·DIMM·NUCA 키는 UCA ram 계산에 안 쓰이지만 파서가 요구하므로 보존."""
     block_bytes = word_bits // 8
     return f"""\
+# parameterized: -size (bytes)
 -size (bytes) {bank_bytes}
 -Array Power Gating - "false"
 -WL Power Gating - "false"
@@ -79,6 +80,7 @@ def _cacti_cfg(bank_bytes, word_bits, tech_nm):
 -Bitline floating - "false"
 -Interconnect Power Gating - "false"
 -Power Gating Performance Loss 0.01
+# parameterized: -block size (bytes)
 -block size (bytes) {block_bytes}
 -associativity 1
 -read-write port 1
@@ -86,6 +88,7 @@ def _cacti_cfg(bank_bytes, word_bits, tech_nm):
 -exclusive write port 0
 -single ended read ports 0
 -UCA bank count 1
+# parameterized: -technology (u)
 -technology (u) {tech_nm / 1000}
 -page size (bits) 8192
 -burst length 8
@@ -94,6 +97,7 @@ def _cacti_cfg(bank_bytes, word_bits, tech_nm):
 -Data array peripheral type - "itrs-hp"
 -Tag array cell type - "itrs-hp"
 -Tag array peripheral type - "itrs-hp"
+# parameterized: -output/input bus width
 -output/input bus width {word_bits}
 -operating temperature (K) 360
 -cache type "ram"
@@ -169,8 +173,11 @@ def _cache_key(bank_bytes, word_bits, tech_nm):
 def _cached(key, cache_path, compute):
     cache = {}
     if os.path.exists(cache_path):
-        with open(cache_path) as f:
-            cache = json.load(f)
+        try:
+            with open(cache_path) as f:
+                cache = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            cache = {}
     if key not in cache:
         cache[key] = compute()
         with open(cache_path, "w") as f:
@@ -206,6 +213,7 @@ def cacti_run(bank_bytes, word_bits, tech_nm, cacti_bin=None, cache_path=DEFAULT
                 return _parse_cacti(r.stdout, word_bits)
             except ValueError:
                 out = _HERE / "cacti_last_failure.log"
-                out.write_text(r.stdout + "\n--- stderr ---\n" + r.stderr)
-                raise ValueError(f"CACTI output parse failed; full output saved to {out}")
+                out.write_text(f"exit code: {r.returncode}\n"
+                               + r.stdout + "\n--- stderr ---\n" + r.stderr)
+                raise ValueError(f"CACTI failed (exit {r.returncode}); full output saved to {out}")
     return _cached(_cache_key(bank_bytes, word_bits, tech_nm), cache_path, compute)
