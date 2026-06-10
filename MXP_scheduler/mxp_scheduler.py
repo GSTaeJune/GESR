@@ -474,26 +474,30 @@ def crosscheck(verbose=False):
     import importlib, os, sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     ann = importlib.import_module("mxp_scheduler_annotated")
-    # (M, K, N, wbits, act, bank_size, banks, dram_bw, freq_ratio, coeffs|None). The cases
-    # deliberately cover all the drift-prone surfaces: every perm/blocking (via gen_mappings),
-    # spill + no-spill, freq_ratio != 1, FRACTIONAL wbits (int()-truncation footgun) and a
-    # NON-default coeffs override (energy-coeff plumbing). A one-sided edit to any of these
-    # paths must trip the equivalence check.
+    # (M, K, N, wbits, act, bank_size, banks, dram_bw, freq_ratio, word_bits, coeffs|None). The
+    # cases deliberately cover all the drift-prone surfaces: every perm/blocking (via gen_mappings),
+    # spill + no-spill, freq_ratio != 1, FRACTIONAL wbits (int()-truncation footgun), non-default
+    # word_bits (cap_bits/double-buffer path) and a NON-default coeffs override (energy-coeff
+    # plumbing). A one-sided edit to any of these paths must trip the equivalence check.
     cases = [
-        (64, 64, 64, [[2, 8], [8, 2]], 8, 1024, 32, 32.0, 1.0, None),
+        (64, 64, 64, [[2, 8], [8, 2]], 8, 1024, 32, 32.0, 1.0, 32, None),
         # M=128 -> MT=4, K=96 -> KT=3 matches the 4x3 wbits map (asymmetric, mixed-prec, freq_ratio=2)
-        (128, 96, 64, [[4, 2, 8], [8, 8, 2], [2, 4, 4], [8, 2, 8]], 4, 512, 16, 48.0, 2.0, None),
+        (128, 96, 64, [[4, 2, 8], [8, 8, 2], [2, 4, 4], [8, 2, 8]], 4, 512, 16, 48.0, 2.0, 32, None),
         # fractional avg wbits — guards the no-int()-truncation invariant on both files
-        (64, 64, 64, [[2.5, 7.5], [6.0, 3.5]], 8, 1024, 32, 32.0, 1.0, None),
+        (64, 64, 64, [[2.5, 7.5], [6.0, 3.5]], 8, 1024, 32, 32.0, 1.0, 32, None),
         # non-default coeffs + freq_ratio<1 — guards energy-coeff plumbing and eff_bw scaling
-        (64, 64, 64, [[2, 8], [8, 2]], 8, 1024, 32, 32.0, 0.5,
+        (64, 64, 64, [[2, 8], [8, 2]], 8, 1024, 32, 32.0, 0.5, 32,
          {"dram": 137.0, "onchip": 11.0, "mac": 2.0, "rmw": 3.0}),
-        (64, 64, 64, [[8, 8], [8, 8]], 8, 100, 32, 32.0, 1.0, None),  # cap=102400: some mappings can't double-buffer
+        (64, 64, 64, [[8, 8], [8, 8]], 8, 100, 32, 32.0, 1.0, 32, None),  # cap=102400: some mappings can't double-buffer
+        # word_bits=16 — cap_bits/double-buffer 경로의 트윈 parity 가드 (이전엔 미커버)
+        (64, 64, 64, [[8, 8], [8, 8]], 8, 1024, 32, 32.0, 1.0, 16, None),
     ]
-    for (M, K, N, wb, act, bs, bk, bw, fr, co) in cases:
+    for (M, K, N, wb, act, bs, bk, bw, fr, wbits_w, co) in cases:
         w_s, w_a = Work(M, K, N, wb, act), ann.Work(M, K, N, wb, act)
-        hw_s = HW(bs, bk, bw, freq_ratio=fr, coeffs=dict(co)) if co else HW(bs, bk, bw, freq_ratio=fr)
-        hw_a = ann.HW(bs, bk, bw, freq_ratio=fr, coeffs=dict(co)) if co else ann.HW(bs, bk, bw, freq_ratio=fr)
+        hw_s = (HW(bs, bk, bw, word_bits=wbits_w, freq_ratio=fr, coeffs=dict(co)) if co
+                else HW(bs, bk, bw, word_bits=wbits_w, freq_ratio=fr))
+        hw_a = (ann.HW(bs, bk, bw, word_bits=wbits_w, freq_ratio=fr, coeffs=dict(co)) if co
+                else ann.HW(bs, bk, bw, word_bits=wbits_w, freq_ratio=fr))
         for m_s in gen_mappings(w_s):
             m_a = ann.Mapping(perm=m_s.perm, m_in=m_s.m_in, k_in=m_s.k_in, n_in=m_s.n_in)
             r_s, r_a = evaluate(m_s, w_s, hw_s), ann.evaluate(m_a, w_a, hw_a)
@@ -563,6 +567,7 @@ def main(argv=None):
         hw = HW(bank_size=pick(a.bank_size, "bank_size", 1024),
                 banks=pick(a.banks, "banks", 32),
                 dram_bw=pick(a.dram_bw, "dram_bw", 64.0),
+                # word_bits: physical spec, no CLI override (config or default only)
                 word_bits=cfg_kw["word_bits"] if cfg_kw is not None else 32,
                 freq_ratio=pick(a.freq_ratio, "freq_ratio", 1.0),
                 coeffs=coeffs)

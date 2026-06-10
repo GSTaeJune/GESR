@@ -210,6 +210,11 @@ def test_cli_annotated_config_same_result(tmp_path):
     r2 = _run_cli(["--config", cfgp, "--M", "64", "--K", "64", "--N", "64"],
                   script="mxp_scheduler_annotated.py")
     assert r1.stdout == r2.stdout               # 트윈 동일 출력
+    # flag-wins 경로도 동일 — 명시 플래그가 config 를 덮어쓰는 동작이 양쪽에서 일치
+    f1 = _run_cli(["--config", cfgp, "--M", "64", "--K", "64", "--N", "64", "--dram-bw", "8"])
+    f2 = _run_cli(["--config", cfgp, "--M", "64", "--K", "64", "--N", "64", "--dram-bw", "8"],
+                  script="mxp_scheduler_annotated.py")
+    assert f1.stdout == f2.stdout               # 트윈 동일 출력 (flag-wins)
 
 
 def test_default_coeffs_match_twin():

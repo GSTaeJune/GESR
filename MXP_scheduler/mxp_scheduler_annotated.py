@@ -573,6 +573,7 @@ def main(argv=None):
         hw = HW(bank_size=pick(a.bank_size, "bank_size", 1024),
                 banks=pick(a.banks, "banks", 32),
                 dram_bw=pick(a.dram_bw, "dram_bw", 64.0),
+                # word_bits 는 물리 스펙 — CLI 오버라이드 없음 (config 또는 기본값)
                 word_bits=cfg_kw["word_bits"] if cfg_kw is not None else 32,
                 freq_ratio=pick(a.freq_ratio, "freq_ratio", 1.0),
                 coeffs=coeffs)
