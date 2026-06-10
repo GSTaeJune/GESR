@@ -145,6 +145,27 @@ python mxp_scheduler.py --selftest
 python mxp_scheduler.py --crosscheck
 ```
 
+## `--config`: 물리 스펙으로 HW 파라미터 자동 도출
+
+`hw_config.json` 에 칩을 물리적으로 기술하면 CACTI(SRAM)와 `dram_presets.json`(DRAM
+datasheet 값)으로 `dram_bw / freq_ratio / coeffs.dram / coeffs.onchip` 을 자동 도출한다.
+명시 CLI 플래그는 항상 config 를 이긴다. CACTI 설치: `docs/cacti-setup.md`.
+
+```bash
+cp hw_config.example.json hw_config.json   # 편집: SRAM 스펙 / DRAM 표준명 / 칩 클럭
+python mxp_scheduler.py --config hw_config.json --M 128 --K 128 --N 128 --act 8
+```
+
+- `dram` 은 `dram_presets.json` 의 키와 정확히 일치해야 한다 (불일치 시 사용 가능 목록을
+  에러로 보여줌). 프리셋은 JSON 이라 자유롭게 추가 가능 — `pj_per_bit` 는 출처(`source`)와
+  함께 적을 것.
+- `coeffs` 는 부분 오버라이드: 적은 키만 자동 도출값/기본값 위에 덮인다. mac/rmw 계수는
+  자동 도출 범위 밖(로직 에너지)이라 기본값 유지 — 매핑-상수항이라 랭킹에는 영향 없음.
+  실측값이 생기면 여기로 주입.
+- 프리셋 pj_per_bit 의 기준 주의: LPDDR 계열은 device-internal, DDR 계열은 off-chip I/O
+  포함 기준이라 절대값을 계열 간 직접 비교하지 말 것 (한 칩 안에서의 매핑 랭킹에는 무관).
+  근거는 각 항목 `source` 참조.
+
 ---
 
 ## How the cost model works
@@ -357,6 +378,7 @@ lpt_headroom : natural_stall=3776.0  lpt_stall=3776.0  headroom=0.0
 
 ```bash
 python -m pytest test_mxp_scheduler.py -q   # unit suite (58 cases)
+python -m pytest test_hwconfig.py -q        # hwconfig suite (23 cases; CACTI 없으면 1 skip)
 python mxp_scheduler.py --selftest          # embedded golden-value asserts -> "selftest: OK"
 python mxp_scheduler.py --crosscheck        # standard == annotated twin -> "crosscheck: OK"
 ```

@@ -220,3 +220,22 @@ def test_cli_annotated_config_same_result(tmp_path):
 def test_default_coeffs_match_twin():
     import mxp_scheduler as s
     assert hwconfig.DEFAULT_COEFFS == s.DEFAULT_COEFFS
+
+
+# --- Task 7: real-CACTI integration (skipped when CACTI absent) ---
+
+def _cacti_available():
+    try:
+        hwconfig._find_cacti_bin(str(HERE.parent / "third_party" / "cacti" / "cacti"))
+        return True
+    except ValueError:
+        return False
+
+
+@pytest.mark.skipif(not _cacti_available(), reason="CACTI binary not installed")
+def test_real_cacti_run(tmp_path):
+    r = hwconfig.cacti_run(4096, 32, 22,
+                           cacti_bin=str(HERE.parent / "third_party" / "cacti" / "cacti"),
+                           cache_path=str(tmp_path / "c.json"))
+    assert r["onchip_pj_per_bit"] > 0          # 수치 golden 은 CACTI 버전 의존이라 두지 않음
+    assert r["sram_max_freq_mhz"] > 0
