@@ -1,0 +1,10 @@
+{
+  "LPDDR5-6400_x16":  {"data_rate_mts": 6400, "bus_bits": 16, "pj_per_bit": 5.0,
+                       "source": "LPDDR4 device energy/bit ~7 pJ/b (Ha, 'Understanding and Improving the Energy Efficiency of DRAM', Stanford PhD thesis 2018, Fig 4.9 8Gb LPDDR4 512-SWL baseline, Background+Row+Column+Refresh) x ~0.7 LPDDR5 power scaling (JEDEC/Micron LPDDR5 >20% efficiency gain) -> ~5 pJ/b"},
+  "LPDDR5X-8533_x16": {"data_rate_mts": 8533, "bus_bits": 16, "pj_per_bit": 4.5,
+                       "source": "LPDDR5 5.0 pJ/b (this table, derived from Ha 2018 Fig 4.9) x ~0.9 LPDDR5X efficiency gain (Micron LPDDR5X product brief: higher data rate at improved energy/bit) -> ~4.5 pJ/b"},
+  "DDR4-3200_x64":    {"data_rate_mts": 3200, "bus_bits": 64, "pj_per_bit": 15.0,
+                       "source": "Off-chip wide-bus DRAM access energy: GDDR5 = 14.0 pJ/b (O'Connor et al., 'Fine-Grained DRAM', MICRO-50 2017, Fig 1a) and full-system LPDDR4 incl. I/O termination ~11-13 pJ/b (Ha 2018 Fig 4.8, Background+Row+Column+I/O+Refresh); DDR4 off-chip read access ~15 pJ/b"},
+  "DDR5-4800_x64":    {"data_rate_mts": 4800, "bus_bits": 64, "pj_per_bit": 10.0,
+                       "source": "DDR4 15 pJ/b (this table, from O'Connor 2017 Fig 1a GDDR5 + Ha 2018 Fig 4.8) x DDR5 VDD reduction 1.2->1.1V (~0.84 dynamic energy) plus architectural gains (decision feedback equalization, on-die ECC) -> ~10 pJ/b"}
+}
