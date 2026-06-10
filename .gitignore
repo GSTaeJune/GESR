@@ -48,6 +48,10 @@ References/
 .claude/settings.local.json
 .claude/stamp.txt
 
+# CACTI 7 (cloned + built locally; see docs/cacti-setup.md)
+third_party/cacti/
+MXP_scheduler/.cacti_cache.json
+
 # Editor / OS
 .vscode/
 .idea/
