@@ -2,7 +2,23 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Next session kickoff (2026-06-04, **전체 코드리뷰 + 회귀 확인 완료** — commit `8a0e673`)
+## Next session kickoff (2026-06-10, **MXP_scheduler 리뷰픽스 + hwconfig 구현·머지** — PR #2, main `d21e9ba`)
+
+**진행 상태**: 이번 세션은 전부 `MXP_scheduler/` (RTL 무변). ① 코드리뷰→수정 (`ec194ec`): coeffs 오타키 거부, `evaluate()` 블록 walk 6→1회 공유, CLI 친절 에러, report 헤더 freq_ratio/eff_bw, 테스트 55→58. ② **hwconfig (config 자동화)** spec→plan→subagent-driven 7-task 구현, PR #2 머지.
+
+### hwconfig 요약 (spec: `docs/superpowers/specs/2026-06-10-mxp-scheduler-hwconfig-design.md`)
+- `--config hw_config.json` (SRAM 뱅크 스펙 + DRAM 표준명 + chip_freq_mhz) → **CACTI 7** (onchip pJ/bit, SRAM max freq) + **`dram_presets.json`** (dram_bw/freq_ratio/dram pJ/bit, 문헌 출처 명기) 자동 도출. 우선순위: 명시 CLI 플래그 > config > 기본값, `--coeffs` 파일 최종 승리.
+- 신규 파일: `MXP_scheduler/hwconfig.py` (단일 어댑터, 트윈 아님) · `dram_presets.json` · `hw_config.example.json` · `docs/cacti-setup.md`. CACTI는 `third_party/cacti` (gitignored, 재클론 시 setup 문서).
+- **Gotcha**: CACTI 7은 full cache.cfg 키셋 필수 — 최소 cfg는 10분+ hang 또는 SIGFPE. `hwconfig._cacti_cfg` docstring 참조, 비활성 DRAM/NUCA 키 "정리" 금지.
+- Ramulator는 v1 제외 (bandwidth 모델이라 불필요; effective-BW derate 캘리브레이션 필요 시 재고려) — 메모리 `project-mxp-scheduler-config-autoparam`.
+- 검증: `cd MXP_scheduler && python -m pytest -q` → **81 passed** (실 CACTI 통합 1개 포함) · selftest OK · crosscheck OK (word_bits=16 parity 케이스 추가).
+
+### 다음 세션 후보
+1. (스케줄러) DRAM 프리셋 확장 / effective-BW derate 캘리브레이션 / 실 워크로드 wbits 맵 연동
+2. (RTL) 보고-only 업스트림 항목 반영 — 아래 2026-06-04 섹션의 HIGH/MEDIUM 목록
+3. production dataflow 최적화 · Vivado timing closure · 9-mode+mixed CI 자동화
+
+## 직전 세션 (2026-06-04, **전체 코드리뷰 + 회귀 확인 완료** — commit `8a0e673`)
 
 **진행 상태**: 멀티에이전트 파일단위 리뷰→수정 루프 1회 수렴 (88 agents). 21건 수정 / 15파일. **연산 로직 버그는 없었음** — 고친 건 전부 주변부(빌드·실행 스크립트, 테스트 게이트, 데드코드). 검증된 데이터패스(`int_to_fp32` 클램프, `fp32_adder` 파이프라인)는 PASS 깨질 위험으로 시니어 에이전트가 의도적으로 거절 → timing-closure 단계로 보류.
 
@@ -25,60 +41,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 기타 후보(기존): production dataflow 최적화 · Vivado timing closure · 9-mode+mixed CI 자동화 · loop order explorer.
 
-## 직전 세션 (2026-05-18, **mixed-sweep BLOCKER 해소** — root cause = golden side prec_b 누락)
+## 이전 세션 요약 (2026-05-18, **mixed-sweep BLOCKER 해소** — root cause = golden side prec_b 누락)
 
-**진행 상태**: mixed-sweep A=2/A=4/A=8 **전 모드 PASS** (hw_sw n_diff=0/16384). 이전 세션에서 RTL fix #4 (`impl_w` 파이프라인) 가 A=8 만 검증된 채 BLOCKER 로 마킹됐던 건 RTL 문제가 아니라 **golden 측 bug** 였음. 사용자 직관 (RTL 수정 불필요) 정확.
+mixed-sweep A=2/4/8 전 모드 PASS. BLOCKER 는 RTL 이 아니라 **golden 측 bug** — `sim/gen_mixed.py` 가 `prec_b` 인자 누락 → A=2 에서 2^6=64× off. Fix: `mxint_gemm_golden` mixed-aware 확장 + `prec_B` 명시 전달 + 테스트 4건. RTL fix #4 (`impl_w` 파이프라인) 는 유효 확인. viz 3-row 단순화, TB 에 `[CYC]` stage cycle 출력 추가.
 
-### 검증 상태 (2026-05-18 final)
+**진단 단서 (재사용 가치 — 다음에 빠르게 식별)**:
+- `hw_fp32 snr > sw_fp32 snr` 시그니처 = "정상 RTL + 잘못된 golden" (A=2 mixed 에서 4.21 dB vs 0.12 dB).
+- `(C_hw / C_old_golden).median()` 이 깔끔한 2^k 면 implicit_scale 인자 누락.
 
-| Test | 명령 | 결과 |
-|---|---|---|
-| mixed-sweep (random W per block) | `python sim/runner.py mixed-sweep` | **3/3 PASS** (A=2/4/8 모두 n_diff=0/16384) |
-| 9-mode uniform integration | `bash sim/run_integration_sweep.sh` | ALL 9 PASS (회귀 없음) |
-| MXP_Tools pytest | `cd MXP_Tools && python -m pytest tests/ -q` | **53 PASS** (기존 49 + 새 mixed-aware 4) |
-
-### Root cause + fix (1 줄 + 1 함수 generalization)
-
-**원인**: `sim/gen_mixed.py::main()` 의 `compute_golden_mixed(...)` 호출 시 `prec_b` 인자 누락 → default `prec_b=8` → `impl_b = IMPLICIT_SCALE_EXP[8] = 6` 으로 모든 모드 고정.
-- A=8: 우연히 정답 (expected impl_b=6).
-- A=4: expected 2, 실제 6 → 2^4 = 16× off.
-- A=2: expected 0, 실제 6 → 2^6 = **64× off** → `C_hw / C_old_golden` median ratio = 64.000 (실측 확인).
-
-**진단 단서** (다음에 빠르게 식별):
-- `hw_fp32 snr > sw_fp32 snr` 시그니처 — HW 가 FP32 truth 에 가까운데 SW golden 만 멀어진 형태 = "정상 RTL + 잘못된 golden". 본 케이스 A=2 mixed 에서 hw_fp32 snr=4.21 dB vs sw_fp32 snr=0.12 dB 가 정확한 시그니처.
-- ratio 측정 (`(C_hw / C_old_golden).median()`) 이 깔끔한 2^k 면 implicit_scale 인자 누락.
-
-**Fix** (본 세션):
-1. `MXP_Tools/mxp_tools/gemm.py::mxint_gemm_golden` 을 mixed-aware 로 확장 — `prec_A` 가 scalar int OR (M, n_blocks) ndarray 둘 다 받게 분기. scalar 분기 보존으로 uniform 9-mode 회귀 영향 없음.
-2. `sim/gen_mixed.py` 의 `compute_golden_mixed` 를 `mxint_gemm_golden` thin wrapper 로 축약. `main()` 은 `mxint_gemm_golden(W_int, W_scale, prec_map, A_int, A_scale, args.A)` 직접 호출, `prec_B=args.A` 명시 전달.
-3. `MXP_Tools/tests/test_gemm.py` 에 4 새 케이스 추가 (scalar↔array 동치성 × 3 prec, 실제 mixed top/bot, bad value/shape reject).
-
-**왜 RTL fix #4 의 impl_w 파이프라인은 유효**: 본 세션에서 의심됐지만 검증 결과 정확. uniform W (9-mode) 와 mixed W (3-mode) 둘 다 PASS. mode-aware mux `impl_w_eff = is_A8 ? q3 : is_A4 ? q2 : is_A2 ? q1 : impl_w` 의 lag 가 fire chain 깊이와 정합. 본 BLOCKER 의 root cause 가 RTL 이 아니라 golden 측에 있었던 것.
-
-### Viz 갱신 (`sim/runner.py::_viz_one`)
-
-3-row layout (단순화):
-- Row 1: W (FP32) | A (FP32) | C_hw (HW output)
-- Row 2: W_PREC map (per-row, per-K-block) | A_PREC map (layer-uniform) | log10|C_hw − C_fp32|
-- Row 3: stats (`hw_sw` PASS/FAIL + `hw_fp32` max/rmse/snr)
-
-W_PREC map 과 |C_hw − C_fp32| 가 Row 2 의 양끝 → M-axis 정렬 → 시각적 비교 가능. C_sw / sw_fp32 시각화 제거 (hw_sw PASS 시 C_sw 와 동일이라 redundant).
-
-### TB stage cycle 출력 추가 (`tb/gemm_sram_top_mixed_tb.v`)
-
-각 stage 끝에 `[CYC] STAGE done t=... cyc=...` 1줄씩 print. 향후 dataflow 최적화 / wall-clock 비교 시 stage 별 cycle 측정 즉시 가능.
-
-### 다음 세션 후보 작업
-
-1. **Production dataflow 최적화** — 본 mixed TB 는 verification-oriented (DRAIN + DUMP 가 wall-clock 의 87%~97% 차지). production 으로 streaming RMW + multi-tile pipeline + no-DUMP 로 옮기면 MAC throughput 가속 (A=2 가 A=8 대비 4×) 이 그대로 노출. 별도 spec 필요.
-2. **Vivado timing closure / 합성** — 250 MHz wrapper / xc7vx485 target. MXP standalone 의 closure 패턴 답습.
-3. **9-mode + mixed-sweep CI 자동화** — `sim/run_integration_sweep.sh` + `sim/runner.py mixed-sweep` 묶어서 CI.
-4. **Loop order explorer** — 메모리 `project_next_loop_order_explorer.md` 참조. 행렬 크기 → DRAM/SRAM/SA traffic 코스트 모델로 optimal (loop_order, tile) 탐색 software.
-5. **SRAM weight storage** (future scope) — 통합 spec § 1.
-
-### 핵심 RTL 매핑 사실 (참조)
-
-SA 의 row=K, col=N, cycle=M 진행. 자세한 표는 본 CLAUDE.md `## MXP control surface` 의 첫 subsection. mixed-prec 디버그 시 row=M 으로 단정 금지 (메모리 `feedback_sa_dimension_mapping.md` 참조).
+**핵심 RTL 매핑**: SA 의 row=K, col=N, cycle=M 진행 — 자세한 표는 `## MXP control surface` 첫 subsection. mixed-prec 디버그 시 row=M 으로 단정 금지.
 
 ### Fix chain (mixed-prec 진화 history, 참조용)
 
