@@ -159,6 +159,9 @@ python mxp_scheduler.py --config hw_config.json --M 128 --K 128 --N 128 --act 8
 - `dram` 은 `dram_presets.json` 의 키와 정확히 일치해야 한다 (불일치 시 사용 가능 목록을
   에러로 보여줌). 프리셋은 JSON 이라 자유롭게 추가 가능 — `pj_per_bit` 는 출처(`source`)와
   함께 적을 것.
+- example 의 `cacti_bin` (`../third_party/cacti/cacti`) 은 `docs/cacti-setup.md` 대로
+  third_party 에 빌드했을 때 MXP_scheduler 디렉토리 기준 상대경로다. 경로가 다르면 수정하거나
+  `CACTI_BIN` 환경변수를 쓰면 된다 (config `cacti_bin` 이 파일이 아니면 env/PATH 로 fall-through).
 - `coeffs` 는 부분 오버라이드: 적은 키만 자동 도출값/기본값 위에 덮인다. mac/rmw 계수는
   자동 도출 범위 밖(로직 에너지)이라 기본값 유지 — 매핑-상수항이라 랭킹에는 영향 없음.
   실측값이 생기면 여기로 주입.

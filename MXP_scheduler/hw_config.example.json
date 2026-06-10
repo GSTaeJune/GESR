@@ -1,5 +1,6 @@
 {
   "sram":          {"bank_size": 1024, "banks": 32, "word_bits": 32, "tech_nm": 22},
+  "cacti_bin":     "../third_party/cacti/cacti",
   "dram":          "LPDDR5-6400_x16",
   "chip_freq_mhz": 250.0,
   "coeffs":        {"rmw": 5.0}
