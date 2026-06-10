@@ -87,7 +87,8 @@ reading.
 ## CLI
 
 ```
-usage: mxp_scheduler.py [-h] [--selftest] [--crosscheck] [--M M] [--K K] [--N N]
+usage: mxp_scheduler.py [-h] [--selftest] [--crosscheck] [--config CONFIG]
+                        [--M M] [--K K] [--N N]
                         [--bank-size BANK_SIZE] [--banks BANKS] [--dram-bw DRAM_BW]
                         [--freq-ratio FREQ_RATIO] [--act ACT] [--bits-file BITS_FILE]
                         [--max-cycle MAX_CYCLE] [--coeffs COEFFS]
@@ -100,14 +101,15 @@ usage: mxp_scheduler.py [-h] [--selftest] [--crosscheck] [--M M] [--K K] [--N N]
 | `--act` | Activation precision, 2 / 4 / 8. | 8 |
 | `--bits-file` | JSON `MT×KT` map of avg weight bits per tile (mixed precision). | all tiles = `--act` |
 
-**Which chip**
+**Which chip** — 두 가지 방법: 물리 스펙으로 자동 도출(`--config`, 아래 섹션) 또는 모델 파라미터 직접 지정(아래 플래그들). 둘 다 주면 **명시 플래그가 config 를 이긴다.**
 | Flag | Meaning | Default |
 |---|---|---|
+| `--config` | `hw_config.json` (SRAM 스펙 + DRAM 표준명 + 칩 클럭) → 파라미터 자동 도출. | — |
 | `--bank-size` | Words per SRAM bank. | 1024 |
 | `--banks` | Number of banks. | 32 |
 | `--dram-bw` | DRAM throughput, bits per DRAM cycle. | 64 |
 | `--freq-ratio` | On-chip cycles per DRAM cycle (`f_chip / f_dram`); 1.0 = same clock. | 1.0 |
-| `--coeffs` | JSON override of the energy coefficients. | DEFAULT_COEFFS |
+| `--coeffs` | JSON override of the energy coefficients (항상 최종 승리). | DEFAULT_COEFFS |
 
 **Filtering / verification**
 | Flag | Meaning |
@@ -147,14 +149,53 @@ python mxp_scheduler.py --crosscheck
 
 ## `--config`: 물리 스펙으로 HW 파라미터 자동 도출
 
-`hw_config.json` 에 칩을 물리적으로 기술하면 CACTI(SRAM)와 `dram_presets.json`(DRAM
-datasheet 값)으로 `dram_bw / freq_ratio / coeffs.dram / coeffs.onchip` 을 자동 도출한다.
-명시 CLI 플래그는 항상 config 를 이긴다. CACTI 설치: `docs/cacti-setup.md`.
+`--dram-bw 64 --freq-ratio 2.0 --coeffs ...` 같은 모델 파라미터를 손으로 계산하는 대신,
+`hw_config.json` 에 칩을 **물리적으로 기술**하면 도구가 채워 넣는다:
+
+| 자동 도출 값 | 출처 |
+|---|---|
+| `coeffs.onchip` (pJ/bit), SRAM 최대 주파수 | **CACTI 7** 실행 (결과는 `.cacti_cache.json` 에 캐시 — 같은 SRAM 구성 재실행 시 즉시) |
+| `dram_bw`, `freq_ratio`, `coeffs.dram` (pJ/bit) | **`dram_presets.json`** — datasheet/문헌 출처가 명기된 DRAM 표준 테이블 |
+
+### 사용 순서
 
 ```bash
-cp hw_config.example.json hw_config.json   # 편집: SRAM 스펙 / DRAM 표준명 / 칩 클럭
+# 0) 최초 1회: CACTI 빌드 (자세한 가이드: docs/cacti-setup.md)
+git clone https://github.com/HewlettPackard/cacti third_party/cacti
+cd third_party/cacti && make -j4 && cd -
+
+# 1) example 을 복사해 내 칩에 맞게 편집
+cp hw_config.example.json hw_config.json
+
+# 2) 실행 — 워크로드 플래그(--M/--K/--N/--act)만 추가로 주면 됨
 python mxp_scheduler.py --config hw_config.json --M 128 --K 128 --N 128 --act 8
 ```
+
+### config 키
+
+```json
+{
+  "sram":          {"bank_size": 1024, "banks": 32, "word_bits": 32, "tech_nm": 22},
+  "dram":          "LPDDR5-6400_x16",
+  "chip_freq_mhz": 250.0,
+  "coeffs":        {"rmw": 5.0},
+  "cacti_bin":     "../third_party/cacti/cacti"
+}
+```
+
+| 키 | 필수 | 의미 |
+|---|---|---|
+| `sram.bank_size` / `sram.banks` | ✔ | 뱅크당 워드 수 / 뱅크 개수 |
+| `sram.word_bits` / `sram.tech_nm` | — | 워드 폭 (기본 32) / CACTI 공정 노드 nm (기본 22) |
+| `dram` | ✔ | `dram_presets.json` 의 키 — LPDDR5-6400_x16, LPDDR5X-8533_x16, DDR4-3200_x64, DDR5-4800_x64 |
+| `chip_freq_mhz` | ✔ | on-chip 클럭 (timing closure 가 정하는 값이라 사용자 명시; CACTI 의 SRAM 최대 주파수보다 높으면 경고만 내고 진행) |
+| `coeffs` | — | 부분 오버라이드 — 적은 키만 자동 도출값/기본값 위에 덮임 |
+| `cacti_bin` | — | CACTI 실행 파일 경로. 생략/불일치 시 `CACTI_BIN` 환경변수 → PATH 순으로 탐색 |
+
+오타·미지의 키는 전부 즉시 에러 (조용한 기본값 fallback 없음). config 우선순위는
+**명시 CLI 플래그 > config 도출값 > 내장 기본값**, `--coeffs` 파일은 항상 최종 승리.
+
+### 알아둘 것
 
 - `dram` 은 `dram_presets.json` 의 키와 정확히 일치해야 한다 (불일치 시 사용 가능 목록을
   에러로 보여줌). 프리셋은 JSON 이라 자유롭게 추가 가능 — `pj_per_bit` 는 출처(`source`)와
@@ -162,9 +203,8 @@ python mxp_scheduler.py --config hw_config.json --M 128 --K 128 --N 128 --act 8
 - example 의 `cacti_bin` (`../third_party/cacti/cacti`) 은 `docs/cacti-setup.md` 대로
   third_party 에 빌드했을 때 MXP_scheduler 디렉토리 기준 상대경로다. 경로가 다르면 수정하거나
   `CACTI_BIN` 환경변수를 쓰면 된다 (config `cacti_bin` 이 파일이 아니면 env/PATH 로 fall-through).
-- `coeffs` 는 부분 오버라이드: 적은 키만 자동 도출값/기본값 위에 덮인다. mac/rmw 계수는
-  자동 도출 범위 밖(로직 에너지)이라 기본값 유지 — 매핑-상수항이라 랭킹에는 영향 없음.
-  실측값이 생기면 여기로 주입.
+- mac/rmw 계수는 자동 도출 범위 밖(로직 에너지)이라 기본값 유지 — 매핑-상수항이라 랭킹에는
+  영향 없음. 합성/실측값이 생기면 config `coeffs` 로 주입.
 - 프리셋 pj_per_bit 의 기준 주의: LPDDR 계열은 device-internal, DDR 계열은 off-chip I/O
   포함 기준이라 절대값을 계열 간 직접 비교하지 말 것 (한 칩 안에서의 매핑 랭킹에는 무관).
   근거는 각 항목 `source` 참조.
