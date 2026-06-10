@@ -220,11 +220,14 @@ def cacti_run(bank_bytes, word_bits, tech_nm, cacti_bin=None, cache_path=DEFAULT
     return _cached(_cache_key(bank_bytes, word_bits, tech_nm), cache_path, compute)
 
 
+# 의도된 중복: mxp_scheduler.DEFAULT_COEFFS 와 값이 항상 같아야 함
+# (hwconfig 는 모델을 import 하지 않음; test_default_coeffs_match_twin 이 일치를 잠근다)
 DEFAULT_COEFFS = {"dram": 200.0, "onchip": 6.0, "mac": 1.0, "rmw": 5.0}
 
 
 def resolve(cfg, runner=cacti_run, presets_path=DEFAULT_PRESETS, cache_path=DEFAULT_CACHE):
     """검증된 config dict -> HW(...) kwargs.
+    load_config 를 거친 dict 를 가정 (word_bits/tech_nm/coeffs 기본값이 채워져 있어야 함).
     coeffs 합성: DEFAULT -> 자동 도출(dram=프리셋 pJ/bit, onchip=CACTI pJ/bit) -> config coeffs."""
     sram, chip = cfg["sram"], cfg["chip_freq_mhz"]
     d = dram_params(cfg["dram"], presets_path)
@@ -233,7 +236,7 @@ def resolve(cfg, runner=cacti_run, presets_path=DEFAULT_PRESETS, cache_path=DEFA
                cacti_bin=cfg.get("cacti_bin"), cache_path=cache_path)
     if chip > c["sram_max_freq_mhz"]:
         print(f"warning: chip_freq {chip} MHz > CACTI SRAM max "
-              f"{c['sram_max_freq_mhz']:.0f} MHz — timing closure will decide", file=sys.stderr)
+              f"{c['sram_max_freq_mhz']:.0f} MHz — advisory; lower chip_freq_mhz if unexpected (timing closure decides)", file=sys.stderr)
     coeffs = dict(DEFAULT_COEFFS)
     coeffs["dram"] = d["pj_per_bit"]
     coeffs["onchip"] = c["onchip_pj_per_bit"]
