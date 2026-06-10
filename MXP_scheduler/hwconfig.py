@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 _HERE = Path(__file__).parent
@@ -217,3 +218,26 @@ def cacti_run(bank_bytes, word_bits, tech_nm, cacti_bin=None, cache_path=DEFAULT
                                + r.stdout + "\n--- stderr ---\n" + r.stderr)
                 raise ValueError(f"CACTI failed (exit {r.returncode}); full output saved to {out}")
     return _cached(_cache_key(bank_bytes, word_bits, tech_nm), cache_path, compute)
+
+
+DEFAULT_COEFFS = {"dram": 200.0, "onchip": 6.0, "mac": 1.0, "rmw": 5.0}
+
+
+def resolve(cfg, runner=cacti_run, presets_path=DEFAULT_PRESETS, cache_path=DEFAULT_CACHE):
+    """검증된 config dict -> HW(...) kwargs.
+    coeffs 합성: DEFAULT -> 자동 도출(dram=프리셋 pJ/bit, onchip=CACTI pJ/bit) -> config coeffs."""
+    sram, chip = cfg["sram"], cfg["chip_freq_mhz"]
+    d = dram_params(cfg["dram"], presets_path)
+    bank_bytes = sram["bank_size"] * sram["word_bits"] // 8
+    c = runner(bank_bytes, sram["word_bits"], sram["tech_nm"],
+               cacti_bin=cfg.get("cacti_bin"), cache_path=cache_path)
+    if chip > c["sram_max_freq_mhz"]:
+        print(f"warning: chip_freq {chip} MHz > CACTI SRAM max "
+              f"{c['sram_max_freq_mhz']:.0f} MHz — timing closure will decide", file=sys.stderr)
+    coeffs = dict(DEFAULT_COEFFS)
+    coeffs["dram"] = d["pj_per_bit"]
+    coeffs["onchip"] = c["onchip_pj_per_bit"]
+    coeffs.update(cfg["coeffs"])
+    return {"bank_size": sram["bank_size"], "banks": sram["banks"],
+            "word_bits": sram["word_bits"], "dram_bw": float(d["dram_bw"]),
+            "freq_ratio": chip / d["dram_freq_mhz"], "coeffs": coeffs}
