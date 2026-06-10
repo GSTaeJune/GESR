@@ -51,6 +51,7 @@ References/
 # CACTI 7 (cloned + built locally; see docs/cacti-setup.md)
 third_party/cacti/
 MXP_scheduler/.cacti_cache.json
+MXP_scheduler/cacti_last_failure.log
 
 # Editor / OS
 .vscode/
