@@ -531,10 +531,11 @@ def main(argv=None):
     p.add_argument("--explain", action="store_true",
                    help="optimize 의 최적 매핑(없으면 첫 매핑)에 대해 단계별 중간값 인쇄")
     p.add_argument("--M", type=int); p.add_argument("--K", type=int); p.add_argument("--N", type=int)
-    p.add_argument("--bank-size", type=int, default=1024)
-    p.add_argument("--banks", type=int, default=32)
-    p.add_argument("--dram-bw", type=float, default=64.0, help="bits per DRAM cycle")
-    p.add_argument("--freq-ratio", type=float, default=1.0,
+    p.add_argument("--config", help="hw_config.json — physical HW description (see hwconfig.py)")
+    p.add_argument("--bank-size", type=int, default=None)
+    p.add_argument("--banks", type=int, default=None)
+    p.add_argument("--dram-bw", type=float, default=None, help="bits per DRAM cycle")
+    p.add_argument("--freq-ratio", type=float, default=None,
                    help="on-chip cycles per DRAM cycle (f_chip/f_dram); 1.0 = same clock")
     p.add_argument("--act", type=int, default=8)
     p.add_argument("--bits-file", help="JSON MT x KT avg-weight-bits; default all=act")
@@ -544,18 +545,37 @@ def main(argv=None):
     if not (a.M and a.K and a.N):
         p.error("provide --M --K --N")
     MT, KT = a.M // TILE, a.K // TILE
-    coeffs = dict(DEFAULT_COEFFS)
+    # --coeffs 파일은 마지막에 항상 최종 승리 — 일단 따로 읽어두고 아래에서 가장 마지막에 덮어쓴다.
+    coeffs_file = {}
     if a.coeffs:
         import json
         with open(a.coeffs) as f:
-            coeffs.update(json.load(f))
+            coeffs_file = json.load(f)
     # Work/HW 는 잘못된 입력(32 비배수 차원, 범위 밖 wbits, coeff 키 오타 등)에 ValueError 를
-    # 던진다 — traceback 대신 깔끔한 CLI 에러로 노출.
+    # 던진다 — traceback 대신 깔끔한 CLI 에러로 노출. config 로드/도출도 ValueError 를 던질 수 있어
+    # 같은 try 안에서 처리.
     try:
+        # --config 가 주어지면 물리 스펙(hw_config.json)에서 HW 파라미터를 자동 도출 (hwconfig.resolve).
+        cfg_kw = None
+        if a.config:
+            import hwconfig
+            cfg_kw = hwconfig.resolve(hwconfig.load_config(a.config))
+        # 우선순위: 명시 CLI 플래그 > config 도출값 > 내장 기본값 (spec §7)
+        def pick(cli_val, key, builtin):
+            if cli_val is not None:
+                return cli_val
+            return cfg_kw[key] if cfg_kw is not None else builtin
+        # coeffs 합성도 동일 우선순위: config 도출 coeffs(없으면 DEFAULT) 위에 --coeffs 파일이 최종 승리.
+        coeffs = dict(cfg_kw["coeffs"]) if cfg_kw is not None else dict(DEFAULT_COEFFS)
+        coeffs.update(coeffs_file)                      # --coeffs 파일은 항상 최종 승리
         wbits = _load_wbits(a.bits_file, MT, KT) if a.bits_file else [[a.act] * KT for _ in range(MT)]
         w = Work(M=a.M, K=a.K, N=a.N, wbits=wbits, act_bits=a.act)
-        hw = HW(bank_size=a.bank_size, banks=a.banks, dram_bw=a.dram_bw,
-                freq_ratio=a.freq_ratio, coeffs=coeffs)
+        hw = HW(bank_size=pick(a.bank_size, "bank_size", 1024),
+                banks=pick(a.banks, "banks", 32),
+                dram_bw=pick(a.dram_bw, "dram_bw", 64.0),
+                word_bits=cfg_kw["word_bits"] if cfg_kw is not None else 32,
+                freq_ratio=pick(a.freq_ratio, "freq_ratio", 1.0),
+                coeffs=coeffs)
     except ValueError as e:
         p.error(str(e))
     ranked = optimize(w, hw, max_cycle=a.max_cycle)

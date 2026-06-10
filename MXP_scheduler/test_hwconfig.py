@@ -162,3 +162,56 @@ def test_resolve_valid_for_HW(tmp_path):
     import mxp_scheduler as s
     hw = s.HW(**_resolve(tmp_path))                # kwargs must construct a valid HW
     assert hw.cap_bits == 1024 * 32 * 32
+
+
+# --- Task 6: CLI integration ---
+import pathlib
+import subprocess as sp
+import sys as _sys
+
+HERE = pathlib.Path(__file__).parent
+
+
+def _run_cli(args, script="mxp_scheduler.py"):
+    return sp.run([_sys.executable, script] + args, cwd=HERE, capture_output=True, text=True)
+
+
+def _cfg_file(tmp_path):
+    # 실 CACTI 없이 CLI 를 테스트하기 위해 캐시를 미리 심는다 (cache key 는 4096b_32w_22nm)
+    cache = {"4096b_32w_22nm": {"onchip_pj_per_bit": 0.15, "sram_max_freq_mhz": 1000.0}}
+    (HERE / ".cacti_cache.json").write_text(json.dumps(cache))
+    return _write(tmp_path, "hw.json", GOOD)
+
+
+def test_cli_config_drives_hw(tmp_path):
+    r = _run_cli(["--config", _cfg_file(tmp_path), "--M", "64", "--K", "64", "--N", "64"])
+    assert r.returncode == 0, r.stderr
+    head = r.stdout.splitlines()[0]
+    assert "freq_ratio=0.078125" in head        # 250/3200 — config 가 실제로 적용됨
+
+
+def test_cli_explicit_flag_beats_config(tmp_path):
+    r = _run_cli(["--config", _cfg_file(tmp_path), "--M", "64", "--K", "64", "--N", "64",
+                  "--dram-bw", "8"])
+    assert r.returncode == 0, r.stderr
+    assert "dram_bw=8.0" in r.stdout.splitlines()[0]   # 명시 플래그 승리
+
+
+def test_cli_no_config_unchanged(tmp_path):
+    r = _run_cli(["--M", "64", "--K", "64", "--N", "64"])
+    assert r.returncode == 0, r.stderr
+    head = r.stdout.splitlines()[0]
+    assert "dram_bw=64.0" in head and "freq_ratio=1.0" in head   # 기존 기본값 그대로
+
+
+def test_cli_annotated_config_same_result(tmp_path):
+    cfgp = _cfg_file(tmp_path)
+    r1 = _run_cli(["--config", cfgp, "--M", "64", "--K", "64", "--N", "64"])
+    r2 = _run_cli(["--config", cfgp, "--M", "64", "--K", "64", "--N", "64"],
+                  script="mxp_scheduler_annotated.py")
+    assert r1.stdout == r2.stdout               # 트윈 동일 출력
+
+
+def test_default_coeffs_match_twin():
+    import mxp_scheduler as s
+    assert hwconfig.DEFAULT_COEFFS == s.DEFAULT_COEFFS
