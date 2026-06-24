@@ -1,4 +1,5 @@
 # MXP_scheduler/test_eval_sched.py
+import itertools
 import pytest
 import mxp_scheduler as s
 import eval_sched as es
@@ -217,3 +218,38 @@ def test_cycles_per_bit_scales_stall_hide_budget():
     r8 = es.eval_sched(w, fast, cubes, ev)
     assert r1["steady_stall"] > 0          # at cpb=1 the per-cube A+W fetch is NOT fully hidden
     assert r8["steady_stall"] == 0         # 8x compute hides every fetch (consistent scaling)
+
+
+@pytest.mark.parametrize("M,K,N,wb,act", [
+    (64, 64, 64, [[8, 8], [8, 8]], 8),
+    (64, 64, 64, [[2, 8], [4, 6]], 8),
+    (96, 64, 32, [[2, 4], [8, 2], [6, 6]], 4),   # MT=3,KT=2,NT=1
+])
+def test_all_resident_parity_sweep(M, K, N, wb, act):
+    # When the full footprint fits, the fully-resident schedule's total DRAM bits
+    # (read + spill + final) equals the closed-form single-block dram total.
+    w = s.Work(M=M, K=K, N=N, wbits=wb, act_bits=act)
+    hw = s.HW(bank_size=4096, banks=32, dram_bw=32)   # big cap so everything is resident
+    cubes = es.all_cubes(w)
+    r = es.eval_sched(w, hw, cubes, [frozenset()] * len(cubes))
+    assert r["capacity_feasible"] is True
+    total_dram = r["dram_read_bits"] + r["dram_spill_bits"] + r["dram_final_bits"]
+    # closed-form single-block mapping: every dim fully resident (m_in=MT,k_in=KT,n_in=NT)
+    m = s.Mapping(perm=("M", "K", "N"), m_in=w.MT, k_in=w.KT, n_in=w.NT)
+    assert s.feasible(m, w, hw)                       # confirm closed-form agrees it fits
+    assert total_dram == s.dram_bits(m, w)["total"]
+
+
+def test_inner_blocked_evaluator_le_closed_form_upper_bound():
+    # Spec §1.4/§8: the closed-form C-spill model is an all-or-nothing UPPER bound for
+    # inner-blocked mappings. A real schedule that follows the SAME loop order (via
+    # warmstart.mapping_to_schedule) must have total DRAM bits <= the closed-form total.
+    import warmstart as ws
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)   # MT=KT=NT=2
+    # K-outer, N inner -> genuine psum spill in closed-form (selftest G2 style)
+    m = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=1)
+    hw = s.HW(bank_size=4096, banks=32, dram_bw=10 ** 12)             # big cap (no extra eviction)
+    order, evictions = ws.mapping_to_schedule(m, w, hw)
+    r = es.eval_sched(w, hw, order, evictions)
+    total_dram = r["dram_read_bits"] + r["dram_spill_bits"] + r["dram_final_bits"]
+    assert total_dram <= s.dram_bits(m, w)["total"] + 1e-9            # evaluator <= closed-form bound
