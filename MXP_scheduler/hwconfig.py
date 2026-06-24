@@ -61,7 +61,7 @@ def dram_params(name, presets_path=DEFAULT_PRESETS):
         raise ValueError(f"unknown DRAM {name!r}; available: {sorted(presets)}")
     p = presets[name]
     if not p.get("pj_per_bit"):
-        raise ValueError(f"preset {name!r} has no pj_per_bit — fill it with a sourced value "
+        raise ValueError(f"preset {name!r} has no pj_per_bit - fill it with a sourced value "
                          f"(source field) in {presets_path}")
     return {"dram_bw": 2 * p["bus_bits"],
             "dram_freq_mhz": p["data_rate_mts"] / 2.0,
@@ -241,7 +241,7 @@ def resolve(cfg, runner=cacti_run, presets_path=DEFAULT_PRESETS, cache_path=DEFA
                cacti_bin=cfg.get("cacti_bin"), cache_path=cache_path)
     if chip > c["sram_max_freq_mhz"]:
         print(f"warning: chip_freq {chip} MHz > CACTI SRAM max "
-              f"{c['sram_max_freq_mhz']:.0f} MHz — advisory; lower chip_freq_mhz if unexpected (timing closure decides)", file=sys.stderr)
+              f"{c['sram_max_freq_mhz']:.0f} MHz - advisory; lower chip_freq_mhz if unexpected (timing closure decides)", file=sys.stderr)
     coeffs = dict(DEFAULT_COEFFS)
     coeffs["dram"] = d["pj_per_bit"]
     coeffs["onchip"] = c["onchip_pj_per_bit"]
