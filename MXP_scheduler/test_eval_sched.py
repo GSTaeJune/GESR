@@ -40,3 +40,96 @@ def test_cube_compute_value():
     hw = s.HW(bank_size=1024, banks=32, dram_bw=32, cycles_per_bit=2.0)
     # cube (mt=0,kt=1,nt=0): cycles_per_bit * TILE * wbits[0][1] = 2.0 * 32 * 8 = 512
     assert es.cube_compute((0, 1, 0), w, hw) == 2.0 * 32 * 8
+
+
+def _state0():
+    return es.SchedState(done=frozenset(), resident=frozenset(), last_compute=-1.0)
+
+
+def test_apply_cube_first_cube_loads_a_w_and_zero_inits_c():
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 2], [2, 2]], act_bits=2)  # MT=2,KT=2,NT=1
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    c = (0, 0, 0)
+    ns, read, spill, unhidden, cap_ok = es.apply_cube(_state0(), c, frozenset(), w, hw)
+    a_sz = s.TILE * s.TILE * 2     # 2048
+    w_sz = 2 * s.TILE * s.TILE     # 2048
+    assert read == a_sz + w_sz     # C is zero-init (counter 0) -> free
+    assert spill == 0.0
+    assert cap_ok is True
+    assert ns.last_compute == es.cube_compute(c, w, hw)
+    assert (es.a_tile(c) in ns.resident and es.w_tile(c) in ns.resident
+            and es.c_tile(c) in ns.resident)        # C occupies space even though load was free
+    # first cube: unhidden == fill == (read+spill)/eff_bw
+    assert unhidden == (read + spill) / hw.eff_bw
+
+
+def test_apply_cube_evicting_partial_c_charges_spill():
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 2], [2, 2]], act_bits=2)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    # state: C(0,0) resident with counter 1 (cube (0,0,0) already done), about to run (1,0,0)
+    st = es.SchedState(done=frozenset({(0, 0, 0)}),
+                       resident=frozenset({("A", 0, 0), ("W", 0, 0), ("C", 0, 0)}),
+                       last_compute=es.cube_compute((0, 0, 0), w, hw))
+    c = (1, 0, 0)  # needs A(0,0)[resident], W(1,0)[new], C(1,0)[new zero-init]
+    ns, read, spill, unhidden, cap_ok = es.apply_cube(st, c, frozenset({("C", 0, 0)}), w, hw)
+    c_sz = s.TILE * s.TILE * s.FP32_BITS   # 32768
+    assert spill == c_sz                   # C(0,0) counter 1, 0<1<KT=2 -> partial spill
+    assert read == 2 * s.TILE * s.TILE     # only W(1,0); A resident, C(1,0) zero-init free
+    assert ("C", 0, 0) not in ns.resident
+
+
+def test_apply_cube_reload_of_spilled_c_is_charged():
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 2], [2, 2]], act_bits=2)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    # C(0,0) counter 1 but NOT resident (was spilled). Re-running a cube into it reloads.
+    st = es.SchedState(done=frozenset({(0, 0, 0)}),
+                       resident=frozenset({("A", 1, 0), ("W", 0, 1)}),
+                       last_compute=10.0 ** 9)   # huge -> nothing stalls
+    c = (0, 1, 0)  # needs A(1,0)[resident], W(0,1)[resident], C(0,0)[counter 1 -> reload]
+    ns, read, spill, unhidden, cap_ok = es.apply_cube(st, c, frozenset(), w, hw)
+    c_sz = s.TILE * s.TILE * s.FP32_BITS
+    assert read == c_sz            # only the C reload
+    assert spill == 0.0
+    assert unhidden == 0.0         # transfer fully hidden by the huge prev compute
+
+
+def test_apply_cube_capacity_violation_flagged():
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 2], [2, 2]], act_bits=2)
+    # cap smaller than a single cube's working set (A+W+C = 2048+2048+32768 = 36864)
+    hw = s.HW(bank_size=1, banks=1, dram_bw=32, word_bits=32)   # cap_bits = 32
+    ns, read, spill, unhidden, cap_ok = es.apply_cube(_state0(), (0, 0, 0), frozenset(), w, hw)
+    assert cap_ok is False
+
+
+def test_eviction_choices_includes_empty_when_fits():
+    # cube fits with no eviction -> empty set is among the choices (and, since deficit<=0,
+    # so is every subset of evictable -> voluntary eviction is offered).
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 2], [2, 2]], act_bits=2)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)   # big cap
+    st = es.SchedState(done=frozenset({(0, 0, 0)}),
+                       resident=frozenset({("A", 0, 0), ("W", 0, 0), ("C", 0, 0)}),
+                       last_compute=1.0)
+    choices = set(es.eviction_choices(st, (1, 0, 0), w, hw))
+    assert frozenset() in choices
+    # evictable = resident - needed(cube (1,0,0)=A(0,0),W(1,0),C(1,0)) = {W(0,0), C(0,0)}
+    # all 4 subsets are capacity-feasible (big cap)
+    assert frozenset({("W", 0, 0)}) in choices
+    assert frozenset({("C", 0, 0)}) in choices
+    assert len(choices) == 4
+
+
+def test_eviction_choices_excludes_insufficient_subsets_when_tight():
+    # cap holds exactly one cube working set (36864). Running a 2nd cube that needs a fresh
+    # C tile forces evicting enough; subsets that DON'T free enough must NOT be offered.
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 2], [2, 2]], act_bits=2)
+    hw = s.HW(bank_size=36, banks=32, dram_bw=32, word_bits=32)   # cap_bits = 36*32*32 = 36864
+    st = es.SchedState(done=frozenset({(0, 0, 0)}),
+                       resident=frozenset({("A", 0, 0), ("W", 0, 0), ("C", 0, 0)}),
+                       last_compute=1.0)
+    # cube (1,0,0) needs A(0,0)[resident], W(1,0)[+2048], C(1,0)[+32768]. After load w/o evict:
+    # 2048+2048+32768 + 2048 + 32768 = 71680 > 36864 -> deficit = 34816.
+    # evictable = {W(0,0)=2048, C(0,0)=32768}. Only subsets freeing >= 34816 qualify:
+    #   {W(0,0),C(0,0)} frees 34816 (==deficit) -> OK; {C(0,0)} frees 32768 < deficit -> NO;
+    #   {W(0,0)} frees 2048 -> NO; {} -> NO.
+    choices = set(es.eviction_choices(st, (1, 0, 0), w, hw))
+    assert choices == {frozenset({("W", 0, 0), ("C", 0, 0)})}
