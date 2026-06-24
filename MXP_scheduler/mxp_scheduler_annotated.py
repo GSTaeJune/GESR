@@ -319,11 +319,10 @@ def _double_buffered(m, w, hw, blocks=None):
 
 
 def _stall_of_order(blocks, bw, double_buffered=True):
-    """주어진 블록 ORDER 의 총 stall. 대역폭 bw 의 단일 DRAM 채널을 모든 트래픽이 공유:
-    입력 fetch(A,W reload) + C psum reload-read + C psum spill-write.
-    각 블록의 compute 창이 그 주변 전송을 hide 한다 — 다음 블록의 입력+C reload(연산 전에
-    도착해야 함) PLUS 이전 블록의 C spill-write(연산 후 drain). hide 못 한 전송시간이 stall.
-    마지막 블록의 C write 는 뒤따르는 compute 가 없어 hide 불가 → trailing drain(항상 가산).
+    """주어진 블록 ORDER 의 (steady_stall, drain) 반환. steady_stall = 주변 compute 로 hide
+    되지 못한 mid-stream 전송시간 (stall=0 스케줄이 0 으로 몰아야 하는 부분). drain = 마지막
+    타일의 C write — 뒤따르는 compute 가 없어 hide 불가(항상 불가피). 둘을 분리해야
+    steady_stall==0 feasibility gate 를 표현할 수 있다.
 
     A 는 (K,N) 변경 시 reload, W 는 (M,K) 변경 시. C 는 spill 후 (M,N) 타일 재진입 시 reload,
     (M,N) 타일을 떠날 때(매 episode 끝, 최종 write 포함) spill. (입력만 보던 spec §8 stall 을
@@ -332,11 +331,11 @@ def _stall_of_order(blocks, bw, double_buffered=True):
     (compute 가 hide 하지 못함)."""
     n = len(blocks)
     if n == 0:
-        return 0.0
+        return 0.0, 0.0
     seen = set()              # 지금까지 접촉한 (M,N) 타일 집합 (재진입 = spill reload 판정)
     prev = None               # 직전 블록 idx
     prev_compute = 0.0        # 직전 블록 compute 사이클 (이번 전송을 hide 함)
-    total = 0.0
+    steady = 0.0              # hide 못 한 mid-stream 전송시간 누적 (= steady_stall)
     for idx, compute_blk, a_blk, w_blk, c_blk in blocks:
         mn = (idx["M"], idx["N"])
         if prev is not None:
@@ -352,33 +351,33 @@ def _stall_of_order(blocks, bw, double_buffered=True):
                     fetch += c_blk                          # spill 된 C 타일 재진입 → reload read
             # 더블버퍼 가능하면 직전 compute 로 hide, 불가하면 hide=0 (fully exposed).
             hide = prev_compute if double_buffered else 0.0
-            # 전송시간(fetch/bw)에서 hide 한 만큼 빼고 남는 게 stall (음수면 0).
-            total += max(0.0, fetch / bw - hide)
+            # 전송시간(fetch/bw)에서 hide 한 만큼 빼고 남는 게 steady_stall (음수면 0).
+            steady += max(0.0, fetch / bw - hide)
         seen.add(mn)
         prev = idx
         prev_compute = compute_blk
-    total += blocks[-1][4] / bw                             # 마지막 타일의 trailing C drain (c_blk/bw)
-    return total
+    drain = blocks[-1][4] / bw                              # 마지막 타일의 trailing C drain (c_blk/bw)
+    return steady, drain
 
 
 def stall_fill(m, w, hw, blocks=None):
-    """외부 반복 블록에 대한 sequence-aware stall. DRAM 대역폭은 A/W 입력 fetch 와 C psum
-    spill/reload 가 공유(_stall_of_order 참조). fill = 첫 블록의 입력 fetch 시간(hide 불가
-    startup); stall = 나머지(블록별 hide 안 된 전송 + trailing C drain). prefetch 여유가
-    없으면(_double_buffered 참조) fetch 가 fully exposed 된다 (spec §8).
+    """(fill, steady_stall, drain) 반환. fill = 첫 블록의 입력 fetch 시간(hide 불가 startup).
+    steady_stall = mid-stream 의 hide 안 된 전송 (stall=0 타깃). drain = trailing C write.
+    prefetch 여유가 없으면(_double_buffered 참조) fetch 가 fully exposed 된다 (spec §8).
     blocks: 미리 계산한 list(_blocks(m, w))."""
     if blocks is None:
         blocks = list(_blocks(m, w))
     bw = hw.eff_bw                                          # on-chip 사이클 기준 DRAM 대역폭
     _, _, a0, w0, _c0 = blocks[0]
     fill = (a0 + w0) / bw                                   # 첫 블록 C read 는 0 (첫 접촉)
-    return _stall_of_order(blocks, bw, _double_buffered(m, w, hw, blocks)), fill
+    steady, drain = _stall_of_order(blocks, bw, _double_buffered(m, w, hw, blocks))
+    return fill, steady, drain
 
 
 def actual_cycle(m, w, hw):
-    # 실제 사이클 = 이상적 compute_work + 시작 fill + 가려지지 않은 stall.
-    stall, fill = stall_fill(m, w, hw)
-    return float(compute_work(w)) + fill + stall
+    # 실제 사이클 = 이상적 compute_work + 시작 fill + mid-stream steady_stall + trailing drain.
+    fill, steady, drain = stall_fill(m, w, hw)
+    return float(compute_work(w)) + fill + steady + drain
 
 
 def evaluate(m, w, hw):
@@ -390,7 +389,7 @@ def evaluate(m, w, hw):
     d = dram_bits(m, w, blocks)
     feas = footprint_bits(m, w, blocks) <= hw.cap_bits
     eb = energy_breakdown(m, w, hw, d)
-    stall, fill = stall_fill(m, w, hw, blocks)
+    fill, steady, drain = stall_fill(m, w, hw, blocks)
     cw = compute_work(w)
     return {
         "mapping": m,
@@ -399,9 +398,11 @@ def evaluate(m, w, hw):
         "energy_breakdown": eb,
         "dram": d,
         "compute_work": cw,
-        "stall": stall,
         "fill": fill,
-        "actual_cycle": float(cw) + fill + stall,
+        "steady_stall": steady,
+        "drain": drain,
+        "stall": steady + drain,          # 하위호환: steady+drain 합산값
+        "actual_cycle": float(cw) + fill + steady + drain,
     }
 
 
@@ -427,8 +428,8 @@ def lpt_headroom(m, w, hw):
     재정렬이 C residency 를 교란) → headroom 이 <= 0 일 수도 있음."""
     blocks = list(_blocks(m, w))
     db = _double_buffered(m, w, hw, blocks)
-    natural = _stall_of_order(blocks, hw.eff_bw, db)
-    lpt = _stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.eff_bw, db)  # b[1] = compute_blk 내림차순
+    natural = sum(_stall_of_order(blocks, hw.eff_bw, db))                            # = steady+drain
+    lpt = sum(_stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.eff_bw, db))   # b[1]=compute_blk 내림차순
     return {"natural_stall": natural, "lpt_stall": lpt, "headroom": natural - lpt}
 
 
@@ -436,11 +437,13 @@ def report(ranked, w, hw, top=10):
     # 상위 top 매핑을 표 형태 텍스트로. CLI 출력용.
     lines = [f"# GEMM ({w.M}x{w.K}x{w.N})  cap_bits={hw.cap_bits}  dram_bw={hw.dram_bw}"
              f"  freq_ratio={hw.freq_ratio}  eff_bw={hw.eff_bw}",
-             f"{'perm':<10}{'m_in':>5}{'k_in':>5}{'n_in':>5}{'energy':>16}{'actual_cycle':>16}{'stall':>12}"]
+             f"{'perm':<10}{'m_in':>5}{'k_in':>5}{'n_in':>5}{'energy':>16}"
+             f"{'actual_cycle':>16}{'steady':>10}{'drain':>10}"]
     for r in ranked[:top]:
         m = r["mapping"]
         lines.append(f"{''.join(m.perm):<10}{m.m_in:>5}{m.k_in:>5}{m.n_in:>5}"
-                     f"{r['energy']:>16.0f}{r['actual_cycle']:>16.1f}{r['stall']:>12.1f}")
+                     f"{r['energy']:>16.0f}{r['actual_cycle']:>16.1f}"
+                     f"{r['steady_stall']:>10.1f}{r['drain']:>10.1f}")
     return "\n".join(lines)
 
 
@@ -505,7 +508,8 @@ def explain(m, w, hw):
           f"total={eb['total']}")
 
     # 사이클: fill + stall + compute = actual_cycle.
-    stall, fill = stall_fill(m, w, hw)
+    fill, steady, drain = stall_fill(m, w, hw)
+    stall = steady + drain
     print(f"stall / fill : stall={stall}  fill={fill}   (DRAM bw shared by A/W fetch + C spill/reload)")
     print(f"actual_cycle : {actual_cycle(m, w, hw)}  (= compute_work {cw} + fill {fill} + stall {stall})")
 

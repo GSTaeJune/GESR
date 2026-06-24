@@ -186,18 +186,16 @@ def test_energy_breakdown_g1():
 def test_stall_fill_g3():
     # G3: 2-bit weights -> tiny compute (256/block) but FP32 C psum dominates the DRAM stall.
     w = s.Work(M=64, K=64, N=64, wbits=[[2, 2], [2, 2]], act_bits=8)
-    # perm N outer, n_in=1 (N_out=2 -> 2 blocks, each a different (M,N) C tile); m_in=k_in=2; bw=32
     m = s.Mapping(perm=("N", "M", "K"), m_in=2, k_in=2, n_in=1)
     hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
-    stall, fill = s.stall_fill(m, w, hw)
-    # a_blk=2*1*1024*8=16384 ; w_blk=8*1024=8192 ; c_blk=2*1*1024*32=65536 ; compute=32*1*8=256
+    fill, steady, drain = s.stall_fill(m, w, hw)
     # fill = (a0+w0)/bw = (16384+8192)/32 = 768
-    # boundary 0->1: (M,N) tile changes -> A reload(16384) + C write of block0(65536); new tile so
-    #   no C read. demand=81920 ; stall0 = 81920/32 - 256 = 2560-256 = 2304
+    # boundary 0->1: A reload(16384)+C write(65536); demand=81920; steady = 81920/32 - 256 = 2304
     # trailing drain = c_blk(65536)/32 = 2048
     assert fill == 768.0
-    assert stall == 2304.0 + 2048.0   # 4352
-    # actual = compute_work + fill + stall = 512 + 768 + 4352 = 5632
+    assert steady == 2304.0
+    assert drain == 2048.0
+    # actual = compute_work + fill + steady + drain = 512 + 768 + 2304 + 2048 = 5632
     assert s.actual_cycle(m, w, hw) == 5632.0
 
 
@@ -205,8 +203,9 @@ def test_stall_zero_when_bw_huge():
     w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
     m = s.Mapping(perm=("M", "K", "N"), m_in=2, k_in=2, n_in=2)
     hw = s.HW(bank_size=1024, banks=32, dram_bw=10 ** 12)   # effectively infinite BW
-    stall, fill = s.stall_fill(m, w, hw)
-    assert stall < 1.0   # all transfers (incl. trailing C drain) / huge-bw ~ 0
+    fill, steady, drain = s.stall_fill(m, w, hw)
+    assert steady < 1.0
+    assert drain < 1.0
     assert fill < 1.0
 
 
@@ -405,13 +404,14 @@ def test_dram_and_stall_share_reload_basis():
 # --- C-in-stall: cycle model now charges C psum DRAM bandwidth too ---
 
 def test_stall_includes_c_drain():
-    # even a single all-resident block must drain its FP32 C psum to DRAM (no compute hides it)
+    # single all-resident block: no mid-stream stall, only the unavoidable trailing C drain
     w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
     m = s.Mapping(perm=("M", "K", "N"), m_in=2, k_in=2, n_in=2)   # single block
     hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
-    stall, _fill = s.stall_fill(m, w, hw)
-    c_blk = 2 * 2 * 1024 * 32          # m_in*n_in*TILE^2*FP32 = 131072
-    assert stall == c_blk / 32         # only the trailing C drain
+    fill, steady, drain = s.stall_fill(m, w, hw)
+    c_blk = 2 * 2 * 1024 * 32          # 131072
+    assert steady == 0.0               # one block -> no boundary -> no mid-stream stall
+    assert drain == c_blk / 32         # trailing C drain only (4096.0)
 
 
 def test_c_spill_raises_cycle():
@@ -452,10 +452,10 @@ def test_no_double_buffer_exposes_fetch():
     m = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=1)   # spills, 4 outer blocks
     db = s.HW(bank_size=1024, banks=32, dram_bw=32)               # cap huge -> double-buffers
     nodb = s.HW(bank_size=100, banks=32, dram_bw=32)              # cap=102400: fits 1x, no prefetch room
-    assert s.feasible(m, w, nodb)                                 # still feasible (footprint=90112 <= 102400)
-    s_db, _ = s.stall_fill(m, w, db)
-    s_no, _ = s.stall_fill(m, w, nodb)
-    assert s_no > s_db                                            # no overlap -> strictly more stall
+    assert s.feasible(m, w, nodb)                                # still feasible (footprint=90112 <= 102400)
+    _f1, steady_db, _d1 = s.stall_fill(m, w, db)
+    _f2, steady_no, _d2 = s.stall_fill(m, w, nodb)
+    assert steady_no > steady_db                                 # no overlap -> strictly more mid-stream stall
 
 
 def test_selftest_passes():
@@ -493,8 +493,9 @@ def test_freq_ratio_scales_dram_time():
     m = s.Mapping(perm=("K", "M", "N"), m_in=2, k_in=1, n_in=1)   # spills -> nonzero stall
     base = s.HW(bank_size=1024, banks=32, dram_bw=32)                  # freq_ratio default 1.0
     slow = s.HW(bank_size=1024, banks=32, dram_bw=32, freq_ratio=2.0)  # DRAM 2x slower vs chip
-    sb, fb = s.stall_fill(m, w, base)
-    ss, fs = s.stall_fill(m, w, slow)
+    fb, steady_b, drain_b = s.stall_fill(m, w, base)
+    fs, steady_s, drain_s = s.stall_fill(m, w, slow)
+    sb, ss = steady_b + drain_b, steady_s + drain_s
     assert fs == pytest.approx(2 * fb)               # fill is pure DRAM transfer -> exactly 2x
     assert ss > sb                                   # more un-hidden DRAM time -> more stall
     # compute term is freq-independent: actual_cycle minus the DRAM (fill+stall) part is equal
@@ -607,5 +608,19 @@ def test_evaluate_shared_walk_matches_public_functions():
         assert r["feasible"] == s.feasible(m, w, hw)
         assert r["dram"] == s.dram_bits(m, w)
         assert r["energy_breakdown"] == s.energy_breakdown(m, w, hw)
-        stall, fill = s.stall_fill(m, w, hw)
-        assert (r["stall"], r["fill"]) == (stall, fill)
+        fill, steady, drain = s.stall_fill(m, w, hw)
+        assert (r["fill"], r["steady_stall"], r["drain"]) == (fill, steady, drain)
+        assert r["stall"] == steady + drain
+
+
+def test_evaluate_exposes_steady_stall_and_drain():
+    w = s.Work(M=64, K=64, N=64, wbits=[[2, 2], [2, 2]], act_bits=8)
+    m = s.Mapping(perm=("N", "M", "K"), m_in=2, k_in=2, n_in=1)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    r = s.evaluate(m, w, hw)
+    assert r["steady_stall"] == 2304.0
+    assert r["drain"] == 2048.0
+    assert r["fill"] == 768.0
+    # back-compat: r["stall"] stays the combined steady+drain
+    assert r["stall"] == 2304.0 + 2048.0
+    assert r["actual_cycle"] == float(s.compute_work(w)) + 768.0 + 2304.0 + 2048.0

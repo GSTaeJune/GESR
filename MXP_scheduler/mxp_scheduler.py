@@ -284,64 +284,55 @@ def _double_buffered(m, w, hw, blocks=None):
 
 
 def _stall_of_order(blocks, bw, double_buffered=True):
-    """Total stall for a given block ORDER. One DRAM channel of bandwidth bw is shared by
-    ALL traffic: input fetch (A,W reloads), C psum reload-reads, and C psum spill-writes.
-    Each block's compute window hides the transfers around it -- the next block's inputs and
-    C reload (must arrive before it computes) PLUS the previous block's C spill-write (drains
-    after it computes). Leftover transfer time is stall. The last block's C write has no
-    following compute to hide it -> trailing drain (always added).
-
-    A reloads on (K,N) change, W on (M,K) change, C reloads when an (M,N) tile is re-entered
-    after a spill, C spills when an (M,N) tile is left (every episode-end, incl. the final
-    write). (Supersedes the inputs-only spec §8 stall: C psum bandwidth is now modeled.)
-    If double_buffered is False there is no room to prefetch, so each block's fetch is fully
-    exposed (compute cannot hide it)."""
+    """Return (steady_stall, drain) for a given block ORDER. steady_stall = mid-stream
+    transfer time not hidden by neighbouring compute (the part a stall=0 schedule must
+    drive to zero). drain = the last tile's C write, which has no following compute to hide
+    it (always unavoidable). Splitting them lets a steady_stall==0 feasibility gate exist."""
     n = len(blocks)
     if n == 0:
-        return 0.0
+        return 0.0, 0.0
     seen = set()
     prev = None
     prev_compute = 0.0
-    total = 0.0
+    steady = 0.0
     for idx, compute_blk, a_blk, w_blk, c_blk in blocks:
         mn = (idx["M"], idx["N"])
         if prev is not None:
             prev_mn = (prev["M"], prev["N"])
             fetch = 0.0
             if (idx["K"], idx["N"]) != (prev["K"], prev["N"]):
-                fetch += a_blk                              # A reloads (A indexed K,N)
+                fetch += a_blk
             if (idx["M"], idx["K"]) != (prev["M"], prev["K"]):
-                fetch += w_blk                              # W reloads (W indexed M,K)
+                fetch += w_blk
             if mn != prev_mn:
-                fetch += c_blk                              # prev block left its C tile -> spill drains
+                fetch += c_blk
                 if mn in seen:
-                    fetch += c_blk                          # re-entering a spilled C tile -> reload read
+                    fetch += c_blk
             hide = prev_compute if double_buffered else 0.0
-            total += max(0.0, fetch / bw - hide)
+            steady += max(0.0, fetch / bw - hide)
         seen.add(mn)
         prev = idx
         prev_compute = compute_blk
-    total += blocks[-1][4] / bw                             # trailing C drain of the last tile
-    return total
+    drain = blocks[-1][4] / bw
+    return steady, drain
 
 
 def stall_fill(m, w, hw, blocks=None):
-    """Sequence-aware stall over outer-iteration blocks. DRAM bandwidth is shared by A/W
-    input fetch AND C psum spill/reload (see _stall_of_order). fill = first block's input
-    fetch time (unhidable startup); stall = the rest (per-block un-hidden transfer + the
-    trailing C drain). When there's no prefetch headroom (see _double_buffered), fetches
-    are fully exposed (spec §8). blocks: optional precomputed list(_blocks(m, w))."""
+    """Return (fill, steady_stall, drain). fill = first block's input fetch (unhidable
+    startup). steady_stall = mid-stream un-hidden transfer (stall=0 target). drain =
+    trailing C write. blocks: optional precomputed list(_blocks(m, w))."""
     if blocks is None:
         blocks = list(_blocks(m, w))
-    bw = hw.eff_bw                                          # DRAM bw in on-chip cycle terms
+    bw = hw.eff_bw
     _, _, a0, w0, _c0 = blocks[0]
-    fill = (a0 + w0) / bw                                   # first-block C read is 0 (first touch)
-    return _stall_of_order(blocks, bw, _double_buffered(m, w, hw, blocks)), fill
+    fill = (a0 + w0) / bw
+    steady, drain = _stall_of_order(blocks, bw, _double_buffered(m, w, hw, blocks))
+    return fill, steady, drain
 
 
 def actual_cycle(m, w, hw):
-    stall, fill = stall_fill(m, w, hw)
-    return float(compute_work(w)) + fill + stall
+    fill, steady, drain = stall_fill(m, w, hw)
+    return float(compute_work(w)) + fill + steady + drain
 
 
 def evaluate(m, w, hw):
@@ -352,7 +343,7 @@ def evaluate(m, w, hw):
     d = dram_bits(m, w, blocks)
     feas = footprint_bits(m, w, blocks) <= hw.cap_bits
     eb = energy_breakdown(m, w, hw, d)
-    stall, fill = stall_fill(m, w, hw, blocks)
+    fill, steady, drain = stall_fill(m, w, hw, blocks)
     cw = compute_work(w)
     return {
         "mapping": m,
@@ -361,9 +352,11 @@ def evaluate(m, w, hw):
         "energy_breakdown": eb,
         "dram": d,
         "compute_work": cw,
-        "stall": stall,
         "fill": fill,
-        "actual_cycle": float(cw) + fill + stall,
+        "steady_stall": steady,
+        "drain": drain,
+        "stall": steady + drain,          # back-compat combined value
+        "actual_cycle": float(cw) + fill + steady + drain,
     }
 
 
@@ -385,25 +378,24 @@ def optimize(w, hw, max_cycle=None):
 
 
 def lpt_headroom(m, w, hw):
-    """Headroom indicator (spec §9.2): natural perm-order stall vs the stall if outer blocks
-    were reordered Longest-Processing-Time-first (descending block compute). Both stalls use
-    the full bandwidth model (A/W fetch + C psum spill/reload). LPT is NOT a drop-in optimum
-    here (tiles are reuse-coupled, and reordering perturbs C residency), so headroom may be <= 0."""
+    """Headroom indicator: natural perm-order stall vs LPT-reordered stall (both = steady+drain)."""
     blocks = list(_blocks(m, w))
     db = _double_buffered(m, w, hw, blocks)
-    natural = _stall_of_order(blocks, hw.eff_bw, db)
-    lpt = _stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.eff_bw, db)  # b[1] = compute_blk, desc
+    natural = sum(_stall_of_order(blocks, hw.eff_bw, db))
+    lpt = sum(_stall_of_order(sorted(blocks, key=lambda b: -b[1]), hw.eff_bw, db))  # b[1]=compute_blk desc
     return {"natural_stall": natural, "lpt_stall": lpt, "headroom": natural - lpt}
 
 
 def report(ranked, w, hw, top=10):
     lines = [f"# GEMM ({w.M}x{w.K}x{w.N})  cap_bits={hw.cap_bits}  dram_bw={hw.dram_bw}"
              f"  freq_ratio={hw.freq_ratio}  eff_bw={hw.eff_bw}",
-             f"{'perm':<10}{'m_in':>5}{'k_in':>5}{'n_in':>5}{'energy':>16}{'actual_cycle':>16}{'stall':>12}"]
+             f"{'perm':<10}{'m_in':>5}{'k_in':>5}{'n_in':>5}{'energy':>16}"
+             f"{'actual_cycle':>16}{'steady':>10}{'drain':>10}"]
     for r in ranked[:top]:
         m = r["mapping"]
         lines.append(f"{''.join(m.perm):<10}{m.m_in:>5}{m.k_in:>5}{m.n_in:>5}"
-                     f"{r['energy']:>16.0f}{r['actual_cycle']:>16.1f}{r['stall']:>12.1f}")
+                     f"{r['energy']:>16.0f}{r['actual_cycle']:>16.1f}"
+                     f"{r['steady_stall']:>10.1f}{r['drain']:>10.1f}")
     return "\n".join(lines)
 
 
@@ -422,7 +414,7 @@ def selftest():
     w3 = Work(M=64, K=64, N=64, wbits=[[2, 2], [2, 2]], act_bits=8)
     m3 = Mapping(perm=("N", "M", "K"), m_in=2, k_in=2, n_in=1)
     hw3 = HW(bank_size=1024, banks=32, dram_bw=32)
-    assert stall_fill(m3, w3, hw3) == (4352.0, 768.0)
+    assert stall_fill(m3, w3, hw3) == (768.0, 2304.0, 2048.0)   # (fill, steady, drain)
     assert actual_cycle(m3, w3, hw3) == 5632.0
     # Pareto / tradeoff sanity
     wt = Work(M=128, K=128, N=128, wbits=[[2, 8, 2, 8]] * 4, act_bits=8)
@@ -501,7 +493,7 @@ def crosscheck(verbose=False):
         for m_s in gen_mappings(w_s):
             m_a = ann.Mapping(perm=m_s.perm, m_in=m_s.m_in, k_in=m_s.k_in, n_in=m_s.n_in)
             r_s, r_a = evaluate(m_s, w_s, hw_s), ann.evaluate(m_a, w_a, hw_a)
-            for key in ("feasible", "energy", "actual_cycle", "stall", "fill"):
+            for key in ("feasible", "energy", "actual_cycle", "stall", "fill", "steady_stall", "drain"):
                 assert r_s[key] == r_a[key], f"mismatch {key}: {r_s[key]} != {r_a[key]} @ {m_s}"
             assert r_s["dram"] == r_a["dram"], f"mismatch dram @ {m_s}"
             assert r_s["energy_breakdown"] == r_a["energy_breakdown"], f"mismatch energy_breakdown @ {m_s}"
