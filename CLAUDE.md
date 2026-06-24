@@ -2,6 +2,33 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Next session kickoff (2026-06-24, **MXP_scheduler M1 — order+eviction joint exact 최적기 완료·main 병합**, RTL 무변, 미push)
+
+**진행 상태**: M1 구현 완료, **`main` 에 로컬 fast-forward 병합** (feature 브랜치 `feat/mxp-scheduler-m1` 삭제). RTL/closed-form 모델/twin 무변경. **`origin/main` 보다 앞섬 — 아직 push 안 함** (M0+M1 로컬만; push 는 명시 요청 시). 검증: `cd MXP_scheduler && python -m pytest -q` → **134 passed, 1 skip(CACTI)**, `--selftest`/`--crosscheck`/`astar.py --selftest` OK. 메모리: `project_scheduler_m1_landed`.
+
+### M1 = 정밀도-적응 잔류를 포함한 (실행순서 + eviction) joint **exact** 최적기
+spec `docs/superpowers/specs/2026-06-23-mxp-scheduler-precision-adaptive-design.md` (rev5) → plan `docs/superpowers/plans/2026-06-24-mxp-scheduler-m1.md` (2 라운드 멀티에이전트 검토 + verbatim 구현·실행으로 수렴) → subagent-driven 7-task 실행 → 최종 코드리뷰 2회 READY TO MERGE (Critical/Important 0). 신규 stdlib 모듈 4개 (twin 아님 — single-source):
+
+- `MXP_scheduler/eval_sched.py`: cube=(mt,kt,nt) 원자, tile 3종(A=(kt,nt)/W=(mt,kt)/C=(mt,nt)). **`apply_cube`** = 비용 단일 진실 (first-touch A/W 과금, zero-init C 무료(공간점유), counter>0 C 로드=reload, partial-C evict=spill, capacity/stall). **`eviction_choices`** = 전수 정확 move set(오라클·A* 공유). `eval_sched` = 한 스케줄 fold.
+- `MXP_scheduler/warmstart.py`: 구조적 mapping→스케줄(D6 floor 인큐번트) + `min_structural_steady_stall`(빈영역 진단).
+- `MXP_scheduler/oracle.py`: `dp_optimal(stall0=False)` 전순열×eviction DP — A* 와 **독립**(move set만 공유), 작은 T(≤6) 교차검증. `stall0=True` 로 유한BW 검증.
+- `MXP_scheduler/astar.py`: `optimize_exact` best-first joint. 상태=(done,resident,last_compute), admissible-not-consistent h+`best_g_to_state` 재확장, **stall=0 하드 prune**, heap key `(f,g,sig,seq)`(SchedState 비교 크래시 방지), **budget-hit→proven_optimal=False**, 빈영역=진단(silent inf 금지, CLI exit 1). 큰 T 는 증명 못 닫으면 honest gap.
+
+**핵심 의미값**: `energy = (read+spill)·(dram+onchip)` — **first-touch 로드 floor 포함**(all-resident energy ≠ 0). final C write 는 schedule-invariant 상수로 g/h 제외(argmin 무영향 exact 재정식화). A*==oracle 으로 정확성 검증(랜덤 sweep 0 불일치).
+
+**다음 후보**: ① 큰 T scale (last_compute≥/g≤ dominance, heuristic 강화) ② 실 워크로드 wbits 맵 연동 ③ A* 결과를 `mxp_scheduler` report/CLI 에 통합 ④ M0+M1 origin push 여부 결정.
+
+## Next session kickoff (2026-06-23, **DRAM 에너지 계수 full-system 확정** — MXP_scheduler, RTL/코드로직 무변, 미커밋)
+
+**진행 상태**: `dram_presets.json` 의 `pj_per_bit`(=`coeffs.dram`)를 **full-system 경계로 통일** 확정 (사용자 결정: 주력 LPDDR5/5X, 경계 full-system = device core+I/O+SoC PHY/controller+refresh). 직전 시드값은 LPDDR=device-internal vs DDR=I/O포함으로 경계 혼재였음 → 교체.
+
+- **확정값** (full-system pJ/b): LPDDR5-6400_x16=**9.0**, LPDDR5X-8533_x16=**7.5**, DDR4-3200_x64=20.0(secondary), DDR5-4800_x64=14.0(secondary).
+- **주 앵커(도표 직접 판독)**: Ha 2018 Stanford PhD Fig 4.8 — LPDDR4 device-incl-I/O+refresh ~12-13 pJ/b. 체인: x0.75 LPDDR5 세대이득 + ~2-2.5 SoC PHY/controller. LPDDR=I/O가 전체 ~10%뿐(DDR/GDDR과 반대).
+- **산출물**: `docs/dram-energy/README.md` (경계정의·도출체인·교차검증·DRAM선택 = source of truth) + `docs/dram-energy/refs/` (출처논문 6 PDF: Ha2018 앵커 + Fig4.8 크롭증거, OConnor2017/Chatterjee2017/Ghose2019/LPSpec2025). 기본 DRAM 권고 = **LPDDR5-6400_x16**.
+- **검증**: `cd MXP_scheduler && python -m pytest -q` → **80 passed, 1 skip(CACTI)** · selftest OK · crosscheck OK. 테스트가 pj_per_bit golden 안 박음(>0, !=200만) → 값 교체 무회귀.
+- **caveat**: 9.0/7.5는 die density·컨트롤러 포함분 따라 LPDDR5 ~8.5-12.5 중앙값. 합성/실측 pJ 나오면 config `coeffs.dram`로 덮어쓰기. 메모리: `project_scheduler_dram_energy_coeffs`.
+- **주의**: 이 변경 + `MXP_scheduler/explore_*.ipynb` 2개는 **미커밋**(git untracked/modified). 커밋 원하면 다음 세션에.
+
 ## Next session kickoff (2026-06-10, **MXP_scheduler 리뷰픽스 + hwconfig 구현·머지** — PR #2, main `d21e9ba`)
 
 **진행 상태**: 이번 세션은 전부 `MXP_scheduler/` (RTL 무변). ① 코드리뷰→수정 (`ec194ec`): coeffs 오타키 거부, `evaluate()` 블록 walk 6→1회 공유, CLI 친절 에러, report 헤더 freq_ratio/eff_bw, 테스트 55→58. ② **hwconfig (config 자동화)** spec→plan→subagent-driven 7-task 구현, PR #2 머지.
