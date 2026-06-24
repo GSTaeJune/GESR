@@ -1,0 +1,1362 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>gemm_sram — dataflow presentation</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-2: #21262d;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --gemm: #79c0ff;
+  --rmw:  #ffa657;
+  --sram: #d2a8ff;
+  --ok:   #3fb950;
+  --warn: #d29922;
+  --danger: #f85149;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: -apple-system, "Segoe UI", "Pretendard", "Noto Sans KR", sans-serif;
+  overflow: hidden;
+}
+.deck { width: 100vw; height: 100vh; position: relative; }
+.slide {
+  position: absolute; inset: 0;
+  padding: 40px 64px 96px;
+  display: none; flex-direction: column;
+  opacity: 0;
+}
+.slide.active { display: flex; animation: fadeIn 0.35s ease forwards; }
+@keyframes fadeIn { to { opacity: 1; } }
+
+.slide-title {
+  font-size: 26px; font-weight: 600;
+  border-left: 4px solid var(--gemm); padding-left: 14px;
+}
+.slide-subtitle { font-size: 13px; color: var(--muted); margin-top: 6px; padding-left: 18px; }
+.slide-body { flex: 1; margin-top: 28px; display: flex; gap: 24px; min-height: 0; }
+
+.nav {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 12px;
+  background: var(--panel); padding: 6px 14px; border-radius: 24px;
+  border: 1px solid var(--border); z-index: 100; font-size: 13px;
+}
+.nav button {
+  background: transparent; border: none; color: var(--text);
+  width: 30px; height: 30px; border-radius: 50%;
+  cursor: pointer; font-size: 16px;
+}
+.nav button:hover { background: var(--panel-2); }
+.nav .counter { color: var(--muted); min-width: 48px; text-align: center;
+                font-variant-numeric: tabular-nums; font-family: "JetBrains Mono", "Consolas", monospace; }
+.nav .title-mini { color: var(--muted); font-size: 12px; max-width: 220px;
+                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.mono { font-family: "JetBrains Mono", "Consolas", "Fira Code", monospace; font-size: 13px; }
+.tag {
+  display: inline-block; padding: 2px 8px; border-radius: 4px;
+  font-size: 11px; font-family: "JetBrains Mono", "Consolas", monospace;
+}
+.tag.g { background: rgba(121,192,255,0.15); color: var(--gemm); border: 1px solid rgba(121,192,255,0.3); }
+.tag.r { background: rgba(255,166,87,0.15); color: var(--rmw);  border: 1px solid rgba(255,166,87,0.3); }
+.tag.s { background: rgba(210,168,255,0.15); color: var(--sram); border: 1px solid rgba(210,168,255,0.3); }
+.tag.ok   { background: rgba(63,185,80,0.15); color: var(--ok); border: 1px solid rgba(63,185,80,0.3); }
+.tag.warn { background: rgba(210,153,34,0.15); color: var(--warn); border: 1px solid rgba(210,153,34,0.3); }
+
+/* ─── Slide 1: Title ─── */
+.s-title { justify-content: center; align-items: center; text-align: center; }
+.s-title h1 { font-size: 80px; font-weight: 800; letter-spacing: -2px; }
+.s-title h1 .accent-g { color: var(--gemm); }
+.s-title h1 .accent-r { color: var(--rmw); }
+.s-title h1 .accent-s { color: var(--sram); }
+.s-title .tagline { font-size: 20px; color: var(--muted); margin-top: 18px; }
+.title-trio { display: flex; gap: 18px; margin-top: 56px; }
+.title-trio .pill {
+  padding: 16px 28px; border-radius: 10px; border: 1px solid;
+  font-weight: 600; font-size: 17px;
+}
+.title-trio .pill.g { color: var(--gemm); border-color: rgba(121,192,255,0.4); background: rgba(121,192,255,0.05); }
+.title-trio .pill.r { color: var(--rmw);  border-color: rgba(255,166,87,0.4); background: rgba(255,166,87,0.05); }
+.title-trio .pill.s { color: var(--sram); border-color: rgba(210,168,255,0.4); background: rgba(210,168,255,0.05); }
+.title-trio .pill small { display: block; font-size: 11px; color: var(--muted); font-weight: 400; margin-top: 4px; }
+.title-hint { margin-top: 80px; color: var(--muted); font-size: 12px; }
+.title-hint kbd {
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 4px; padding: 2px 8px; font-family: "JetBrains Mono", monospace; font-size: 11px;
+}
+
+/* ─── Common box styles ─── */
+.box-rect { fill: var(--panel); stroke-width: 1.8; }
+.box-rect.g { stroke: var(--gemm); }
+.box-rect.r { stroke: var(--rmw);  }
+.box-rect.s { stroke: var(--sram); }
+.box-label  { fill: var(--text); font-size: 16px; font-weight: 600; text-anchor: middle; }
+.box-sub    { fill: var(--muted); font-size: 11px; text-anchor: middle; }
+.flow-text  { fill: var(--text); font-size: 11px; }
+.flow-text-c { fill: var(--text); font-size: 11px; text-anchor: middle; }
+.muted-text { fill: var(--muted); font-size: 11px; }
+
+/* ─── Slide 2: overview SVG ─── */
+.overview-svg { width: 100%; height: 100%; }
+.flow-line { fill: none; stroke-width: 2; }
+.flow-fwd  { stroke: var(--gemm); }
+.flow-rmw  { stroke: var(--rmw); }
+.flow-back { stroke: var(--sram); stroke-dasharray: 5 4; }
+
+@keyframes dash-flow {
+  to { stroke-dashoffset: -18; }
+}
+.flow-fwd.animated, .flow-rmw.animated {
+  stroke-dasharray: 6 4;
+  animation: dash-flow 0.9s linear infinite;
+}
+
+.notes-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+  margin-top: 16px;
+}
+.note {
+  padding: 10px 14px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 6px; font-size: 12px; line-height: 1.55;
+}
+.note .head { font-weight: 600; margin-bottom: 4px; font-size: 13px; }
+.note .head.g { color: var(--gemm); }
+.note .head.r { color: var(--rmw); }
+.note .head.s { color: var(--sram); }
+.note p { color: var(--muted); }
+.note code {
+  background: var(--panel-2); padding: 1px 5px; border-radius: 3px;
+  font-family: "JetBrains Mono", "Consolas", monospace; font-size: 11px;
+  color: var(--text);
+}
+
+/* ─── Slide 3: SA dim grid ─── */
+.sa-wrap { display: flex; gap: 24px; align-items: stretch; width: 100%; }
+.sa-left { flex: 1.2; display: flex; flex-direction: column; gap: 10px; }
+.sa-right { flex: 1; display: flex; flex-direction: column; gap: 12px; }
+.sa-fig { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 18px; }
+.sa-fig svg { width: 100%; }
+.dim-table {
+  border-collapse: collapse; width: 100%; font-size: 12.5px;
+}
+.dim-table th, .dim-table td { padding: 8px 12px; border: 1px solid var(--border); text-align: left; }
+.dim-table th { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 12px; }
+.dim-table td.head { background: var(--panel); }
+.callout {
+  background: rgba(210,153,34,0.08); border: 1px solid rgba(210,153,34,0.3);
+  border-radius: 6px; padding: 12px 16px; font-size: 12.5px; line-height: 1.55;
+}
+.callout .label { color: var(--warn); font-weight: 600; font-size: 11px; letter-spacing: 1px; margin-bottom: 4px; }
+.callout code { background: var(--panel-2); padding: 1px 5px; border-radius: 3px;
+                font-family: "JetBrains Mono", monospace; font-size: 11.5px; color: var(--text); }
+
+/* PE grid pulse */
+@keyframes pe-wave {
+  0%, 100% { fill: var(--panel-2); }
+  50%      { fill: rgba(121,192,255,0.5); }
+}
+
+/* ─── Slide 4: RMW pipeline ─── */
+.rmw-wrap { display: flex; flex-direction: column; gap: 20px; width: 100%; }
+.rmw-svg-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+.timing-grid {
+  display: grid;
+  grid-template-columns: 140px repeat(8, 1fr);
+  gap: 2px;
+  background: var(--border);
+  padding: 2px;
+  border-radius: 6px;
+}
+.timing-cell {
+  background: var(--bg); padding: 6px 8px; font-size: 11px; text-align: center;
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  min-height: 28px; display: flex; align-items: center; justify-content: center;
+}
+.timing-cell.header { background: var(--panel-2); color: var(--muted); font-weight: 600; }
+.timing-cell.row-label { background: var(--panel-2); justify-content: flex-start; padding-left: 12px; font-weight: 600; color: var(--text); }
+.timing-cell.fill.g { background: rgba(121,192,255,0.2); color: var(--gemm); border: 1px solid var(--gemm); }
+.timing-cell.fill.r { background: rgba(255,166,87,0.2); color: var(--rmw); border: 1px solid var(--rmw); }
+.timing-cell.fill.s { background: rgba(210,168,255,0.2); color: var(--sram); border: 1px solid var(--sram); }
+.timing-cell.fill.ok { background: rgba(63,185,80,0.2); color: var(--ok); border: 1px solid var(--ok); }
+
+/* ─── Slide 5: SRAM banking ─── */
+.bank-grid {
+  display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px;
+  width: 100%;
+}
+.bank-cell {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 4px; padding: 10px 6px; text-align: center;
+  font-family: "JetBrains Mono", monospace; font-size: 11px;
+}
+.bank-cell .b-id { color: var(--sram); font-weight: 600; font-size: 13px; }
+.bank-cell .b-depth { color: var(--muted); font-size: 11px; margin-top: 3px; }
+.formula {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 6px; padding: 14px 18px;
+  font-family: "JetBrains Mono", monospace; font-size: 13px; line-height: 1.7;
+}
+.formula .var { color: var(--gemm); }
+.formula .op  { color: var(--muted); }
+.formula .res { color: var(--rmw); }
+
+/* ─── Slide 6: end-to-end timeline ─── */
+.timeline {
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 16px;
+}
+.timeline-row { display: grid; grid-template-columns: 120px 1fr; gap: 12px; align-items: center; }
+.timeline-label { font-size: 12px; color: var(--text); font-family: "JetBrains Mono", monospace; }
+.timeline-bar { position: relative; height: 28px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+.timeline-seg {
+  position: absolute; top: 4px; bottom: 4px;
+  border-radius: 3px; display: flex; align-items: center; justify-content: center;
+  font-size: 11.5px; font-family: "JetBrains Mono", monospace;
+}
+.timeline-seg.g { background: rgba(121,192,255,0.25); border: 1px solid var(--gemm); color: var(--gemm); }
+.timeline-seg.r { background: rgba(255,166,87,0.25); border: 1px solid var(--rmw); color: var(--rmw); }
+.timeline-seg.s { background: rgba(210,168,255,0.25); border: 1px solid var(--sram); color: var(--sram); }
+.timeline-axis {
+  display: grid; grid-template-columns: repeat(20, 1fr); gap: 0;
+  margin-top: 4px; font-size: 11px; color: var(--muted);
+  font-family: "JetBrains Mono", monospace; text-align: center;
+}
+
+/* ─── Slide 7: mode fanout ─── */
+.fanout-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; width: 100%; }
+.fanout-card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 18px; display: flex; flex-direction: column; gap: 12px;
+}
+.fanout-card .mode-tag { font-size: 18px; font-weight: 700; }
+.fanout-card.a8 .mode-tag { color: var(--gemm); }
+.fanout-card.a4 .mode-tag { color: var(--warn); }
+.fanout-card.a2 .mode-tag { color: var(--rmw); }
+.fanout-svg { background: var(--bg); border-radius: 6px; padding: 12px; }
+.fanout-stats { font-size: 12px; color: var(--muted); line-height: 1.7; }
+.fanout-stats b { color: var(--text); }
+
+/* ─── Slide 8: V vs P compare ─── */
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; width: 100%; }
+.compare .col {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 18px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.compare .col .head { font-size: 17px; font-weight: 700; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.compare .col .head.v { color: var(--warn); }
+.compare .col .head.p { color: var(--ok); }
+.compare-pill {
+  background: var(--panel-2); border: 1px solid var(--border);
+  padding: 6px 12px; border-radius: 6px;
+  font-size: 12px; font-family: "JetBrains Mono", monospace;
+}
+.compare-pill.removed { color: var(--danger); text-decoration: line-through; opacity: 0.7; }
+.compare-pill.kept { color: var(--text); }
+.compare-pill.new { color: var(--ok); }
+.compare-arrow { color: var(--muted); font-size: 14px; margin: 0 4px; }
+.compare-row { display: flex; align-items: center; gap: 6px; font-size: 12px; flex-wrap: wrap; }
+.compare-note { font-size: 11.5px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+
+.spec-link {
+  position: fixed; top: 16px; right: 24px;
+  font-size: 11px; color: var(--muted);
+  font-family: "JetBrains Mono", monospace;
+}
+</style>
+</head>
+<body>
+
+<div class="spec-link">gemm_sram • dataflow deck • 2026-05</div>
+
+<div class="deck">
+
+  <!-- ════════════════════════════════════════ Slide 1: Title ═════════ -->
+  <section class="slide s-title active">
+    <div style="margin: auto;">
+      <h1>
+        <span class="accent-g">GEMM</span> ↔
+        <span class="accent-r">RMW</span> ↔
+        <span class="accent-s">SRAM</span>
+      </h1>
+      <div class="tagline">end-to-end dataflow · MXP 32×32 SA + 32-bank 1RW SRAM</div>
+      <div class="title-trio">
+        <div class="pill g">GEMM<small>MXP 32×32 bit-serial SA</small></div>
+        <div class="pill r">RMW × 32<small>INT → FP32 → ADD (5 cy pipe)</small></div>
+        <div class="pill s">SRAM 32-bank<small>1024 word × 32-bit</small></div>
+      </div>
+      <div class="title-hint">
+        <kbd>←</kbd> <kbd>→</kbd> 로 슬라이드 이동 · 총 <span id="title-total">8</span> 장
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════ Slide 2: TOP VIEW ═════ -->
+  <section class="slide">
+    <div class="slide-title">시스템 top view — 32 col-parallel dataflow</div>
+    <div class="slide-subtitle">GEMM 의 32 col 출력 → RMW[32] → bank[32] · col j → RMW[j] → bank[j] (충돌 0) · 매 cycle 최대 32 R/W 병렬</div>
+    <div class="slide-body" style="flex-direction: column;">
+      <svg class="overview-svg" viewBox="0 0 1240 520" preserveAspectRatio="xMidYMid meet" style="flex: 1; max-height: 540px;">
+
+        <!-- ─── header column labels ─── -->
+        <text x="130" y="22" text-anchor="middle" style="font-size: 13px; fill: var(--gemm); font-weight: 600;">GEMM</text>
+        <text x="510" y="22" text-anchor="middle" style="font-size: 13px; fill: var(--rmw);  font-weight: 600;">RMW × 32</text>
+        <text x="870" y="22" text-anchor="middle" style="font-size: 13px; fill: var(--sram); font-weight: 600;">SRAM 32-bank (1RW × 32 dedicated port)</text>
+
+        <!-- ─── inter-column dataflow band ─── -->
+        <text x="330" y="42" text-anchor="middle" class="muted-text" style="font-size: 11px;">━━━ INT psum + 9b scale ━━━▶</text>
+        <text x="690" y="42" text-anchor="middle" class="muted-text" style="font-size: 11px;">━━━ FP32 sum ━━━▶</text>
+
+        <!-- ─── GEMM box (left) ─── -->
+        <rect class="box-rect g" x="20" y="60" width="220" height="420" rx="10"/>
+        <text class="box-label" x="130" y="92" style="font-size: 15px;">GEMM</text>
+        <text class="box-sub"   x="130" y="110">MXP 32×32 bit-serial SA</text>
+
+        <line x1="40" y1="130" x2="220" y2="130" stroke="var(--border)" stroke-width="1"/>
+
+        <text x="35" y="150" class="muted-text" style="font-size: 9.5px;">station chain ← (col 31→0)</text>
+        <text x="35" y="167" class="muted-text" style="font-size: 9.5px;">acc chain ←→ (col 16 fan-out)</text>
+        <text x="35" y="184" class="muted-text" style="font-size: 9.5px;">PE bit-serial mac (row=K)</text>
+
+        <line x1="40" y1="200" x2="220" y2="200" stroke="var(--border)" stroke-width="1"/>
+
+        <text x="35" y="218" class="muted-text" style="font-size: 9px;">─ outputs (per col, broken out →) ─</text>
+        <text x="35" y="237" class="muted-text" style="font-size: 10px; fill: var(--gemm);">out_accumulate[32×60b]</text>
+        <text x="35" y="253" class="muted-text" style="font-size: 10px; fill: var(--gemm);">out_scale     [32×36b]</text>
+        <text x="35" y="269" class="muted-text" style="font-size: 10px; fill: var(--gemm);">out_fire      [32]</text>
+
+        <line x1="40" y1="285" x2="220" y2="285" stroke="var(--border)" stroke-width="1"/>
+
+        <text x="35" y="304" class="muted-text" style="font-size: 9.5px;">─ control (TB drives) ─</text>
+        <text x="35" y="321" class="muted-text" style="font-size: 9.5px;">in_a, in_b, in_control,</text>
+        <text x="35" y="337" class="muted-text" style="font-size: 9.5px;">Wcontrol, scale_weight, ...</text>
+
+        <line x1="40" y1="353" x2="220" y2="353" stroke="var(--border)" stroke-width="1"/>
+
+        <text x="35" y="373" class="muted-text" style="font-size: 9.5px;">mode-dep lane decode (TB):</text>
+        <text x="35" y="389" class="muted-text" style="font-size: 9.5px;">  A8 → 1 lane × 21b</text>
+        <text x="35" y="405" class="muted-text" style="font-size: 9.5px;">  A4 → 2 lane × 18b</text>
+        <text x="35" y="421" class="muted-text" style="font-size: 9.5px;">  A2 → 4 lane × 15b</text>
+
+        <!-- ═══ 32 col fanout — 6 visible lanes (col 0,1,2,3,30,31) ═══ -->
+
+        <!-- ── col 0 — y=90 ── -->
+        <line x1="240" y1="90" x2="418" y2="90" class="flow-line flow-fwd"/>
+        <polygon points="420,90 412,86 412,94" fill="var(--gemm)"/>
+        <rect class="box-rect r" x="420" y="78" width="180" height="24" rx="4"/>
+        <text x="510" y="94" text-anchor="middle" style="font-size: 11px; fill: var(--text); font-family: monospace;">RMW[0]</text>
+        <line x1="600" y1="90" x2="758" y2="90" class="flow-line flow-rmw"/>
+        <polygon points="760,90 752,86 752,94" fill="var(--rmw)"/>
+        <rect class="box-rect s" x="760" y="78" width="220" height="24" rx="4"/>
+        <text x="870" y="94" text-anchor="middle" style="font-size: 11px; fill: var(--text); font-family: monospace;">bank[0] · 1024w × 32b</text>
+        <circle r="4" fill="var(--gemm)">
+          <animateMotion dur="2.4s" repeatCount="indefinite" path="M 240 90 L 420 90"/>
+        </circle>
+        <circle r="4" fill="var(--rmw)">
+          <animateMotion dur="2.4s" repeatCount="indefinite" begin="0.6s" path="M 600 90 L 760 90"/>
+        </circle>
+
+        <!-- ── col 1 — y=130 ── -->
+        <line x1="240" y1="130" x2="418" y2="130" class="flow-line flow-fwd"/>
+        <polygon points="420,130 412,126 412,134" fill="var(--gemm)"/>
+        <rect class="box-rect r" x="420" y="118" width="180" height="24" rx="4"/>
+        <text x="510" y="134" text-anchor="middle" style="font-size: 11px; fill: var(--text); font-family: monospace;">RMW[1]</text>
+        <line x1="600" y1="130" x2="758" y2="130" class="flow-line flow-rmw"/>
+        <polygon points="760,130 752,126 752,134" fill="var(--rmw)"/>
+        <rect class="box-rect s" x="760" y="118" width="220" height="24" rx="4"/>
+        <text x="870" y="134" text-anchor="middle" style="font-size: 11px; fill: var(--text); font-family: monospace;">bank[1]</text>
+        <circle r="4" fill="var(--gemm)">
+          <animateMotion dur="2.4s" repeatCount="indefinite" begin="0.15s" path="M 240 130 L 420 130"/>
+        </circle>
+        <circle r="4" fill="var(--rmw)">
+          <animateMotion dur="2.4s" repeatCount="indefinite" begin="0.85s" path="M 600 130 L 760 130"/>
+        </circle>
+
+        <!-- ── col 2 — y=170 ── -->
+        <line x1="240" y1="170" x2="418" y2="170" class="flow-line flow-fwd"/>
+        <polygon points="420,170 412,166 412,174" fill="var(--gemm)"/>
+        <rect class="box-rect r" x="420" y="158" width="180" height="24" rx="4"/>
+        <text x="510" y="174" text-anchor="middle" style="font-size: 11px; fill: var(--text); font-family: monospace;">RMW[2]</text>
+        <line x1="600" y1="170" x2="758" y2="170" class="flow-line flow-rmw"/>
+        <polygon points="760,170 752,166 752,174" fill="var(--rmw)"/>
+        <rect class="box-rect s" x="760" y="158" width="220" height="24" rx="4"/>
+        <text x="870" y="174" text-anchor="middle" style="font-size: 11px; fill: var(--text); font-family: monospace;">bank[2]</text>
+        <circle r="4" fill="var(--gemm)">
+          <animateMotion dur="2.4s" repeatCount="indefinite" begin="0.3s" path="M 240 170 L 420 170"/>
+        </circle>
+        <circle r="4" fill="var(--rmw)">
+          <animateMotion dur="2.4s" repeatCount="indefinite" begin="1.0s" path="M 600 170 L 760 170"/>
+        </circle>
+
+        <!-- ── col 3 — y=210 ── -->
+        <line x1="240" y1="210" x2="418" y2="210" class="flow-line flow-fwd"/>
+        <polygon points="420,210 412,206 412,214" fill="var(--gemm)"/>
+        <rect class="box-rect r" x="420" y="198" width="180" height="24" rx="4"/>
+        <text x="510" y="214" text-anchor="middle" style="font-size: 11px; fill: var(--text); font-family: monospace;">RMW[3]</text>
+        <line x1="600" y1="210" x2="758" y2="210" class="flow-line flow-rmw"/>
+        <polygon points="760,210 752,206 752,214" fill="var(--rmw)"/>
+        <rect class="box-rect s" x="760" y="198" width="220" height="24" rx="4"/>
+        <text x="870" y="214" text-anchor="middle" style="font-size: 11px; fill: var(--text); font-family: monospace;">bank[3]</text>
+        <circle r="4" fill="var(--gemm)">
+          <animateMotion dur="2.4s" repeatCount="indefinite" begin="0.45s" path="M 240 210 L 420 210"/>
+        </circle>
+
+        <!-- ── ellipsis ── -->
+        <text x="330" y="265" text-anchor="middle" class="muted-text" style="font-size: 24px;">⋮</text>
+        <text x="510" y="265" text-anchor="middle" class="muted-text" style="font-size: 24px;">⋮</text>
+        <text x="870" y="265" text-anchor="middle" class="muted-text" style="font-size: 24px;">⋮</text>
+        <text x="510" y="288" text-anchor="middle" class="muted-text" style="font-size: 10.5px; font-style: italic;">— 26 more lanes (col 4 .. col 29) —</text>
+
+        <!-- ── col 30 — y=325 ── -->
+        <line x1="240" y1="325" x2="418" y2="325" class="flow-line flow-fwd"/>
+        <polygon points="420,325 412,321 412,329" fill="var(--gemm)"/>
+        <rect class="box-rect r" x="420" y="313" width="180" height="24" rx="4"/>
+        <text x="510" y="329" text-anchor="middle" style="font-size: 11px; fill: var(--text); font-family: monospace;">RMW[30]</text>
+        <line x1="600" y1="325" x2="758" y2="325" class="flow-line flow-rmw"/>
+        <polygon points="760,325 752,321 752,329" fill="var(--rmw)"/>
+        <rect class="box-rect s" x="760" y="313" width="220" height="24" rx="4"/>
+        <text x="870" y="329" text-anchor="middle" style="font-size: 11px; fill: var(--text); font-family: monospace;">bank[30]</text>
+        <circle r="4" fill="var(--rmw)">
+          <animateMotion dur="2.4s" repeatCount="indefinite" begin="1.3s" path="M 600 325 L 760 325"/>
+        </circle>
+
+        <!-- ── col 31 — y=365 ── -->
+        <line x1="240" y1="365" x2="418" y2="365" class="flow-line flow-fwd"/>
+        <polygon points="420,365 412,361 412,369" fill="var(--gemm)"/>
+        <rect class="box-rect r" x="420" y="353" width="180" height="24" rx="4"/>
+        <text x="510" y="369" text-anchor="middle" style="font-size: 11px; fill: var(--text); font-family: monospace;">RMW[31]</text>
+        <line x1="600" y1="365" x2="758" y2="365" class="flow-line flow-rmw"/>
+        <polygon points="760,365 752,361 752,369" fill="var(--rmw)"/>
+        <rect class="box-rect s" x="760" y="353" width="220" height="24" rx="4"/>
+        <text x="870" y="369" text-anchor="middle" style="font-size: 11px; fill: var(--text); font-family: monospace;">bank[31]</text>
+        <circle r="4" fill="var(--gemm)">
+          <animateMotion dur="2.4s" repeatCount="indefinite" begin="1.05s" path="M 240 365 L 420 365"/>
+        </circle>
+        <circle r="4" fill="var(--rmw)">
+          <animateMotion dur="2.4s" repeatCount="indefinite" begin="1.65s" path="M 600 365 L 760 365"/>
+        </circle>
+
+        <!-- ═══ Back path: bank[c].Q → RMW[c].in_SRAM (col 0 explicit) ═══ -->
+        <path class="flow-line flow-back" d="M 982 90 C 1060 90, 1060 440, 510 440 C 380 440, 380 110, 418 110"/>
+        <polygon points="420,110 426,106 426,114" fill="var(--sram)"/>
+        <circle r="4" fill="var(--sram)" opacity="0.95">
+          <animateMotion dur="3.6s" repeatCount="indefinite" rotate="auto"
+            path="M 982 90 C 1060 90, 1060 440, 510 440 C 380 440, 380 110, 418 110"/>
+        </circle>
+
+        <text x="700" y="460" text-anchor="middle" class="muted-text" style="font-size: 11px; fill: var(--sram);">
+          prior psum (FP32) — bank[c].Q → RMW[c].in_SRAM   (per col, 32 paths total)
+        </text>
+
+        <!-- ─── D-mux note ─── -->
+        <text x="700" y="492" text-anchor="middle" class="muted-text" style="font-size: 10px;">
+          D = sram_D_use_zero ? 32'h00000000 : RMW[c].out_RMW    (D-mux per col · gemm_sram_top.v:81)
+        </text>
+
+      </svg>
+
+      <div class="notes-grid">
+        <div class="note">
+          <div class="head g">분기 — GEMM 출력 → 32 lane</div>
+          <p><code>out_accumulate[c×60]</code> 의 60-bit slice 를 mode 별 디코드: A8 = 1 × 21b, A4 = 2 × 18b, A2 = 4 × 15b.
+             INT32 sign-ext + 9b scale 과 묶여 <code>RMW[c]</code> 로.</p>
+        </div>
+        <div class="note">
+          <div class="head r">변환 + 누적 — 32 RMW 동시 동작</div>
+          <p>RMW = stateless 5-cy pipe. <code>in_GEMM</code>+<code>scale</code> → FP32, 이전 <code>in_SRAM</code> 과 add → <code>out_RMW</code>.
+             백프레셔 없이 매 cycle 32 개 RMW 가 독립 진행.</p>
+        </div>
+        <div class="note">
+          <div class="head s">저장 — 32 bank · dedicated port</div>
+          <p>col j → bank j (충돌 0). <code>CEB[j]=0,WEB[j]=1</code> = read, <code>WEB[j]=0</code> = write.
+             read latency 1 cy. 같은 cycle 에 32 bank 독립 R/W 가능.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════ Slide 3: SA 차원 매핑 ══ -->
+  <section class="slide">
+    <div class="slide-title">SA 차원 매핑 — row=K, col=N, cycle=M</div>
+    <div class="slide-subtitle">가장 헷갈리는 부분 · row=M 으로 가정 금지 (mixed-prec 디버그 시 잘못된 결론 원인)</div>
+    <div class="slide-body">
+      <div class="sa-wrap">
+        <div class="sa-left">
+          <div class="sa-fig" style="flex: 1;">
+            <svg viewBox="0 0 500 460" preserveAspectRatio="xMidYMid meet">
+              <!-- axis labels -->
+              <text x="250" y="20" class="box-sub" text-anchor="middle" style="fill: var(--gemm); font-size: 14px;">N (col, 0 → 31)</text>
+              <text x="20"  y="245" class="box-sub" text-anchor="middle" style="fill: var(--rmw); font-size: 14px;" transform="rotate(-90, 20, 245)">K (row, 0 → 31)</text>
+
+              <!-- N axis arrow on top -->
+              <line x1="60" y1="40" x2="460" y2="40" stroke="var(--gemm)" stroke-width="1.5"/>
+              <polygon points="460,40 452,36 452,44" fill="var(--gemm)"/>
+
+              <!-- K axis arrow on left -->
+              <line x1="40" y1="60" x2="40" y2="440" stroke="var(--rmw)" stroke-width="1.5"/>
+              <polygon points="40,440 36,432 44,432" fill="var(--rmw)"/>
+
+              <!-- PE grid 16x16 (each PE = 24px) -->
+              <g id="pe-grid">
+                <!-- generated below by JS for animation, but we draw static rects here -->
+              </g>
+              <script type="application/json" id="pe-data">{"size":16,"cell":24,"originX":60,"originY":60}</script>
+
+              <!-- Station chain entry (col 15, top-right) -->
+              <circle cx="420" cy="60" r="6" fill="var(--gemm)"/>
+              <text x="420" y="50" class="muted-text" text-anchor="middle" style="font-size: 10px;">station ← (col 31)</text>
+
+              <!-- Accumulator chain entry (col 8) -->
+              <circle cx="252" cy="60" r="6" fill="var(--warn)"/>
+              <text x="252" y="50" class="muted-text" text-anchor="middle" style="font-size: 10px;">accumulator (col 16) ←→</text>
+
+              <!-- M-axis (cycle) label -->
+              <text x="250" y="455" class="box-sub" text-anchor="middle" style="fill: var(--sram); font-size: 13px;">
+                cycle 진행 = M (한 cycle 마다 다음 M-row dot product)
+              </text>
+            </svg>
+          </div>
+        </div>
+        <div class="sa-right">
+          <table class="dim-table">
+            <tr><th>SA 축</th><th>행렬 차원</th><th>의미</th></tr>
+            <tr>
+              <td class="head" style="color: var(--rmw);">row<br><span class="mono" style="font-size: 11px;">in_a[r], in_b[r]</span></td>
+              <td><b>K</b></td>
+              <td>한 cycle 의 32-bit <code>in_a</code> = K=0..31 의 같은 bit-position</td>
+            </tr>
+            <tr>
+              <td class="head" style="color: var(--gemm);">col<br><span class="mono" style="font-size: 11px;">Acc_Col[c]</span></td>
+              <td><b>N</b></td>
+              <td><code>out_fire[c]</code> = N-col c 완료 펄스. col 당 1 (A8) / 2 (A4) / 4 (A2) lane</td>
+            </tr>
+            <tr>
+              <td class="head" style="color: var(--sram);">cycle</td>
+              <td><b>M</b> 진행</td>
+              <td>한 M-iteration = W_PREC cycle (bit-serial weight). 32 M = 1 m_t tile</td>
+            </tr>
+          </table>
+
+          <div class="callout">
+            <div class="label">★ MIXED-PREC KEY</div>
+            <p>같은 cycle 의 32 row = 같은 K-block 의 32 K-element →
+            <b>K-block 단위 W_PREC 자유 설정 가능</b>.
+            row=M 으로 가정하면 "M 별 W_PREC 다르면 dataflow 깨짐" 라는 잘못된 결론 빠짐.
+            실제로는 row=K 라 자연스레 K-block 단위로 묶임.</p>
+          </div>
+
+          <div class="callout" style="background: rgba(63,185,80,0.06); border-color: rgba(63,185,80,0.3);">
+            <div class="label" style="color: var(--ok);">★ MODE 별 lane fanout (col 당)</div>
+            <p style="font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.7;">
+              <b style="color: var(--gemm);">A8</b> : 1 lane × 21b · fire 2048 / col · W_CYC=8<br/>
+              <b style="color: var(--warn);">A4</b> : 2 lane × 18b · fire 1024 / col · W_CYC=4<br/>
+              <b style="color: var(--rmw);">A2</b> : 4 lane × 15b · fire  512 / col · W_CYC=2
+            </p>
+            <p style="margin-top: 4px;">→ <b>col 당 총 RMW dispatch = 2048 (mode 무관)</b> · 총 32×2048 = 65536 word write</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════ Slide 4: SA 내부 dataflow ═ -->
+  <section class="slide">
+    <div class="slide-title">SA 내부 dataflow — weight 양방향 · activation 좌향 · psum 4-lane 누적</div>
+    <div class="slide-subtitle">PE_feeder (대각선) 가 weight 양방향 broadcast · activation 우→좌 · psum0~3 lane 독립 누적 · 화살표는 col<16 case 기준 (col>=16 은 vertical 방향 반전, 출력도 top)</div>
+    <div class="slide-body" style="gap: 18px;">
+
+      <!-- 좌측: SA grid + 화살표 -->
+      <div style="flex: 1.25; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; display: flex; flex-direction: column;">
+        <div class="muted-text" style="font-size: 11px; margin-bottom: 6px;">SA 6×6 simplified · 대각선 = PE_feeder · 실제 32×32</div>
+        <svg viewBox="0 0 600 440" preserveAspectRatio="xMidYMid meet" style="width: 100%; flex: 1;">
+          <text x="300" y="14" text-anchor="middle" class="muted-text" style="font-size: 11px;">N axis (col 0 → 5)</text>
+          <text x="14" y="220" text-anchor="middle" transform="rotate(-90, 14, 220)" class="muted-text" style="font-size: 11px;">K axis (row 0 → 5)</text>
+
+          <g id="sa-grid"></g>
+
+          <!-- ─── row 2 dataflow highlighting ─── -->
+          <!-- in_a (weight, 1b) entry from left into row 2's feeder -->
+          <line x1="22" y1="195" x2="48" y2="195" stroke="var(--gemm)" stroke-width="2" marker-end="url(#arr-g)"/>
+          <text x="22" y="187" class="muted-text" style="font-size: 9px; fill: var(--gemm);">in_a[2] (weight, 1b)</text>
+
+          <!-- feeder (2,2) at x=158, y=143, cell 50, center (183, 168) -->
+          <!-- weight 양방향: leftward + rightward -->
+          <line x1="158" y1="160" x2="100" y2="160" stroke="var(--gemm)" stroke-width="1.8" stroke-dasharray="3 2"/>
+          <polygon points="98,160 106,156 106,164" fill="var(--gemm)"/>
+          <line x1="208" y1="160" x2="370" y2="160" stroke="var(--gemm)" stroke-width="1.8" stroke-dasharray="3 2"/>
+          <polygon points="372,160 364,156 364,164" fill="var(--gemm)"/>
+          <text x="378" y="155" class="muted-text" style="font-size: 9px; fill: var(--gemm);">weight 양방향 broadcast</text>
+          <text x="378" y="167" class="muted-text" style="font-size: 10px;">(out_aLeft / out_aRight)</text>
+
+          <!-- activation (in_b, 8b) entry from right into row 2 -->
+          <line x1="395" y1="180" x2="370" y2="180" stroke="var(--sram)" stroke-width="2" marker-end="url(#arr-s)"/>
+          <text x="398" y="184" class="muted-text" style="font-size: 9px; fill: var(--sram);">in_b[2] (8b)</text>
+
+          <!-- activation propagation right→left across row 2 -->
+          <line x1="368" y1="180" x2="50" y2="180" stroke="var(--sram)" stroke-width="1.4" stroke-dasharray="4 3" opacity="0.7"/>
+          <polygon points="48,180 56,176 56,184" fill="var(--sram)"/>
+          <text x="180" y="173" class="muted-text" style="font-size: 9px; fill: var(--sram);">activation 우→좌 (out_b)</text>
+
+          <!-- ─── col 3 psum 누적 (feeder 3,3 기준) ─── -->
+          <!-- col 3 center x = 50 + 3*54 + 25 = 237 -->
+          <!-- feeder (3,3) at y=197, height 50 → top 197, bottom 247 -->
+          <!-- upper PEs (0,3) (1,3) (2,3) at y=35, 89, 143 -->
+          <!-- lower PEs (4,3) (5,3) at y=251, 305 -->
+
+          <!-- upward psum chain (lower at top? No - upper PE 의 chain: psum_in=psum[i+1][j], psum_out=psum[i][j] → 위로) -->
+          <line x1="270" y1="190" x2="270" y2="50" stroke="var(--warn)" stroke-width="1.4" stroke-dasharray="4 3"/>
+          <polygon points="270,48 266,56 274,56" fill="var(--warn)"/>
+          <text x="278" y="62" class="muted-text" style="font-size: 9px; fill: var(--warn);">upper: psum ↑</text>
+          <text x="278" y="76" class="muted-text" style="font-size: 10px;">(아래→위)</text>
+
+          <!-- downward psum chain -->
+          <line x1="270" y1="252" x2="270" y2="380" stroke="var(--warn)" stroke-width="1.4" stroke-dasharray="4 3"/>
+          <polygon points="270,382 266,374 274,374" fill="var(--warn)"/>
+          <text x="278" y="370" class="muted-text" style="font-size: 9px; fill: var(--warn);">lower: psum ↓</text>
+          <text x="278" y="384" class="muted-text" style="font-size: 10px;">(위→아래)</text>
+
+          <!-- output -->
+          <text x="270" y="408" text-anchor="middle" class="muted-text" style="font-size: 9.5px;">→ out (col<16: bottom · col>=16: top)</text>
+
+          <!-- 4-lane note next to col 3 -->
+          <text x="408" y="220" class="muted-text" style="font-size: 9px;">각 col 마다</text>
+          <text x="408" y="234" class="muted-text" style="font-size: 9px;">psum 0~3 lane</text>
+          <text x="408" y="248" class="muted-text" style="font-size: 9px;">independent chain</text>
+
+          <defs>
+            <marker id="arr-g" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><polygon points="0,0 8,4 0,8" fill="var(--gemm)"/></marker>
+            <marker id="arr-s" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><polygon points="0,0 8,4 0,8" fill="var(--sram)"/></marker>
+          </defs>
+        </svg>
+        <div style="display: flex; gap: 14px; margin-top: 6px; font-size: 10.5px; flex-wrap: wrap;">
+          <div style="display: flex; align-items: center; gap: 4px;"><span style="display:inline-block; width:11px; height:11px; background:rgba(255,166,87,0.18); border:1.5px solid var(--rmw); border-radius:2px;"></span><span class="muted-text">feeder (i==j)</span></div>
+          <div style="display: flex; align-items: center; gap: 4px;"><span style="color: var(--gemm);">━━▶</span><span class="muted-text">weight (양방향)</span></div>
+          <div style="display: flex; align-items: center; gap: 4px;"><span style="color: var(--sram);">━━▶</span><span class="muted-text">activation (좌향)</span></div>
+          <div style="display: flex; align-items: center; gap: 4px;"><span style="color: var(--warn);">━━▶</span><span class="muted-text">psum vertical</span></div>
+        </div>
+      </div>
+
+      <!-- 우측: PE_naive 단면 -->
+      <div style="flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px;">
+        <div class="muted-text" style="font-size: 11px; margin-bottom: 6px;">PE_naive 내부 — 한 PE 의 단면</div>
+        <svg viewBox="0 0 380 450" preserveAspectRatio="xMidYMid meet" style="width: 100%;">
+
+          <!-- weight in_a (1b) -->
+          <text x="10" y="28" class="muted-text" style="font-size: 10px; fill: var(--gemm);">in_a (1b)</text>
+          <line x1="10" y1="38" x2="232" y2="38" stroke="var(--gemm)" stroke-width="1.5"/>
+
+          <!-- activation in_b -->
+          <text x="10" y="72" class="muted-text" style="font-size: 10px; fill: var(--sram);">in_b (8b)</text>
+          <line x1="10" y1="82" x2="60" y2="82" stroke="var(--sram)" stroke-width="1.5" marker-end="url(#arr-s2)"/>
+
+          <text x="10" y="120" class="muted-text" style="font-size: 10px;">in_control (ping-pong sel)</text>
+          <line x1="10" y1="130" x2="60" y2="130" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#arr-m)"/>
+
+          <!-- Buf1 / Buf2 (PE 안의 station) -->
+          <rect x="60" y="54" width="80" height="20" rx="3" fill="var(--panel-2)" stroke="var(--border)" stroke-width="1"/>
+          <text x="100" y="68" text-anchor="middle" style="font-size: 10px; fill: var(--text);">station1</text>
+          <rect x="60" y="80" width="80" height="20" rx="3" fill="var(--panel-2)" stroke="var(--border)" stroke-width="1"/>
+          <text x="100" y="94" text-anchor="middle" style="font-size: 10px; fill: var(--text);">station2</text>
+
+          <!-- mux selecting station1/2 -->
+          <polygon points="140,54 162,67 162,89 140,100" fill="var(--panel-2)" stroke="var(--muted)" stroke-width="1"/>
+          <text x="151" y="80" text-anchor="middle" style="font-size: 10px; fill: var(--muted);">mux</text>
+          <!-- in_control to mux -->
+          <line x1="60" y1="130" x2="151" y2="130" stroke="var(--muted)" stroke-width="1"/>
+          <line x1="151" y1="130" x2="151" y2="103" stroke="var(--muted)" stroke-width="1" marker-end="url(#arr-m)"/>
+
+          <text x="167" y="74" class="muted-text" style="font-size: 9.5px;">station (8b)</text>
+          <line x1="162" y1="77" x2="200" y2="77" stroke="var(--sram)" stroke-width="1.5" marker-end="url(#arr-s2)"/>
+
+          <!-- weight gating box -->
+          <rect x="200" y="54" width="100" height="56" rx="3" fill="var(--panel-2)" stroke="var(--gemm)" stroke-width="1"/>
+          <text x="250" y="73" text-anchor="middle" style="font-size: 10px; fill: var(--text); font-family: monospace;">add_operand</text>
+          <text x="250" y="87" text-anchor="middle" style="font-size: 9.5px; fill: var(--muted); font-family: monospace;">= in_a ? station</text>
+          <text x="250" y="101" text-anchor="middle" style="font-size: 9.5px; fill: var(--muted); font-family: monospace;">         : 0</text>
+
+          <line x1="232" y1="38" x2="232" y2="51" stroke="var(--gemm)" stroke-width="1.5" marker-end="url(#arr-g2)"/>
+
+          <!-- 4 adder_lane row -->
+          <text x="190" y="135" text-anchor="middle" class="muted-text" style="font-size: 10px;">add_operand · 2-bit slice 4 개</text>
+          <text x="190" y="148" text-anchor="middle" class="muted-text" style="font-size: 9px;">[7:6] · [5:4] · [3:2] · [1:0]</text>
+
+          <rect x="20"  y="160" width="78" height="62" rx="3" fill="rgba(255,166,87,0.10)" stroke="var(--rmw)" stroke-width="1"/>
+          <text x="59"  y="178" text-anchor="middle" style="font-size: 10.5px; fill: var(--rmw); font-weight: 600;">lane 0</text>
+          <text x="59"  y="194" text-anchor="middle" style="font-size: 9px; fill: var(--text); font-family: monospace;">a = [7:6]</text>
+          <text x="59"  y="208" text-anchor="middle" style="font-size: 9px; fill: var(--text); font-family: monospace;">+ psum0_in</text>
+
+          <rect x="106" y="160" width="78" height="62" rx="3" fill="rgba(255,166,87,0.10)" stroke="var(--rmw)" stroke-width="1"/>
+          <text x="145" y="178" text-anchor="middle" style="font-size: 10.5px; fill: var(--rmw); font-weight: 600;">lane 1</text>
+          <text x="145" y="194" text-anchor="middle" style="font-size: 9px; fill: var(--text); font-family: monospace;">a = [5:4]</text>
+          <text x="145" y="208" text-anchor="middle" style="font-size: 9px; fill: var(--text); font-family: monospace;">+ psum1_in</text>
+
+          <rect x="192" y="160" width="78" height="62" rx="3" fill="rgba(255,166,87,0.10)" stroke="var(--rmw)" stroke-width="1"/>
+          <text x="231" y="178" text-anchor="middle" style="font-size: 10.5px; fill: var(--rmw); font-weight: 600;">lane 2</text>
+          <text x="231" y="194" text-anchor="middle" style="font-size: 9px; fill: var(--text); font-family: monospace;">a = [3:2]</text>
+          <text x="231" y="208" text-anchor="middle" style="font-size: 9px; fill: var(--text); font-family: monospace;">+ psum2_in</text>
+
+          <rect x="278" y="160" width="78" height="62" rx="3" fill="rgba(255,166,87,0.10)" stroke="var(--rmw)" stroke-width="1"/>
+          <text x="317" y="178" text-anchor="middle" style="font-size: 10.5px; fill: var(--rmw); font-weight: 600;">lane 3</text>
+          <text x="317" y="194" text-anchor="middle" style="font-size: 9px; fill: var(--text); font-family: monospace;">a = [1:0]</text>
+          <text x="317" y="208" text-anchor="middle" style="font-size: 9px; fill: var(--text); font-family: monospace;">+ psum3_in</text>
+
+          <!-- Lane_ctrl entry -->
+          <text x="10" y="252" class="muted-text" style="font-size: 10px; fill: var(--warn);">Lane_ctrl[3:0] (from station)</text>
+          <line x1="10" y1="262" x2="59" y2="262" stroke="var(--warn)" stroke-width="1.5"/>
+          <line x1="59" y1="262" x2="59" y2="225" stroke="var(--warn)" stroke-width="1" marker-end="url(#arr-w2)"/>
+          <line x1="59" y1="262" x2="145" y2="262" stroke="var(--warn)" stroke-width="1"/>
+          <line x1="145" y1="262" x2="145" y2="225" stroke="var(--warn)" stroke-width="1" marker-end="url(#arr-w2)"/>
+          <line x1="145" y1="262" x2="231" y2="262" stroke="var(--warn)" stroke-width="1"/>
+          <line x1="231" y1="262" x2="231" y2="225" stroke="var(--warn)" stroke-width="1" marker-end="url(#arr-w2)"/>
+          <line x1="231" y1="262" x2="317" y2="262" stroke="var(--warn)" stroke-width="1"/>
+          <line x1="317" y1="262" x2="317" y2="225" stroke="var(--warn)" stroke-width="1" marker-end="url(#arr-w2)"/>
+
+          <!-- 4 psum_out below lanes -->
+          <line x1="59"  y1="222" x2="59"  y2="290" stroke="var(--rmw)" stroke-width="1" marker-end="url(#arr-r2)"/>
+          <line x1="145" y1="222" x2="145" y2="290" stroke="var(--rmw)" stroke-width="1" marker-end="url(#arr-r2)"/>
+          <line x1="231" y1="222" x2="231" y2="290" stroke="var(--rmw)" stroke-width="1" marker-end="url(#arr-r2)"/>
+          <line x1="317" y1="222" x2="317" y2="290" stroke="var(--rmw)" stroke-width="1" marker-end="url(#arr-r2)"/>
+          <text x="190" y="308" text-anchor="middle" class="muted-text" style="font-size: 10px;">psum0_out / psum1_out / psum2_out / psum3_out</text>
+          <text x="190" y="322" text-anchor="middle" class="muted-text" style="font-size: 9px;">→ 다음 PE 의 psum*_in (수직 chain)</text>
+
+          <!-- callout: 왜 4 lane -->
+          <rect x="10" y="345" width="360" height="92" rx="4" fill="rgba(210,153,34,0.08)" stroke="var(--warn)" stroke-width="1"/>
+          <text x="20" y="362" style="font-size: 10.5px; fill: var(--warn); font-weight: 600;">★ 왜 lane 4 개</text>
+          <text x="20" y="378" class="muted-text" style="font-size: 10px;">A2 모드 = 8-bit station 안에 INT2 × 4 packed.</text>
+          <text x="20" y="392" class="muted-text" style="font-size: 10px;">각 2-bit slice 가 독립 lane 으로 처리 → 한 fire 가</text>
+          <text x="20" y="406" class="muted-text" style="font-size: 10px;">4 개 N-col 결과 (96+c, 64+c, 32+c, 0+c) 동시 생성.</text>
+          <text x="20" y="423" class="muted-text" style="font-size: 9.5px;">→ A2 가 A8 대비 4× throughput 의 dataflow 근거.</text>
+
+          <defs>
+            <marker id="arr-g2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><polygon points="0,0 8,4 0,8" fill="var(--gemm)"/></marker>
+            <marker id="arr-s2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><polygon points="0,0 8,4 0,8" fill="var(--sram)"/></marker>
+            <marker id="arr-w2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><polygon points="0,0 8,4 0,8" fill="var(--warn)"/></marker>
+            <marker id="arr-r2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><polygon points="0,0 8,4 0,8" fill="var(--rmw)"/></marker>
+            <marker id="arr-m"  markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><polygon points="0,0 8,4 0,8" fill="var(--muted)"/></marker>
+          </defs>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════ Slide 5: Station — lane 제어 ═══ -->
+  <section class="slide">
+    <div class="slide-title">Station — ping-pong buffer + Lane_ctrl decode → PE 4-lane 제어</div>
+    <div class="slide-subtitle">in_Station_control[1:0] 가 mode chain (Buf load 값) · in_station_control (1b) 는 selector chain (ping-pong toggle) · 별개 신호임에 주의</div>
+    <div class="slide-body" style="gap: 18px;">
+
+      <!-- 좌측: station 내부 -->
+      <div style="flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px;">
+        <div class="muted-text" style="font-size: 11px; margin-bottom: 6px;">station[c] — col c 의 ping-pong + decoder</div>
+        <svg viewBox="0 0 500 480" preserveAspectRatio="xMidYMid meet" style="width: 100%;">
+
+          <!-- inputs -->
+          <text x="10" y="24" class="muted-text" style="font-size: 10px;">in_Station_control[1:0]</text>
+          <line x1="10" y1="34" x2="100" y2="34" stroke="var(--gemm)" stroke-width="1.5" marker-end="url(#arr-g3)"/>
+
+          <text x="10" y="68" class="muted-text" style="font-size: 10px;">in_Scale_Activation[31:0]</text>
+          <line x1="10" y1="78" x2="100" y2="78" stroke="var(--gemm)" stroke-width="1.5" marker-end="url(#arr-g3)"/>
+
+          <text x="10" y="112" class="muted-text" style="font-size: 10px;">in_loadEN</text>
+          <line x1="10" y1="122" x2="100" y2="122" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#arr-m3)"/>
+
+          <text x="10" y="156" class="muted-text" style="font-size: 10px;">in_control (1b, ping-pong sel)</text>
+          <line x1="10" y1="166" x2="100" y2="166" stroke="var(--rmw)" stroke-width="1.5" marker-end="url(#arr-r3)"/>
+
+          <!-- Buf1 box -->
+          <rect x="100" y="14" width="200" height="70" rx="4" fill="var(--panel-2)" stroke="var(--gemm)" stroke-width="1.5"/>
+          <text x="200" y="32" text-anchor="middle" style="font-size: 12px; fill: var(--gemm); font-weight: 600;">Buf1</text>
+          <text x="200" y="48" text-anchor="middle" style="font-size: 10px; fill: var(--text); font-family: monospace;">Station_Ctrl1 (2b)</text>
+          <text x="200" y="62" text-anchor="middle" style="font-size: 10px; fill: var(--text); font-family: monospace;">Scale1 (32b)</text>
+          <text x="200" y="76" text-anchor="middle" style="font-size: 10px; fill: var(--text); font-family: monospace;">Mode_oh1 (3b)</text>
+
+          <!-- Buf2 box -->
+          <rect x="100" y="100" width="200" height="70" rx="4" fill="var(--panel-2)" stroke="var(--gemm)" stroke-width="1.5"/>
+          <text x="200" y="118" text-anchor="middle" style="font-size: 12px; fill: var(--gemm); font-weight: 600;">Buf2</text>
+          <text x="200" y="134" text-anchor="middle" style="font-size: 10px; fill: var(--text); font-family: monospace;">Station_Ctrl2 (2b)</text>
+          <text x="200" y="148" text-anchor="middle" style="font-size: 10px; fill: var(--text); font-family: monospace;">Scale2 (32b)</text>
+          <text x="200" y="162" text-anchor="middle" style="font-size: 10px; fill: var(--text); font-family: monospace;">Mode_oh2 (3b)</text>
+
+          <!-- in_control selects load target -->
+          <line x1="100" y1="166" x2="180" y2="166" stroke="var(--rmw)" stroke-width="1.5"/>
+          <line x1="180" y1="166" x2="180" y2="84" stroke="var(--rmw)" stroke-width="1" stroke-dasharray="2 2" marker-end="url(#arr-r3)"/>
+          <line x1="180" y1="166" x2="180" y2="100" stroke="var(--rmw)" stroke-width="1" stroke-dasharray="2 2" marker-end="url(#arr-r3)"/>
+          <text x="185" y="180" class="muted-text" style="font-size: 9.5px; fill: var(--rmw);">load select</text>
+
+          <!-- broadcast mux (selects opposite buffer) -->
+          <polygon points="300,30 330,55 330,130 300,155" fill="var(--panel-2)" stroke="var(--muted)" stroke-width="1.5"/>
+          <text x="315" y="98" text-anchor="middle" style="font-size: 9.5px; fill: var(--muted);">mux</text>
+
+          <line x1="300" y1="49" x2="300" y2="49" stroke="var(--gemm)" stroke-width="0"/>
+          <line x1="295" y1="48" x2="305" y2="48" stroke="var(--gemm)" stroke-width="0"/>
+
+          <!-- broadcast output -->
+          <line x1="330" y1="92" x2="390" y2="92" stroke="var(--gemm)" stroke-width="1.5" marker-end="url(#arr-g3)"/>
+          <text x="335" y="84" class="muted-text" style="font-size: 9px; fill: var(--gemm);">out_local_*</text>
+          <text x="335" y="106" class="muted-text" style="font-size: 10px;">(반대편 buffer)</text>
+
+          <!-- ping-pong rule -->
+          <rect x="10" y="200" width="470" height="50" rx="4" fill="rgba(121,192,255,0.05)" stroke="rgba(121,192,255,0.3)" stroke-width="1"/>
+          <text x="20" y="218" style="font-size: 10.5px; fill: var(--gemm); font-weight: 600;">ping-pong 규칙</text>
+          <text x="20" y="234" class="muted-text" style="font-size: 10px; font-family: monospace;">in_control = 0 → load Buf1, broadcast Buf2  (Buf2 stable 동안 Buf1 prefetch)</text>
+          <text x="20" y="248" class="muted-text" style="font-size: 10px; font-family: monospace;">in_control = 1 → load Buf2, broadcast Buf1</text>
+
+          <!-- Lane_ctrl decoder -->
+          <rect x="60" y="280" width="380" height="100" rx="4" fill="rgba(210,153,34,0.08)" stroke="var(--warn)" stroke-width="1.5"/>
+          <text x="250" y="302" text-anchor="middle" style="font-size: 12px; fill: var(--warn); font-weight: 600;">Lane_ctrl decoder (combinational)</text>
+          <text x="250" y="324" text-anchor="middle" style="font-size: 10px; fill: var(--text); font-family: monospace;">assign Lane_ctrl =</text>
+          <text x="250" y="340" text-anchor="middle" style="font-size: 10px; fill: var(--text); font-family: monospace;">  (sc == A8) ? 4'b0001 : (sc == A4) ? 4'b0101 :</text>
+          <text x="250" y="356" text-anchor="middle" style="font-size: 10px; fill: var(--text); font-family: monospace;">  (sc == A2) ? 4'b1111 : 4'b0000;</text>
+          <text x="250" y="372" text-anchor="middle" class="muted-text" style="font-size: 9.5px;">(broadcast 된 Station_control 으로부터)</text>
+
+          <!-- broadcast → decoder -->
+          <line x1="390" y1="92" x2="410" y2="92" stroke="var(--gemm)" stroke-width="1.5"/>
+          <line x1="410" y1="92" x2="410" y2="280" stroke="var(--gemm)" stroke-width="1.5"/>
+          <polygon points="410,282 406,274 414,274" fill="var(--gemm)"/>
+
+          <!-- Lane_ctrl output to PE column -->
+          <line x1="250" y1="380" x2="250" y2="420" stroke="var(--warn)" stroke-width="2.5" marker-end="url(#arr-w3)"/>
+          <text x="258" y="408" class="muted-text" style="font-size: 10px; fill: var(--warn); font-family: monospace;">Lane_ctrl[3:0]</text>
+
+          <text x="250" y="442" text-anchor="middle" class="muted-text" style="font-size: 11px; fill: var(--warn); font-weight: 600;">→ col c 의 모든 PE 의 adder_lane[0..3].ctrl</text>
+          <text x="250" y="460" text-anchor="middle" class="muted-text" style="font-size: 9.5px;">(col-broadcast, MAX_FANOUT=32 으로 register replicate)</text>
+
+          <defs>
+            <marker id="arr-g3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><polygon points="0,0 8,4 0,8" fill="var(--gemm)"/></marker>
+            <marker id="arr-r3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><polygon points="0,0 8,4 0,8" fill="var(--rmw)"/></marker>
+            <marker id="arr-w3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><polygon points="0,0 8,4 0,8" fill="var(--warn)"/></marker>
+            <marker id="arr-m3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><polygon points="0,0 8,4 0,8" fill="var(--muted)"/></marker>
+          </defs>
+        </svg>
+      </div>
+
+      <!-- 우측: Lane_ctrl 표 + 의미 -->
+      <div style="flex: 1; display: flex; flex-direction: column; gap: 14px;">
+        <div style="background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px;">
+          <div class="muted-text" style="font-size: 11px; margin-bottom: 8px;">Lane_ctrl[3:0] — PE 4-lane 활성 mask</div>
+          <table class="dim-table">
+            <tr><th>Mode</th><th>Lane_ctrl</th><th>활성 lane</th><th>의미 (8-bit station packing)</th></tr>
+            <tr>
+              <td class="head" style="color: var(--gemm); font-weight: 600;">A8</td>
+              <td class="mono">4'b0001</td>
+              <td>lane 0 만</td>
+              <td>INT8 × 1, lane 0 가 sign-ext 으로 처리</td>
+            </tr>
+            <tr>
+              <td class="head" style="color: var(--warn); font-weight: 600;">A4</td>
+              <td class="mono">4'b0101</td>
+              <td>lane 0, 2</td>
+              <td>INT4 × 2 (top + bot), 두 lane 분리 처리</td>
+            </tr>
+            <tr>
+              <td class="head" style="color: var(--rmw); font-weight: 600;">A2</td>
+              <td class="mono">4'b1111</td>
+              <td>all 4</td>
+              <td>INT2 × 4, 4 lane 모두 동시 처리</td>
+            </tr>
+            <tr>
+              <td class="head" style="color: var(--muted);">idle</td>
+              <td class="mono">4'b0000</td>
+              <td>—</td>
+              <td>비활성 (MAC 안 함)</td>
+            </tr>
+          </table>
+        </div>
+
+        <div class="callout">
+          <div class="label">★ 왜 ping-pong</div>
+          <p>한 K-tile 의 MAC 진행 중 다음 K-tile 의 activation 을 미리 load 해야 throughput 끊김 없음.
+             현재 PE 가 읽는 buffer (broadcast) 와 load 중인 buffer 를 항상 반대편으로 둠 →
+             K-tile 경계마다 <code>in_control</code> toggle 만으로 자동 swap.</p>
+        </div>
+
+        <div class="callout">
+          <div class="label">★ 왜 Lane_ctrl 이 4-bit mask</div>
+          <p>각 PE 의 <code>adder_lane[k].ctrl</code> 가 mode-dep 행동 (sign-ext / clamp / pass-through).
+             4-bit lane mask 면 PE 안에서 mode 별 분기 없이 lane enable 만으로 처리 가능 → critical path 단축.
+             station 이 mode (Mode_oh) 와 lane mask (Lane_ctrl) 둘 다 caching.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════ Slide 6: SRAM banking ══ -->
+  <section class="slide">
+    <div class="slide-title">SRAM banking — col j → bank j, 충돌 0</div>
+    <div class="slide-subtitle">sram_1rw_banked_mp · 32 bank 각 1024 word × 32-bit · 128×128 워크로드 = 512 word/bank</div>
+    <div class="slide-body" style="flex-direction: column; gap: 18px;">
+      <div class="bank-grid" id="bank-grid"></div>
+
+      <div style="display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px;">
+        <div class="formula">
+          <span class="muted-text" style="font-size: 11px;">FP32 word 의 SRAM flat 주소 → (bank, word) 분해</span><br/><br/>
+          <span class="var">flat</span> <span class="op">=</span> <span class="var">m</span> <span class="op">×</span> <span class="var">N</span> <span class="op">+</span> <span class="var">n</span><br/>
+          <span class="var">bank</span> <span class="op">=</span> <span class="var">flat</span> <span class="op">% 32</span> <span class="op">= n % 32 (n &lt; 32) </span><br/>
+          <span class="var">word</span> <span class="op">=</span> <span class="var">flat</span> <span class="op">// 32</span><br/><br/>
+          <span class="muted-text" style="font-size: 11px;">→ 같은 m, 다른 n=32k+c 의 결과는 모두 <span class="res">bank c</span> 로</span>
+        </div>
+        <div class="callout">
+          <div class="label">★ COL-PARALLEL 의 결과</div>
+          <p>매 cycle 최대 <b>32 개 독립 R/W</b> 가능. col j 의 RMW[j] 가 자기 bank[j] 만 건드림 →
+          하드웨어에서 bank-conflict resolver 가 필요 없음. <br/>
+          <span class="mono" style="color: var(--muted); font-size: 11px;">
+            (mapping callable: <code>MXP_Tools/mxp_tools/hwio.py::interleaved_row_major_32bank</code>)
+          </span></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════ Slide 7: RMW pipeline ═ -->
+  <section class="slide">
+    <div class="slide-title">RMW 내부 — 5 cycle stateless pipe</div>
+    <div class="slide-subtitle">RMW.v · int_to_fp32(2) + sram_dly + fp32_adder(3) · HardFloat 기반 · 백프레셔 없음</div>
+    <div class="slide-body">
+      <div class="rmw-wrap">
+
+        <div class="rmw-svg-wrap">
+          <svg viewBox="0 0 1100 220" preserveAspectRatio="xMidYMid meet">
+            <!-- Inputs from left -->
+            <text x="40" y="45" class="flow-text">in_GEMM (INT32)</text>
+            <line x1="40" y1="55" x2="240" y2="55" stroke="var(--gemm)" stroke-width="2"/>
+            <polygon points="240,55 232,51 232,59" fill="var(--gemm)"/>
+
+            <text x="40" y="85" class="flow-text">scale (9b)</text>
+            <line x1="40" y1="95" x2="240" y2="95" stroke="var(--gemm)" stroke-width="2"/>
+            <polygon points="240,95 232,91 232,99" fill="var(--gemm)"/>
+
+            <text x="40" y="165" class="flow-text">in_SRAM (FP32)</text>
+            <line x1="40" y1="175" x2="240" y2="175" stroke="var(--sram)" stroke-width="2"/>
+            <polygon points="240,175 232,171 232,179" fill="var(--sram)"/>
+
+            <!-- int_to_fp32 box -->
+            <rect class="box-rect r" x="240" y="30" width="180" height="90" rx="6"/>
+            <text class="box-label" x="330" y="65" style="font-size: 14px;">int_to_fp32</text>
+            <text class="box-sub"   x="330" y="85">L_CONV = 2 cy</text>
+            <text class="box-sub"   x="330" y="105">int × 2^(scale-127)</text>
+
+            <!-- sram_dly box -->
+            <rect class="box-rect s" x="240" y="150" width="180" height="50" rx="6"/>
+            <text class="box-label" x="330" y="180" style="font-size: 13px;">sram_dly[0:L_CONV-1]</text>
+
+            <!-- fp32_adder box -->
+            <rect class="box-rect r" x="560" y="80" width="200" height="80" rx="6"/>
+            <text class="box-label" x="660" y="115" style="font-size: 14px;">fp32_adder</text>
+            <text class="box-sub"   x="660" y="135">L_ADD = 3 cy</text>
+            <text class="box-sub"   x="660" y="152">HardFloat addRecFN</text>
+
+            <!-- Connection: int_to_fp32 -> fp_a -> adder.a -->
+            <path class="flow-line flow-rmw animated" d="M 422 75 C 490 75, 490 105, 558 105"/>
+            <polygon points="558,105 550,101 550,109" fill="var(--rmw)"/>
+            <text class="flow-text-c" x="490" y="68">fp_a</text>
+
+            <!-- sram_dly -> adder.b -->
+            <path class="flow-line flow-rmw animated" d="M 422 175 C 490 175, 490 135, 558 135"/>
+            <polygon points="558,135 550,131 550,139" fill="var(--rmw)"/>
+            <text class="flow-text-c" x="490" y="158">fp_b</text>
+
+            <!-- adder out -->
+            <line class="flow-line flow-rmw animated" x1="762" y1="120" x2="1020" y2="120"/>
+            <polygon points="1020,120 1012,116 1012,124" fill="var(--rmw)"/>
+            <text class="flow-text" x="930" y="110">out_RMW (FP32)</text>
+
+            <!-- Cycle ticks -->
+            <line x1="240" y1="14" x2="240" y2="22" stroke="var(--muted)"/>
+            <text x="240" y="10" class="muted-text" text-anchor="middle">cy 0</text>
+            <line x1="560" y1="14" x2="560" y2="22" stroke="var(--muted)"/>
+            <text x="560" y="10" class="muted-text" text-anchor="middle">cy 2</text>
+            <line x1="1020" y1="14" x2="1020" y2="22" stroke="var(--muted)"/>
+            <text x="1020" y="10" class="muted-text" text-anchor="middle">cy 5</text>
+          </svg>
+        </div>
+
+        <!-- timing table -->
+        <div class="timing-grid">
+          <div class="timing-cell header">stage \ cycle</div>
+          <div class="timing-cell header">0</div>
+          <div class="timing-cell header">1</div>
+          <div class="timing-cell header">2</div>
+          <div class="timing-cell header">3</div>
+          <div class="timing-cell header">4</div>
+          <div class="timing-cell header">5</div>
+          <div class="timing-cell header">6</div>
+          <div class="timing-cell header">7</div>
+
+          <div class="timing-cell row-label">in_GEMM/scale</div>
+          <div class="timing-cell fill g">A</div>
+          <div class="timing-cell fill g">B</div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+
+          <div class="timing-cell row-label">int_to_fp32</div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell fill r">A</div>
+          <div class="timing-cell fill r">B</div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+
+          <div class="timing-cell row-label">in_SRAM (delayed)</div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell fill s">A</div>
+          <div class="timing-cell fill s">B</div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+
+          <div class="timing-cell row-label">fp32_adder</div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell fill r">A</div>
+          <div class="timing-cell fill r">B</div>
+          <div class="timing-cell fill r">·</div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+
+          <div class="timing-cell row-label">out_RMW</div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell"></div>
+          <div class="timing-cell fill ok">A</div>
+          <div class="timing-cell fill ok">B</div>
+          <div class="timing-cell"></div>
+        </div>
+
+        <div class="callout">
+          <div class="label">★ 핵심 invariant</div>
+          <p><code>sram_dly[0:L_CONV-1]</code> shift register 가 in_SRAM 을 <code>L_CONV</code> cycle 늦춰서
+             가산기 입력 두 피연산자가 <b>같은 cycle 에 도착</b>하도록 정렬. 입력 → out_RMW 총 latency = <b>5 cy</b>.
+             stateless 라 백프레셔/valid-ready 없음 — TB 컨트롤러가 schedule 책임.</p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════ Slide 8: End-to-end ══ -->
+  <section class="slide">
+    <div class="slide-title">End-to-end timeline — fire → capture → R-M-W → write</div>
+    <div class="slide-subtitle">한 col 의 한 fire 추적 · cycle-level · A8 기준 (A4 는 ×2, A2 는 ×4 lane)</div>
+    <div class="slide-body" style="flex-direction: column; gap: 16px;">
+
+      <div class="timeline">
+        <div class="timeline-row">
+          <div class="timeline-label" style="color: var(--gemm);">SA out_fire[c]</div>
+          <div class="timeline-bar">
+            <div class="timeline-seg g" style="left: 2%; width: 3%;">↑</div>
+          </div>
+        </div>
+        <div class="timeline-row">
+          <div class="timeline-label" style="color: var(--gemm);">capture (TB always)</div>
+          <div class="timeline-bar">
+            <div class="timeline-seg g" style="left: 5%; width: 4%;">push</div>
+          </div>
+        </div>
+        <div class="timeline-row">
+          <div class="timeline-label" style="color: var(--muted);">FIFO[c] dwell</div>
+          <div class="timeline-bar">
+            <div class="timeline-seg g" style="left: 9%; width: 6%; opacity: 0.5;">wait</div>
+          </div>
+        </div>
+        <div class="timeline-row">
+          <div class="timeline-label" style="color: var(--sram);">drain FSM state</div>
+          <div class="timeline-bar">
+            <div class="timeline-seg s" style="left: 15%; width: 3%;">0→1</div>
+            <div class="timeline-seg s" style="left: 18%; width: 3%;">1→2</div>
+            <div class="timeline-seg s" style="left: 21%; width: 28%; opacity: 0.7;">2→3→4 (RMW wait)</div>
+            <div class="timeline-seg s" style="left: 49%; width: 3%;">4→5</div>
+            <div class="timeline-seg s" style="left: 52%; width: 3%;">5→6</div>
+          </div>
+        </div>
+        <div class="timeline-row">
+          <div class="timeline-label" style="color: var(--sram);">SRAM port</div>
+          <div class="timeline-bar">
+            <div class="timeline-seg s" style="left: 15%; width: 3%;">R</div>
+            <div class="timeline-seg s" style="left: 49%; width: 3%;">W</div>
+          </div>
+        </div>
+        <div class="timeline-row">
+          <div class="timeline-label" style="color: var(--rmw);">RMW pipe (5 cy)</div>
+          <div class="timeline-bar">
+            <div class="timeline-seg r" style="left: 21%; width: 25%;">int→fp32 ▶ delay ▶ add</div>
+          </div>
+        </div>
+        <div class="timeline-row">
+          <div class="timeline-label" style="color: var(--rmw);">out_RMW valid</div>
+          <div class="timeline-bar">
+            <div class="timeline-seg r" style="left: 46%; width: 4%;">✓</div>
+          </div>
+        </div>
+        <div class="timeline-axis">
+          <span>0</span><span>·</span><span>·</span><span>·</span><span>·</span>
+          <span>5</span><span>·</span><span>·</span><span>·</span><span>·</span>
+          <span>10</span><span>·</span><span>·</span><span>·</span><span>·</span>
+          <span>15</span><span>·</span><span>·</span><span>·</span><span>20+</span>
+        </div>
+      </div>
+
+      <div class="notes-grid">
+        <div class="note">
+          <div class="head g">1) Capture</div>
+          <p><code>out_fire[c]</code> ↑ 마다 <code>(int32, scale, flat_addr)</code> 디코드 →
+             per-col FIFO push. mode 별 lane 수 만큼 entry (A8=1, A4=2, A2=4).</p>
+        </div>
+        <div class="note">
+          <div class="head s">2) R-M-W FSM (state 0–6)</div>
+          <p>state 0: R 발사 → 1: Q 도착 → 2: RMW 입력 → 4: 8cy wait → 5: W 발사 → 6: pop.
+             총 ~10 cy/entry. 32 col 동시 진행.</p>
+        </div>
+        <div class="note">
+          <div class="head r">3) Bit-exact 검증</div>
+          <p>RMW out_RMW = INT psum × 2^(scale−127) + 이전 FP32.
+             외부 compare 가 <code>MXP_Tools</code> golden npz 와 bank dump 를 word-by-word 매칭.</p>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ════════════════════════════════════════ Slide 9: V vs P ════════ -->
+  <section class="slide">
+    <div class="slide-title">Verification (현재) vs Production</div>
+    <div class="slide-subtitle">RMW.v 자체는 그대로 — 주변 컨트롤러만 RTL 로 옮김 · 9-mode bit-exact 회귀가 그대로 게이트</div>
+    <div class="slide-body">
+      <div class="compare">
+
+        <div class="col">
+          <div class="head v">▣ Verification TB (현재)</div>
+          <div class="compare-note">목적: 값이 맞는가? (vs MXP_Tools golden bit-exact) · throughput 무시</div>
+
+          <div class="compare-row">
+            <span class="compare-pill kept">DRIVE (2-A/2-B/3+4/5-tail)</span>
+            <span class="compare-arrow">→</span>
+            <span class="compare-pill kept">PRIME (16 cy)</span>
+            <span class="compare-arrow">→</span>
+            <span class="compare-pill kept">DRAIN</span>
+            <span class="compare-arrow">→</span>
+            <span class="compare-pill kept">DUMP</span>
+          </div>
+
+          <div style="margin-top: 12px;">
+            <div class="compare-pill kept" style="display: inline-block;">capture FIFO 2048-entry × 32 col</div>
+            <span class="compare-note">SA fire 비동기 + chain delay 15 cy 흡수</span>
+          </div>
+          <div>
+            <div class="compare-pill kept" style="display: inline-block;">drain FSM 7-state × 32 col</div>
+            <span class="compare-note">R(1) → wait(8) → W(1) per entry · TB-only</span>
+          </div>
+          <div>
+            <div class="compare-pill kept" style="display: inline-block;">zero-prime 1024 cy loop</div>
+            <span class="compare-note">첫 K-tile 초기화 (NaN 방지)</span>
+          </div>
+          <div>
+            <div class="compare-pill kept" style="display: inline-block;">DUMP 32 × 512 word read</div>
+            <span class="compare-note">$writememh → bank{0..31}.mem · 외부 compare 입력</span>
+          </div>
+
+          <div style="margin-top: auto; padding-top: 12px;">
+            <span class="tag warn">wall-clock 87~97% = DRAIN + DUMP</span>
+          </div>
+        </div>
+
+        <div class="col">
+          <div class="head p">▶ Production</div>
+          <div class="compare-note">목적: 같은 값을 빠르게 · multi-tile pipeline overlap · streaming</div>
+
+          <div class="compare-row">
+            <span class="compare-pill new">DRIVE / R-M-W / prefetch</span>
+            <span class="compare-arrow">⇄</span>
+            <span class="compare-pill new">동시 진행</span>
+          </div>
+
+          <div style="margin-top: 12px;">
+            <div class="compare-pill removed" style="display: inline-block;">FIFO 2048-entry</div>
+            <span class="compare-arrow">→</span>
+            <div class="compare-pill new" style="display: inline-block;">skid buffer ~5 entry</div>
+            <span class="compare-note">RAW hazard 분석: K-tile 간격 1024 cy ≫ RMW 5 cy → 자연 안전</span>
+          </div>
+          <div>
+            <div class="compare-pill removed" style="display: inline-block;">TB drain FSM</div>
+            <span class="compare-arrow">→</span>
+            <div class="compare-pill new" style="display: inline-block;">RTL rmw_scheduler[c]</div>
+            <span class="compare-note">1RW port arbiter + fire_decoder · 컨트롤러 RTL 화</span>
+          </div>
+          <div>
+            <div class="compare-pill removed" style="display: inline-block;">zero-prime loop</div>
+            <span class="compare-arrow">→</span>
+            <div class="compare-pill new" style="display: inline-block;">first_tile_flag mux</div>
+            <span class="compare-note">첫 K-tile 만 in_SRAM=0 강제, 이후 정상 read</span>
+          </div>
+          <div>
+            <div class="compare-pill removed" style="display: inline-block;">DUMP</div>
+            <span class="compare-arrow">→</span>
+            <div class="compare-pill new" style="display: inline-block;">다음 layer 가 직접 read</div>
+            <span class="compare-note">end of pipeline, no extra read</span>
+          </div>
+
+          <div style="margin-top: auto; padding-top: 12px;">
+            <span class="tag ok">A=2 가 A=8 대비 4× MAC throughput 노출</span>
+            <span class="tag g" style="margin-left: 6px;">RMW.v 그대로</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<div class="nav">
+  <button id="prev" title="이전">‹</button>
+  <span class="counter"><span id="cur">1</span>/<span id="total">8</span></span>
+  <button id="next" title="다음">›</button>
+  <span class="title-mini" id="title-mini">Title</span>
+</div>
+
+<script>
+// ─── slide navigation ─────────────────────────────────────────────────
+const slides = document.querySelectorAll('.slide');
+const titles = [
+  "Title",
+  "시스템 top view (32 lane)",
+  "SA 차원 매핑 (+ mode fanout)",
+  "SA 내부 dataflow",
+  "Station — lane 제어",
+  "SRAM banking",
+  "RMW 5-cy pipeline",
+  "End-to-end timeline",
+  "Verification vs Production"
+];
+const total = slides.length;
+let cur = 0;
+document.getElementById('total').textContent = total;
+document.getElementById('title-total').textContent = total;
+
+function show(i) {
+  slides[cur].classList.remove('active');
+  cur = ((i % total) + total) % total;
+  slides[cur].classList.add('active');
+  document.getElementById('cur').textContent = cur + 1;
+  document.getElementById('title-mini').textContent = titles[cur];
+}
+document.getElementById('prev').onclick = () => show(cur - 1);
+document.getElementById('next').onclick = () => show(cur + 1);
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft' || e.key === 'PageUp')   show(cur - 1);
+  if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); show(cur + 1); }
+  if (e.key === 'Home') show(0);
+  if (e.key === 'End')  show(total - 1);
+});
+
+// ─── Slide 3: PE grid generation ──────────────────────────────────────
+(function buildPEGrid() {
+  const cfgEl = document.getElementById('pe-data');
+  if (!cfgEl) return;
+  const cfg = JSON.parse(cfgEl.textContent);
+  const grid = document.getElementById('pe-grid');
+  if (!grid) return;
+  const ns = "http://www.w3.org/2000/svg";
+  for (let r = 0; r < cfg.size; r++) {
+    for (let c = 0; c < cfg.size; c++) {
+      const rect = document.createElementNS(ns, "rect");
+      rect.setAttribute("x", cfg.originX + c * cfg.cell);
+      rect.setAttribute("y", cfg.originY + r * cfg.cell);
+      rect.setAttribute("width",  cfg.cell - 2);
+      rect.setAttribute("height", cfg.cell - 2);
+      rect.setAttribute("rx", 2);
+      rect.setAttribute("fill", "var(--panel-2)");
+      rect.setAttribute("stroke", "var(--border)");
+      rect.setAttribute("stroke-width", "0.5");
+      // wave animation: each diagonal lights up sequentially
+      const delay = (r + c) * 0.08;
+      rect.style.animation = `pe-wave 2.4s ease-in-out ${delay}s infinite`;
+      grid.appendChild(rect);
+    }
+  }
+})();
+
+// ─── Slide 4: SA dataflow grid (6x6) ──────────────────────────────────
+(function buildSADataflowGrid() {
+  const svg = document.getElementById('sa-grid');
+  if (!svg) return;
+  const ns = "http://www.w3.org/2000/svg";
+  const size = 6;
+  const cell = 50;
+  const gap  = 4;
+  const originX = 50, originY = 35;
+  for (let i = 0; i < size; i++) {
+    for (let j = 0; j < size; j++) {
+      const x = originX + j * (cell + gap);
+      const y = originY + i * (cell + gap);
+      const rect = document.createElementNS(ns, "rect");
+      rect.setAttribute("x", x);
+      rect.setAttribute("y", y);
+      rect.setAttribute("width",  cell);
+      rect.setAttribute("height", cell);
+      rect.setAttribute("rx", 4);
+      if (i === j) {
+        rect.setAttribute("fill",   "rgba(255,166,87,0.18)");
+        rect.setAttribute("stroke", "var(--rmw)");
+        rect.setAttribute("stroke-width", "1.6");
+        svg.appendChild(rect);
+        const text = document.createElementNS(ns, "text");
+        text.setAttribute("x", x + cell/2);
+        text.setAttribute("y", y + cell/2 + 3);
+        text.setAttribute("text-anchor", "middle");
+        text.setAttribute("font-size", "9.5");
+        text.setAttribute("fill", "var(--rmw)");
+        text.setAttribute("font-family", "monospace");
+        text.textContent = "feeder";
+        svg.appendChild(text);
+      } else {
+        rect.setAttribute("fill",   "var(--panel-2)");
+        rect.setAttribute("stroke", "var(--border)");
+        rect.setAttribute("stroke-width", "0.6");
+        svg.appendChild(rect);
+        const text = document.createElementNS(ns, "text");
+        text.setAttribute("x", x + cell/2);
+        text.setAttribute("y", y + cell/2 + 3);
+        text.setAttribute("text-anchor", "middle");
+        text.setAttribute("font-size", "8.5");
+        text.setAttribute("fill", "var(--muted)");
+        text.setAttribute("font-family", "monospace");
+        text.textContent = "(" + i + "," + j + ")";
+        svg.appendChild(text);
+      }
+    }
+  }
+})();
+
+// ─── Slide 6: bank grid generation ────────────────────────────────────
+(function buildBankGrid() {
+  const grid = document.getElementById('bank-grid');
+  if (!grid) return;
+  for (let i = 0; i < 32; i++) {
+    const cell = document.createElement('div');
+    cell.className = 'bank-cell';
+    cell.innerHTML = `<div class="b-id">bank ${i}</div><div class="b-depth">1024 × 32-bit</div><div class="b-depth">← col ${i}</div>`;
+    grid.appendChild(cell);
+  }
+})();
+</script>
+</body>
+</html>
