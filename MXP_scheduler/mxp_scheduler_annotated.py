@@ -505,8 +505,8 @@ def explain(m, w, hw):
     blocks = list(_blocks(m, w))
     print(f"blocks   : {len(blocks)} outer block(s) in perm order")
     block_compute_sum = sum(b[1] for b in blocks)
-    cw = compute_work(w)
-    print(f"compute_work : {cw}  (= TILE*NT*Σwbits ; Σ per-block compute = {block_compute_sum})")
+    cw = compute_work(w, hw.cycles_per_bit)
+    print(f"compute_work : {cw}  (= cycles_per_bit*TILE*NT*Σwbits ; per-block compute sum {block_compute_sum} x cpb {hw.cycles_per_bit})")
 
     # DRAM 트래픽 분해 (순서 의존).
     d = dram_bits(m, w)
@@ -525,7 +525,8 @@ def explain(m, w, hw):
     fill, steady, drain = stall_fill(m, w, hw)
     stall = steady + drain
     print(f"stall / fill : stall={stall}  fill={fill}   (DRAM bw shared by A/W fetch + C spill/reload)")
-    print(f"actual_cycle : {actual_cycle(m, w, hw)}  (= compute_work {cw} + fill {fill} + stall {stall})")
+    print(f"actual_cycle : {actual_cycle(m, w, hw)}  (= compute_work {cw} + sa_fill {hw.sa_fill_cycles} "
+          f"+ fill {fill} + stall {stall} + sa_drain {hw.sa_drain_cycles})")
 
     # LPT headroom 지표.
     h = lpt_headroom(m, w, hw)
