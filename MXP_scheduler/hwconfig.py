@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 _HERE = Path(__file__).parent
-DEFAULT_PRESETS = _HERE / "dram_presets.json"
+DEFAULT_PRESETS = _HERE / "dram_presets.json"   # provenance + derivation: see docs/dram-energy/ ; schema locked by test_dram_presets_schema_and_provenance
 DEFAULT_CACHE = _HERE / ".cacti_cache.json"
 
 _TOP_KEYS = {"sram", "dram", "chip_freq_mhz", "coeffs", "cacti_bin", "cycles"}

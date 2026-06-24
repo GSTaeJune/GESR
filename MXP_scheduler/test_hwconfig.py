@@ -273,3 +273,24 @@ def test_load_config_rejects_unknown_cycle_key(tmp_path):
     p.write_text(__import__("json").dumps(cfg))
     with pytest.raises(ValueError):
         hc.load_config(str(p))
+
+
+def test_dram_presets_schema_and_provenance():
+    import json, hwconfig as hc
+    presets = json.load(open(hc.DEFAULT_PRESETS))
+    assert presets, "dram_presets.json must be non-empty"
+    for name, p in presets.items():
+        assert set(p) >= {"data_rate_mts", "bus_bits", "pj_per_bit", "source"}, \
+            f"{name} missing required field(s)"
+        assert p["data_rate_mts"] > 0 and p["bus_bits"] > 0 and p["pj_per_bit"] > 0, \
+            f"{name} has non-positive numeric field"
+        assert isinstance(p["source"], str) and len(p["source"].strip()) >= 20, \
+            f"{name} source provenance too short/missing"
+
+def test_dram_params_derivation_matches_convention():
+    import hwconfig as hc
+    d = hc.dram_params("LPDDR5-6400_x16")
+    # spec convention: f_dram = data_rate/2 (DDR bus clock); dram_bw = 2*bus_bits
+    assert d["dram_bw"] == 2 * 16
+    assert d["dram_freq_mhz"] == 6400 / 2.0
+    assert d["pj_per_bit"] == 9.0
