@@ -170,15 +170,15 @@ def main(argv=None):
     p.add_argument("--banks", type=int, default=32)
     p.add_argument("--dram-bw", type=float, default=64.0)
     p.add_argument("--node-budget", type=int, default=DEFAULT_NODE_BUDGET)
-    a = p.parse_args(argv)
-    if a.selftest:
+    args = p.parse_args(argv)
+    if args.selftest:
         selftest(); return 0
-    if not (a.M and a.K and a.N):
+    if not (args.M and args.K and args.N):
         p.error("provide --M --K --N (or --selftest)")
-    MT, KT = a.M // s.TILE, a.K // s.TILE
-    w = s.Work(M=a.M, K=a.K, N=a.N, wbits=[[a.act] * KT for _ in range(MT)], act_bits=a.act)
-    hw = s.HW(bank_size=a.bank_size, banks=a.banks, dram_bw=a.dram_bw)
-    res = optimize_exact(w, hw, node_budget=a.node_budget)
+    MT, KT = args.M // s.TILE, args.K // s.TILE
+    w = s.Work(M=args.M, K=args.K, N=args.N, wbits=[[args.act] * KT for _ in range(MT)], act_bits=args.act)
+    hw = s.HW(bank_size=args.bank_size, banks=args.banks, dram_bw=args.dram_bw)
+    res = optimize_exact(w, hw, node_budget=args.node_budget)
     if not res["feasible"]:
         print(f"NO FEASIBLE SCHEDULE: {res['reason']}")
         return 1                                      # CLI error, never a silent inf (invariant #11)

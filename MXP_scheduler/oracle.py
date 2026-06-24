@@ -7,6 +7,10 @@ global optimum. Used only to cross-validate A* on small T. stdlib only.
 
 Hard guard: raises if T or the per-order state space is too large to be exhaustive, so a
 test never silently runs a non-exhaustive 'oracle'.
+
+Performance note: per fixed order the DP enumerates es.eviction_choices (up to 2**|evictable|)
+per layer, so even within the guard a T=6 case with many low-precision (small) tiles can take
+minutes. The committed tests use T<=5 and stay sub-second; reach for larger T sparingly.
 """
 import itertools
 import math
