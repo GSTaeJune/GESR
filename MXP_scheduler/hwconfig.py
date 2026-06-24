@@ -14,7 +14,7 @@ _HERE = Path(__file__).parent
 DEFAULT_PRESETS = _HERE / "dram_presets.json"
 DEFAULT_CACHE = _HERE / ".cacti_cache.json"
 
-_TOP_KEYS = {"sram", "dram", "chip_freq_mhz", "coeffs", "cacti_bin"}
+_TOP_KEYS = {"sram", "dram", "chip_freq_mhz", "coeffs", "cacti_bin", "cycles"}
 _REQUIRED = {"sram", "dram", "chip_freq_mhz"}
 _SRAM_KEYS = {"bank_size", "banks", "word_bits", "tech_nm"}
 _SRAM_REQUIRED = {"bank_size", "banks"}
@@ -44,6 +44,11 @@ def load_config(path):
     unknown = set(cfg["coeffs"]) - _COEFF_KEYS
     if unknown:
         raise ValueError(f"config coeffs has unknown key(s) {sorted(unknown)}; valid: {sorted(_COEFF_KEYS)}")
+    cfg.setdefault("cycles", {})
+    _CYCLE_KEYS = {"cycles_per_bit", "sa_fill_cycles", "sa_drain_cycles"}
+    unknown = set(cfg["cycles"]) - _CYCLE_KEYS
+    if unknown:
+        raise ValueError(f"config cycles has unknown key(s) {sorted(unknown)}; valid: {sorted(_CYCLE_KEYS)}")
     return cfg
 
 
@@ -241,6 +246,10 @@ def resolve(cfg, runner=cacti_run, presets_path=DEFAULT_PRESETS, cache_path=DEFA
     coeffs["dram"] = d["pj_per_bit"]
     coeffs["onchip"] = c["onchip_pj_per_bit"]
     coeffs.update(cfg["coeffs"])
+    cyc = cfg["cycles"]
     return {"bank_size": sram["bank_size"], "banks": sram["banks"],
             "word_bits": sram["word_bits"], "dram_bw": float(d["dram_bw"]),
-            "freq_ratio": chip / d["dram_freq_mhz"], "coeffs": coeffs}
+            "freq_ratio": chip / d["dram_freq_mhz"], "coeffs": coeffs,
+            "cycles_per_bit": cyc.get("cycles_per_bit", 1.0),
+            "sa_fill_cycles": cyc.get("sa_fill_cycles", 0),
+            "sa_drain_cycles": cyc.get("sa_drain_cycles", 0)}

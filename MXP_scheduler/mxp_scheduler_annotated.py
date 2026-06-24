@@ -43,6 +43,9 @@ class HW:
                              #   DRAM 전송시간을 on-chip 사이클(compute_work 의 단위)로 환산하는 비율.
     coeffs: dict = field(default_factory=lambda: dict(DEFAULT_COEFFS))
                              #   에너지 계수. dataclass mutable default 회피 위해 매 인스턴스 복제본 생성.
+    cycles_per_bit: float = 1.0   # weight-bit-plane 당 on-chip 사이클 (bit-serial); HW 측정으로 보정.
+    sa_fill_cycles: int = 0       # SA 파이프라인 fill latency (flat); 0 = 현재 모델.
+    sa_drain_cycles: int = 0      # SA 파이프라인 drain latency (flat); 0 = 현재 모델.
 
     def __post_init__(self):
         # 용량을 이루는 값들은 모두 양수여야 함. 0/음수면 cap_bits 가 0 이하가 되어
@@ -72,6 +75,14 @@ class HW:
         unknown = set(self.coeffs) - {"dram", "onchip", "mac", "rmw"}
         if unknown:
             raise ValueError(f"coeffs has unknown key(s) {sorted(unknown)}; valid: dram/onchip/mac/rmw")
+        # cycles_per_bit 은 compute_work 의 곱셈 인수 (0/음수면 compute 가 0/음수) → 양수 강제.
+        if self.cycles_per_bit <= 0:
+            raise ValueError(f"cycles_per_bit must be positive, got {self.cycles_per_bit}")
+        # SA fill/drain 은 더해지는 flat latency (음수면 사이클을 깎음) → 비음수 강제.
+        for name, v in (("sa_fill_cycles", self.sa_fill_cycles),
+                        ("sa_drain_cycles", self.sa_drain_cycles)):
+            if v < 0:
+                raise ValueError(f"{name} must be non-negative, got {v}")
 
     @property
     def eff_bw(self):
@@ -246,12 +257,10 @@ def rmw_ops(w):
     return w.MT * w.KT * w.NT * TILE * TILE * _DISP[w.act_bits]
 
 
-def compute_work(w):
-    # Σ_cube 32·b = TILE · NT · Σ_{mt,kt} wbits[mt][kt]  (순서 독립 이상적 하한).
-    # int() 금지: 분수 평균 wbits 일 때 이 값은 _blocks 의 블록별 compute 합과 정확히 같아야
-    # 한다. 안 그러면 actual_cycle(= compute_work + fill + stall)이 절단된 기준과 정확한
-    # 기준을 섞게 된다.
-    return TILE * w.NT * sum(sum(row) for row in w.wbits)
+def compute_work(w, cycles_per_bit=1.0):
+    # 순서 독립 이상값: cycles_per_bit · TILE · NT · Σ wbits. int() 금지(정확값).
+    # cycles_per_bit=1(기본) 이면 기존 수치 그대로 — _blocks 의 블록별 compute 합과 일치.
+    return cycles_per_bit * TILE * w.NT * sum(sum(row) for row in w.wbits)
 
 
 def onchip_bits(m, w, d=None):
@@ -375,9 +384,14 @@ def stall_fill(m, w, hw, blocks=None):
 
 
 def actual_cycle(m, w, hw):
-    # 실제 사이클 = 이상적 compute_work + 시작 fill + mid-stream steady_stall + trailing drain.
+    # 실제 사이클 = (cycles_per_bit 로 스케일된) compute_work + SA fill + fill + steady + drain + SA drain.
+    # NOTE: cycles_per_bit scales the compute_work TOTAL but NOT the per-block hide budget in
+    # _stall_of_order, so steady_stall is conservative (over-stated) when cycles_per_bit>1.
+    # M1's stall=0 feasibility gate must scale the per-block hide budget consistently (else it
+    # would wrongly mark feasible schedules infeasible). Inert at the default cycles_per_bit=1.0.
     fill, steady, drain = stall_fill(m, w, hw)
-    return float(compute_work(w)) + fill + steady + drain
+    return (float(compute_work(w, hw.cycles_per_bit)) + hw.sa_fill_cycles
+            + fill + steady + drain + hw.sa_drain_cycles)
 
 
 def evaluate(m, w, hw):
@@ -390,7 +404,7 @@ def evaluate(m, w, hw):
     feas = footprint_bits(m, w, blocks) <= hw.cap_bits
     eb = energy_breakdown(m, w, hw, d)
     fill, steady, drain = stall_fill(m, w, hw, blocks)
-    cw = compute_work(w)
+    cw = compute_work(w, hw.cycles_per_bit)
     return {
         "mapping": m,
         "feasible": feas,
@@ -402,7 +416,7 @@ def evaluate(m, w, hw):
         "steady_stall": steady,
         "drain": drain,
         "stall": steady + drain,          # 하위호환: steady+drain 합산값
-        "actual_cycle": float(cw) + fill + steady + drain,
+        "actual_cycle": float(cw) + hw.sa_fill_cycles + fill + steady + drain + hw.sa_drain_cycles,
     }
 
 
@@ -580,7 +594,10 @@ def main(argv=None):
                 # word_bits 는 물리 스펙 — CLI 오버라이드 없음 (config 또는 기본값)
                 word_bits=cfg_kw["word_bits"] if cfg_kw is not None else 32,
                 freq_ratio=pick(a.freq_ratio, "freq_ratio", 1.0),
-                coeffs=coeffs)
+                coeffs=coeffs,
+                cycles_per_bit=cfg_kw["cycles_per_bit"] if cfg_kw is not None else 1.0,
+                sa_fill_cycles=cfg_kw["sa_fill_cycles"] if cfg_kw is not None else 0,
+                sa_drain_cycles=cfg_kw["sa_drain_cycles"] if cfg_kw is not None else 0)
     except ValueError as e:
         p.error(str(e))
     ranked = optimize(w, hw, max_cycle=a.max_cycle)

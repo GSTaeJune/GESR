@@ -624,3 +624,36 @@ def test_evaluate_exposes_steady_stall_and_drain():
     # back-compat: r["stall"] stays the combined steady+drain
     assert r["stall"] == 2304.0 + 2048.0
     assert r["actual_cycle"] == float(s.compute_work(w)) + 768.0 + 2304.0 + 2048.0
+
+
+def test_cycle_params_default_unchanged():
+    # defaults (cycles_per_bit=1, sa_fill=sa_drain=0) reproduce today's actual_cycle
+    w = s.Work(M=64, K=64, N=64, wbits=[[2, 2], [2, 2]], act_bits=8)
+    m = s.Mapping(perm=("N", "M", "K"), m_in=2, k_in=2, n_in=1)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    assert hw.cycles_per_bit == 1.0
+    assert hw.sa_fill_cycles == 0
+    assert hw.sa_drain_cycles == 0
+    assert s.actual_cycle(m, w, hw) == 5632.0   # same as Task 1 golden
+
+
+def test_cycle_params_scale_compute_and_add_latency():
+    w = s.Work(M=64, K=64, N=64, wbits=[[2, 2], [2, 2]], act_bits=8)
+    m = s.Mapping(perm=("N", "M", "K"), m_in=2, k_in=2, n_in=1)
+    base = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    # compute_work doubles with cycles_per_bit=2; SA fill/drain add flat cycles
+    hw2 = s.HW(bank_size=1024, banks=32, dram_bw=32,
+               cycles_per_bit=2.0, sa_fill_cycles=10, sa_drain_cycles=20)
+    assert s.compute_work(w, hw2.cycles_per_bit) == 2 * s.compute_work(w, base.cycles_per_bit)
+    # actual_cycle gains 2x compute over base-compute, plus 30 SA latency
+    base_cycle = s.actual_cycle(w=w, m=m, hw=base)
+    assert s.actual_cycle(m, w, hw2) == (
+        base_cycle + s.compute_work(w) + 30)   # +1x compute (2x-1x) + 10 + 20
+
+
+def test_cycle_params_reject_negative():
+    import pytest
+    with pytest.raises(ValueError):
+        s.HW(1024, 32, 64, cycles_per_bit=0)
+    with pytest.raises(ValueError):
+        s.HW(1024, 32, 64, sa_fill_cycles=-1)

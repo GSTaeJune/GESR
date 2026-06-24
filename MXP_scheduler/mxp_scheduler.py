@@ -23,6 +23,9 @@ class HW:
     word_bits: int = 32     # FP32 psum word
     freq_ratio: float = 1.0  # on-chip cycles per DRAM cycle (= f_chip / f_dram)
     coeffs: dict = field(default_factory=lambda: dict(DEFAULT_COEFFS))
+    cycles_per_bit: float = 1.0   # on-chip cycles per weight-bit-plane (bit-serial); HW-calibrated
+    sa_fill_cycles: int = 0       # SA pipeline fill latency (flat); 0 = current model
+    sa_drain_cycles: int = 0      # SA pipeline drain latency (flat); 0 = current model
 
     def __post_init__(self):
         for name, v in (("bank_size", self.bank_size), ("banks", self.banks),
@@ -50,6 +53,12 @@ class HW:
         unknown = set(self.coeffs) - {"dram", "onchip", "mac", "rmw"}
         if unknown:
             raise ValueError(f"coeffs has unknown key(s) {sorted(unknown)}; valid: dram/onchip/mac/rmw")
+        if self.cycles_per_bit <= 0:
+            raise ValueError(f"cycles_per_bit must be positive, got {self.cycles_per_bit}")
+        for name, v in (("sa_fill_cycles", self.sa_fill_cycles),
+                        ("sa_drain_cycles", self.sa_drain_cycles)):
+            if v < 0:
+                raise ValueError(f"{name} must be non-negative, got {v}")
 
     @property
     def eff_bw(self):
@@ -215,11 +224,9 @@ def rmw_ops(w):
     return w.MT * w.KT * w.NT * TILE * TILE * _DISP[w.act_bits]
 
 
-def compute_work(w):
-    # Σ_cube 32·b = TILE · NT · Σ_{mt,kt} wbits[mt][kt]  (order-independent ideal lower bound).
-    # Exact (no int()): with fractional avg wbits this must equal Σ per-block compute in _blocks,
-    # otherwise actual_cycle (= compute_work + fill + stall) would mix a truncated and an exact base.
-    return TILE * w.NT * sum(sum(row) for row in w.wbits)
+def compute_work(w, cycles_per_bit=1.0):
+    # order-independent ideal: cycles_per_bit * TILE * NT * Sum wbits. Exact (no int()).
+    return cycles_per_bit * TILE * w.NT * sum(sum(row) for row in w.wbits)
 
 
 def onchip_bits(m, w, d=None):
@@ -331,8 +338,13 @@ def stall_fill(m, w, hw, blocks=None):
 
 
 def actual_cycle(m, w, hw):
+    # NOTE: cycles_per_bit scales the compute_work TOTAL but NOT the per-block hide budget in
+    # _stall_of_order, so steady_stall is conservative (over-stated) when cycles_per_bit>1.
+    # M1's stall=0 feasibility gate must scale the per-block hide budget consistently (else it
+    # would wrongly mark feasible schedules infeasible). Inert at the default cycles_per_bit=1.0.
     fill, steady, drain = stall_fill(m, w, hw)
-    return float(compute_work(w)) + fill + steady + drain
+    return (float(compute_work(w, hw.cycles_per_bit)) + hw.sa_fill_cycles
+            + fill + steady + drain + hw.sa_drain_cycles)
 
 
 def evaluate(m, w, hw):
@@ -344,7 +356,7 @@ def evaluate(m, w, hw):
     feas = footprint_bits(m, w, blocks) <= hw.cap_bits
     eb = energy_breakdown(m, w, hw, d)
     fill, steady, drain = stall_fill(m, w, hw, blocks)
-    cw = compute_work(w)
+    cw = compute_work(w, hw.cycles_per_bit)
     return {
         "mapping": m,
         "feasible": feas,
@@ -356,7 +368,7 @@ def evaluate(m, w, hw):
         "steady_stall": steady,
         "drain": drain,
         "stall": steady + drain,          # back-compat combined value
-        "actual_cycle": float(cw) + fill + steady + drain,
+        "actual_cycle": float(cw) + hw.sa_fill_cycles + fill + steady + drain + hw.sa_drain_cycles,
     }
 
 
@@ -559,10 +571,12 @@ def main(argv=None):
         hw = HW(bank_size=pick(a.bank_size, "bank_size", 1024),
                 banks=pick(a.banks, "banks", 32),
                 dram_bw=pick(a.dram_bw, "dram_bw", 64.0),
-                # word_bits: physical spec, no CLI override (config or default only)
                 word_bits=cfg_kw["word_bits"] if cfg_kw is not None else 32,
                 freq_ratio=pick(a.freq_ratio, "freq_ratio", 1.0),
-                coeffs=coeffs)
+                coeffs=coeffs,
+                cycles_per_bit=cfg_kw["cycles_per_bit"] if cfg_kw is not None else 1.0,
+                sa_fill_cycles=cfg_kw["sa_fill_cycles"] if cfg_kw is not None else 0,
+                sa_drain_cycles=cfg_kw["sa_drain_cycles"] if cfg_kw is not None else 0)
     except ValueError as e:
         p.error(str(e))
     ranked = optimize(w, hw, max_cycle=a.max_cycle)

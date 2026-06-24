@@ -250,3 +250,26 @@ def test_real_cacti_run(tmp_path):
                            cache_path=str(tmp_path / "c.json"))
     assert r["onchip_pj_per_bit"] > 0          # 수치 golden 은 CACTI 버전 의존이라 두지 않음
     assert r["sram_max_freq_mhz"] > 0
+
+
+def test_resolve_passes_cycle_params(tmp_path, monkeypatch):
+    import hwconfig as hc
+    cfg = {"sram": {"bank_size": 1024, "banks": 32}, "dram": "LPDDR5-6400_x16",
+           "chip_freq_mhz": 250.0, "cycles": {"cycles_per_bit": 2.0, "sa_fill_cycles": 5}}
+    p = tmp_path / "hw.json"
+    p.write_text(__import__("json").dumps(cfg))
+    loaded = hc.load_config(str(p))
+    kw = hc.resolve(loaded, runner=lambda *a, **k: {"onchip_pj_per_bit": 0.85, "sram_max_freq_mhz": 900.0})
+    assert kw["cycles_per_bit"] == 2.0
+    assert kw["sa_fill_cycles"] == 5
+    assert kw["sa_drain_cycles"] == 0   # default
+
+
+def test_load_config_rejects_unknown_cycle_key(tmp_path):
+    import hwconfig as hc, pytest
+    cfg = {"sram": {"bank_size": 1, "banks": 1}, "dram": "X", "chip_freq_mhz": 1,
+           "cycles": {"cyclez_per_bit": 2.0}}
+    p = tmp_path / "hw.json"
+    p.write_text(__import__("json").dumps(cfg))
+    with pytest.raises(ValueError):
+        hc.load_config(str(p))
