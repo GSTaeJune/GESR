@@ -158,3 +158,67 @@ def eviction_choices(state, c, w, hw):
             freed = sum(sizes[i] for i in combo)
             if freed >= deficit:                                 # deficit may be <= 0 -> all qualify
                 yield frozenset(evictable[i] for i in combo)
+
+
+def eval_sched(w, hw, order, evictions):
+    """Fold apply_cube over a full (order, evictions). Returns a dict:
+      capacity_feasible, stall0_feasible, feasible (both), reason (None or str),
+      dram_read_bits, dram_spill_bits, dram_final_bits,
+      fill, steady_stall, drain, actual_cycle, energy (VARIABLE dram energy = objective).
+
+    `energy` = (read + spill) * (coeffs.dram + coeffs.onchip) -- the DRAM read+write energy the
+    optimizer minimizes (matches spec §3/§6 'energy = (load + spill bits)*(dram+onchip)'). `read`
+    includes the MANDATORY first-touch A/W loads (a schedule-invariant floor) PLUS variable
+    reloads; `spill` is variable C-partial spills. EXCLUDED (schedule-invariant constants that do
+    not change the argmin -- invariant #2): final C writes, SA-facing on-chip reads, mac, rmw.
+    So an all-resident schedule has energy = first-touch-loads * coef (NOT zero -- the loads are
+    real DRAM energy; only reloads/spills are zero). The spec §7 heuristic counts exactly these
+    first-touch loads, so h0(start) == the all-resident optimum (tight). NOT directly comparable
+    in magnitude to mxp_scheduler.energy_breakdown()['total']."""
+    cubes = all_cubes(w)
+    if sorted(order) != sorted(cubes):
+        raise ValueError("order must be a permutation of all cubes (each exactly once)")
+    if len(evictions) != len(order):
+        raise ValueError(f"evictions must have one set per cube ({len(order)}), got {len(evictions)}")
+
+    state = SchedState(done=frozenset(), resident=frozenset(), last_compute=-1.0)
+    read_total = spill_total = 0.0
+    fill = 0.0
+    steady = 0.0
+    for i, c in enumerate(order):
+        new_state, read, spill, unhidden, cap_ok = apply_cube(state, c, frozenset(evictions[i]), w, hw)
+        if not cap_ok:
+            return {"capacity_feasible": False, "stall0_feasible": False, "feasible": False,
+                    "reason": f"capacity exceeded at step {i} (cube {c})",
+                    "dram_read_bits": read_total, "dram_spill_bits": spill_total,
+                    "dram_final_bits": w.MT * w.NT * TILE * TILE * FP32_BITS,
+                    "fill": fill, "steady_stall": steady, "drain": 0.0,
+                    "actual_cycle": float("inf"), "energy": float("inf")}
+        if i == 0:
+            fill = unhidden
+        else:
+            steady += unhidden
+        read_total += read
+        spill_total += spill
+        state = new_state
+
+    final_bits = w.MT * w.NT * TILE * TILE * FP32_BITS          # invariant: each C written once
+    resident_c_bits = sum(tile_size(t, w) for t in state.resident if t[0] == "C")
+    drain = resident_c_bits / hw.eff_bw                        # trailing flush, no compute to hide
+    coef = hw.coeffs["dram"] + hw.coeffs["onchip"]
+    stall0 = (steady == 0.0)
+    return {
+        "capacity_feasible": True,
+        "stall0_feasible": stall0,
+        "feasible": stall0,                                    # capacity already true here
+        "reason": None if stall0 else "steady_stall > 0 (stall=0 violated)",
+        "dram_read_bits": read_total,
+        "dram_spill_bits": spill_total,
+        "dram_final_bits": final_bits,
+        "fill": fill,
+        "steady_stall": steady,
+        "drain": drain,
+        "actual_cycle": (float(compute_work(w, hw.cycles_per_bit))
+                         + hw.sa_fill_cycles + fill + steady + drain + hw.sa_drain_cycles),
+        "energy": (read_total + spill_total) * coef,
+    }

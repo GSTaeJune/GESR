@@ -133,3 +133,87 @@ def test_eviction_choices_excludes_insufficient_subsets_when_tight():
     #   {W(0,0)} frees 2048 -> NO; {} -> NO.
     choices = set(es.eviction_choices(st, (1, 0, 0), w, hw))
     assert choices == {frozenset({("W", 0, 0), ("C", 0, 0)})}
+
+
+def test_eval_sched_rejects_non_permutation():
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 2], [2, 2]], act_bits=2)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    cubes = es.all_cubes(w)
+    with pytest.raises(ValueError):
+        es.eval_sched(w, hw, cubes[:-1], [frozenset()] * (len(cubes) - 1))  # missing a cube
+    with pytest.raises(ValueError):
+        es.eval_sched(w, hw, cubes, [frozenset()] * (len(cubes) - 1))       # evictions length mismatch
+
+
+def test_eval_sched_all_resident_no_eviction():
+    # All tiles fit -> zero reloads/spills; read = first-touch A+W; final = all C written once.
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)   # MT=KT=NT=2, T=8
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)                    # cap_bits = 1048576
+    cubes = es.all_cubes(w)
+    r = es.eval_sched(w, hw, cubes, [frozenset()] * len(cubes))
+    assert r["capacity_feasible"] is True
+    assert r["dram_spill_bits"] == 0.0
+    # 4 A tiles x 8192 + 4 W tiles x 8192 = 65536 (C zero-init free)
+    assert r["dram_read_bits"] == 65536
+    assert r["dram_final_bits"] == 4 * (s.TILE * s.TILE * s.FP32_BITS)  # 131072
+    # energy = (read + spill) * coef. No reloads/spills, but the mandatory first-touch A/W loads
+    # are REAL DRAM energy (final C writes are the excluded invariant constant) -> NOT zero.
+    coef = hw.coeffs["dram"] + hw.coeffs["onchip"]
+    assert r["energy"] == 65536 * coef
+
+
+def test_eval_sched_total_dram_matches_closed_form_all_resident():
+    # Parity (spec §8): for a fully-resident schedule, read+spill+final == closed-form total.
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)
+    cubes = es.all_cubes(w)
+    r = es.eval_sched(w, hw, cubes, [frozenset()] * len(cubes))
+    total_dram = r["dram_read_bits"] + r["dram_spill_bits"] + r["dram_final_bits"]
+    m = s.Mapping(perm=("N", "K", "M"), m_in=2, k_in=2, n_in=2)   # single all-resident block
+    assert total_dram == s.dram_bits(m, w)["total"]               # both 196608
+
+
+def test_eval_sched_hand_built_spill_accounting():
+    # Force one partial-C eviction + its reload via explicit evictions; check exact bits.
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 2], [2, 2]], act_bits=2)  # MT=2,KT=2,NT=1, T=4
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=32)                   # cap large: everything fits
+    order = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0)]
+    evictions = [frozenset(), frozenset({("C", 0, 0)}), frozenset(), frozenset()]
+    r = es.eval_sched(w, hw, order, evictions)
+    c_sz = s.TILE * s.TILE * s.FP32_BITS    # 32768
+    a_sz = w_sz = s.TILE * s.TILE * 2       # 2048
+    # reads: every A loaded once (2), every W once (4), one C reload (the spilled C(0,0))
+    assert r["dram_read_bits"] == 2 * a_sz + 4 * w_sz + c_sz        # 4096 + 8192 + 32768 = 45056
+    assert r["dram_spill_bits"] == c_sz                            # exactly one partial spill
+    assert r["dram_final_bits"] == 2 * c_sz                        # 2 C tiles, one final write each
+    # variable energy uses the unified (dram + onchip) per-bit coefficient
+    coef = hw.coeffs["dram"] + hw.coeffs["onchip"]
+    assert r["energy"] == (45056 + c_sz) * coef                    # (read + spill) * coef
+
+
+def test_eval_sched_stall0_flag_and_actual_cycle():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=10 ** 12)   # infinite BW -> all transfers hidden
+    cubes = es.all_cubes(w)
+    r = es.eval_sched(w, hw, cubes, [frozenset()] * len(cubes))
+    assert r["steady_stall"] < 1.0
+    assert r["stall0_feasible"] is True
+    # actual_cycle = compute_work(cpb) + sa_fill + fill + steady + drain + sa_drain
+    assert r["actual_cycle"] == pytest.approx(
+        float(s.compute_work(w, hw.cycles_per_bit)) + hw.sa_fill_cycles
+        + r["fill"] + r["steady_stall"] + r["drain"] + hw.sa_drain_cycles)
+
+
+def test_cycles_per_bit_scales_stall_hide_budget():
+    # Invariant #5: cube_compute (the per-step hide budget) scales with cycles_per_bit, so a
+    # fetch that stalls at cpb=1 becomes hidden at cpb=8. (M0's note: the hide budget was
+    # unscaled; M1 scales BOTH sides consistently.) Big cap -> no reload, fetch is first-touch.
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    cubes = es.all_cubes(w)
+    ev = [frozenset()] * len(cubes)
+    slow = s.HW(bank_size=4096, banks=32, dram_bw=32, cycles_per_bit=1.0)   # cap holds everything
+    fast = s.HW(bank_size=4096, banks=32, dram_bw=32, cycles_per_bit=8.0)
+    r1 = es.eval_sched(w, slow, cubes, ev)
+    r8 = es.eval_sched(w, fast, cubes, ev)
+    assert r1["steady_stall"] > 0          # at cpb=1 the per-cube A+W fetch is NOT fully hidden
+    assert r8["steady_stall"] == 0         # 8x compute hides every fetch (consistent scaling)
