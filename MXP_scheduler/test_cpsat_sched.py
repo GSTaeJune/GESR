@@ -189,3 +189,10 @@ def test_fractional_wbits_scaling_parity():
     e = es.eval_sched(w, hw, res["order"], res["evictions"])
     assert e["feasible"] is True
     assert e["energy"] == pytest.approx(res["energy"], abs=1e-6)
+
+
+def test_measure_gap_cpsat_backend_smoke():
+    # --quick: smallest shape (T=4), one prec, two capacities -> end-to-end in seconds, no raise.
+    import measure_gap
+    rc = measure_gap.main(["--backend", "cpsat", "--quick", "--max-time", "5"])
+    assert rc == 0
