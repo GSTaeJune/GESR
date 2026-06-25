@@ -166,3 +166,26 @@ def test_cpsat_equals_oracle_and_astar(M, K, N, wb, act, bank_size, word_bits):
     coef = hw.coeffs["dram"] + hw.coeffs["onchip"]
     # canonical equality on integer traffic bits (exact for integer wbits)
     assert round(cp["energy"] / coef) == round(orc["energy"] / coef) == round(ast["energy"] / coef)
+
+
+def test_fractional_dram_bw_scaling_parity():
+    # Fractional dram_bw -> G != 1 path. Reconstruct -> eval_sched parity must still hold.
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 4], [2, 2]], act_bits=2)
+    hw = s.HW(bank_size=2, banks=32, dram_bw=2.5, word_bits=1024)   # finite, fractional BW
+    res = cps.optimize_exact(w, hw)
+    if res["feasible"]:
+        e = es.eval_sched(w, hw, res["order"], res["evictions"])
+        assert e["feasible"] is True
+        assert e["energy"] == pytest.approx(res["energy"], abs=1e-6)
+
+
+def test_fractional_wbits_scaling_parity():
+    # Fractional average weight bits are permitted by Work (avg bits in [2,8]); a value whose
+    # *1024 size is non-integral (e.g. 2.1 -> 2150.4 bits) exercises G != 1 size scaling.
+    w = s.Work(M=32, K=64, N=64, wbits=[[2.1, 4.0]], act_bits=2)
+    hw = s.HW(bank_size=40, banks=32, dram_bw=10 ** 12, word_bits=32)
+    res = cps.optimize_exact(w, hw)
+    assert res["feasible"] is True
+    e = es.eval_sched(w, hw, res["order"], res["evictions"])
+    assert e["feasible"] is True
+    assert e["energy"] == pytest.approx(res["energy"], abs=1e-6)
