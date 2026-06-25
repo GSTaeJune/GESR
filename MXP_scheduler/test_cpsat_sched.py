@@ -109,3 +109,26 @@ def test_honest_gap_on_timeout():
         assert res["energy"] >= res["lower_bound"] - 1e-6
         assert res["gap"] == pytest.approx((res["energy"] - res["lower_bound"]) / res["lower_bound"])
         assert res["gap"] >= 0.0
+
+
+def test_stall0_infeasible_diagnostic():
+    # Big cap (no reload pressure) + tiny BW -> NO stall=0 schedule. Must report feasible=False,
+    # a positive min_steady_stall, and a human reason -- not a bare inf.
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    hw = s.HW(bank_size=4096, banks=32, dram_bw=1)        # huge cap, tiny BW -> all stall
+    res = cps.optimize_exact(w, hw)
+    assert res["feasible"] is False and res["proven_optimal"] is False
+    assert res["energy"] == float("inf")
+    assert res["min_steady_stall"] is not None and res["min_steady_stall"] > 0
+    assert "stall=0" in res["reason"]
+
+
+def test_capacity_infeasible_diagnostic():
+    # A single cube's A+W+C exceeds capacity -> no schedule fits at all (capacity-infeasible).
+    w = s.Work(M=32, K=32, N=32, wbits=[[8]], act_bits=8)   # one cube; A+W+C = 8192+8192+32768
+    hw = s.HW(bank_size=1, banks=1, dram_bw=10 ** 12, word_bits=32)   # cap 32 bits << one cube
+    res = cps.optimize_exact(w, hw)
+    assert res["feasible"] is False
+    assert res["energy"] == float("inf")
+    assert res["min_steady_stall"] is None
+    assert "capacity" in res["reason"]
