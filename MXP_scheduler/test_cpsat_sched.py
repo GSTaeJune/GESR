@@ -145,3 +145,24 @@ def test_deterministic():
 
 def test_selftest_runs():
     cps.selftest()   # prints "cpsat_sched selftest: OK"; raises on any golden mismatch
+
+
+@pytest.mark.parametrize("M,K,N,wb,act,bank_size,word_bits", [
+    (64, 64, 32, [[2, 2], [2, 2]], 2, 2, 1024),    # cap 65536, T=4, forced pressure
+    (32, 64, 32, [[2, 2]], 2, 40, 1024),           # cap 40960, T=2
+    (64, 64, 32, [[2, 4], [2, 2]], 2, 2, 1024),    # mixed-precision W sizes, T=4
+    (32, 64, 64, [[2, 8]], 2, 48, 32),             # precision-adaptive residency, T=4, cap 49152
+    (32, 160, 32, [[2, 4, 8, 2, 6]], 2, 48, 32),   # KT=5 prime, T=5, cap 49152
+])
+def test_cpsat_equals_oracle_and_astar(M, K, N, wb, act, bank_size, word_bits):
+    w = s.Work(M=M, K=K, N=N, wbits=wb, act_bits=act)
+    hw = s.HW(bank_size=bank_size, banks=32, dram_bw=10 ** 12, word_bits=word_bits)
+    import oracle as o
+    import astar as a
+    cp = cps.optimize_exact(w, hw)
+    orc = o.dp_optimal(w, hw)
+    ast = a.optimize_exact(w, hw)
+    assert cp["proven_optimal"] and ast["proven_optimal"] and orc["proven_optimal"]
+    coef = hw.coeffs["dram"] + hw.coeffs["onchip"]
+    # canonical equality on integer traffic bits (exact for integer wbits)
+    assert round(cp["energy"] / coef) == round(orc["energy"] / coef) == round(ast["energy"] / coef)
