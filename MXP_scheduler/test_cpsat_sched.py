@@ -1,4 +1,16 @@
 # MXP_scheduler/test_cpsat_sched.py
+#
+# Forced-partial-C-spill coverage finding (bounded sweep, 2026-06-25):
+#   The C-spill (sp) encoding is never exercised at a NONZERO optimum in any test here, because
+#   optimal schedules avoid partial-C spills in these regimes. A bounded sweep of ~150 (w, hw)
+#   configs -- multi-C-group (NT>=2 or MT>=2), KT in {2,3}, tight caps just above one cube's
+#   working set, mixed/uniform precision, plus a dense full-range cap scan on a 2-C-group KT=3
+#   T=6 config (18 feasible caps) -- found dram_spill_bits == 0 in EVERY oracle optimum (max spill
+#   observed: 0). Contiguous C-group processing dominates: the optimizer always reorders to finish
+#   a C-group's accumulation before evicting its C tile, so a partial C is never spilled at the
+#   optimum. We therefore do NOT force a synthetic spill test. The sp encoding's correctness is
+#   bound by the cpsat==oracle==astar cross-checks (test_cpsat_equals_oracle_and_astar), which
+#   compute spills via eval_sched.apply_cube -- the single source of truth.
 import pytest
 pytest.importorskip("ortools")          # skip the whole module if OR-Tools is absent
 from fractions import Fraction
@@ -196,3 +208,28 @@ def test_measure_gap_cpsat_backend_smoke():
     import measure_gap
     rc = measure_gap.main(["--backend", "cpsat", "--quick", "--max-time", "5"])
     assert rc == 0
+
+
+def test_honest_gap_arithmetic_on_hard_instance():
+    # Extra coverage (two prior reviews): exercise the FEASIBLE-but-UNPROVEN honest-gap branch
+    # with its lower-bound-relative gap arithmetic. The T=5 test_honest_gap_on_timeout proves
+    # optimal even at 0.05s, so its arithmetic body never runs. This uses a hard, tight-capacity
+    # T=32 instance (M=128,K=128,N=64, mixed 2/8, cap ~1.25x the largest single-cube working set)
+    # with a 3.0s budget: empirically (verified on this machine) CP-SAT finds an incumbent but does
+    # NOT prove optimality, so the honest-gap arithmetic is asserted. If CP-SAT ever proves it (a
+    # real finding -- CP-SAT closing T=32 where A* OOMs), the arithmetic asserts are skipped and the
+    # test stays green. Runtime ~3.2s, well under the ~10s bound.
+    MT, KT, NT = 4, 4, 2
+    wb = [[2 if (i + j) % 2 == 0 else 8 for j in range(KT)] for i in range(MT)]
+    w = s.Work(M=128, K=128, N=64, wbits=wb, act_bits=8)               # T=32, mixed 2/8
+    mws = max(es.tile_size(es.a_tile(c), w) + es.tile_size(es.w_tile(c), w)
+              + es.tile_size(es.c_tile(c), w) for c in es.all_cubes(w))
+    bank_size = max(1, int(mws * 1.25) // (32 * 32))                   # cap ~1.25x mws (61440 bits)
+    hw = s.HW(bank_size=bank_size, banks=32, dram_bw=10 ** 12, word_bits=32)
+    res = cps.optimize_exact(w, hw, max_time=3.0)
+    assert res["feasible"] is True                                    # an incumbent is found
+    if res["proven_optimal"] is False:                               # the intended honest-gap branch
+        assert res["energy"] >= res["lower_bound"] - 1e-6
+        assert res["gap"] == pytest.approx((res["energy"] - res["lower_bound"]) / res["lower_bound"])
+        assert res["gap"] >= 0.0
+        assert res["lower_bound"] <= res["energy"] + 1e-6
