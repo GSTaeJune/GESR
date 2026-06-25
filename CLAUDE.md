@@ -1,6 +1,53 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## 사용자 직접 정의 규칙
+1. Address the user in Korean; use English for everything else. Use established terms for recurring concepts consistently — don't invent new or alternative names for something already named. When a genuinely new term is introduced, briefly define it on first use, then reuse it as-is.
+
+2. After completing a logical chunk of work (one or several related tasks, e.g. tasks 1–3), run `/superpowers:requesting-code-review` and `/review`, iterating on their feedback until no blocking issues remain. Reviews don't need to run per-task — group related tasks into a coherent unit before reviewing. Minor or optional suggestions don't need to block convergence.
+
+## Next session kickoff (2026-06-25, **CP-SAT joint 스케줄러 빌드·검증 완료 — 핵심 발견: T=32/64 prover 불가(honest gap만), main 로컬 병합·미push**)
+
+**진행 상태**: `MXP_scheduler/cpsat_sched.py` (신규, 오프라인 OR-Tools 도구) **빌드·검증·main 로컬 ff-병합 완료** (브랜치 `feat/mxp-scheduler-cpsat` 삭제). **`origin/main` 보다 앞섬 — 미push** (M0+M1+CP-SAT 로컬만). RTL/M1 4모듈(eval_sched/warmstart/oracle/astar)/mxp_scheduler/hwconfig **무변경**. 검증: `cd MXP_scheduler && python -m pytest -q` → **156 passed, 1 skip(CACTI)**, `cpsat_sched.py --selftest`/`astar.py --selftest` OK, runtime-clean(런타임이 ortools/cpsat_sched 미import). 메모리: `project_scheduler_cpsat_landed`.
+
+### 무엇을 만들었나 (spec rev2 + 10-task plan, subagent-driven)
+spec `docs/superpowers/specs/2026-06-25-mxp-scheduler-cpsat-design.md` (rev2, 3-리뷰어 라운드 + 수렴감사) → plan `docs/.../plans/2026-06-25-mxp-scheduler-cpsat.md` → 3 unit 구현(각 spec+quality 리뷰) + 최종리뷰 + pre-merge 리뷰 **READY TO MERGE**. 딥리서치(103 에이전트, COSMA/CoSA/RCPSP-max LCG/Writeback-Aware Caching/Buffets)로 정초. **step-indexed CP-SAT**: COSMA식 C/P/S/R 잔류액션 + **demand-driven load**(`load[tau,t]<=sum x[c,t]` — vacuous-stall 익스플로잇 차단, 프로토타입 검증) + M1 capacity(post-load<=cap, prefetch-peak 미과금) + C-누적 reservoir + **stall=0 하드 선형제약** + **exact-rational(Fraction LCM) 스케일링**(round() 금지). 반환 dict는 astar.optimize_exact와 동형. **cpsat == oracle == astar bit-exact**(작은/중간 T, 독립 재현 0불일치) — 세 번째 독립 exact 엔진.
+
+### 핵심 발견 (이번 세션의 실제 산출물 — open Q A 부정 답)
+**CP-SAT 는 T=32/64 를 못 닫는다.** honest gap 으로 graceful degrade(OOM 아님, plan 대로)지만:
+- **bound 가 first-touch A/W floor 보다도 낮음**(root LP 릴랙세이션 수준, "모든 입력은 최소 1회 로드" 전파조차 안 함) → honest gap **86x(T=32)/422x(T=64)**.
+- **warmstart hint 없으면 30s incumbent 가 구조적 베이스라인보다 2.5~7x 나쁨**.
+- 독립 리뷰어가 재현 확인. → CP-SAT 는 **small/medium T exact 레퍼런스로는 신뢰**되나, **큰-T optimizer/heuristic 으로는 부적합**.
+- **open Q B(1.5×WS gap-① 임계가 큰 T서 유지되나)는 여전히 미측정** — T≥32 최적을 증명하는 엔진이 없음(A* OOM, CP-SAT bound 너무 느슨).
+
+### 다음 스텝 (메모리 `project_scheduler_cpsat_landed` 에 상세)
+1. **핵심은 tight honest 하한** — 자명한 first-touch-floor 하한조차 CP-SAT bound 보다 나음. 큰-T phase 는 tight LB(FOO-L/Lagrangian/first-touch floor) 없으면 gap-② 무의미.
+2. **`AddHint(warmstart incumbent)`** — incumbent ≤ structural 보장(리뷰어 검증). 미구현(이번 scope 밖).
+3. 큰 T(10³~10⁶): 구조적 heuristic(**Writeback-Aware Landlord**) + tight honest 하한. CP-SAT 는 exact 레퍼런스로 유지(큰-T 엔진 아님).
+
+## Next session kickoff (2026-06-25, **스케줄러 큰-T 최적화: 6-에이전트 평가로 솔버 확정 — CP-SAT joint. min-cost-flow 분해 기각**)
+
+코드 무변경. **6명 독립 전문가 에이전트 교차평가**로 솔버 확정 (6/6 수렴). **다음 세션: A* 확장·RL·flow 분해·loop-order 열거 재제안 금지.** gap 하니스 `MXP_scheduler/measure_gap.py`(untracked).
+
+**문제**: 타겟 DeiT(S=197) + Qwen2.5(0.5B~72B). 스케줄러는 `Work(M,K,N,wbits,act_bits)` 만 봄 — 모델/prefill/decode 무관, **크기만 다른 GEMM**. `T=M·K·N/32³`: 10³~10⁶+. K·N 은 늘 32 배수(ragged 는 M 축뿐). 실 워크로드 **항상 footprint≫cap → eviction 불가피**. NP-hard = **변크기 캐싱 + C write-back + sequencing, joint** (변크기 원천: W mixed-precision + C psum=W의 4~16×).
+
+**측정(`measure_gap.py`)**: gap=(구조적−최적)/최적, A* proven 낸 **T≤12 만**. **gap 은 cap≲1.5×큐브WS(49,152b)서만 15~44%**(저비트·T 클수록 큼); cap≥1.5×WS 면 구조적이 이미 최적. **128³@디폴트(cap 1.05M>footprint 786K)는 전부 fit→trivial**(일반화 아님). A* 는 T≥32 압박서 eviction 전수전개로 **open-heap 14.8GB OOM**.
+
+**기각: "order 고정 → min-cost-flow eviction" 분해 (내가 냈다 평가서 BROKEN, oracle 검증 반례)**:
+1. (fatal) **loop order 열거 ≠ 최적** — 최적 order 는 비-loop 순열(serpentine/per-row·col). 반례 mixed **+10.5%**, uniform serpentine **+25%**.
+2. (fatal) **stall=0 이 flow 를 깸** — flow 는 traffic 만 봐 per-step rate 못 봄 → 물리적 stall 스케줄을 "최적"이라 반환.
+3. (serious) **C write-back ∉ flow** — FOO 는 read-only·bound(i.i.d. 가정, 결정론 trace 위반). C spill = **Writeback-Aware Caching(Beckmann&Gibbons SPAA'19) = APX-hard**, Belady (ω+1)-경쟁뿐([[feedback_scheduler_belady_not_optimal]] 재확인). per-order eviction 자체가 APX-hard.
+4. (serious) **"10⁶ 스케일" 거짓** — C 누적이 long-lived interval → short-lived FOO 영역 아님.
+→ **기존 M1 A* 의 joint(order+eviction 동시, stall=0 하드프룬, C spill 정확과금, A*==oracle)이 옳았음. 분해는 regression.**
+
+**확정 방향 (6/6)**:
+- **작은/중간 T exact 엔진 = CP-SAT**: interval + `AddCumulative`(cap) + `AddReservoirConstraint`(C 누적) + stall=0 하드제약 + 대칭깨기. lazy clause gen → **A* 의 state-materialize OOM 회피** → T=64급 닫거나 honest gap 으로 graceful(OOM 아님). MILP(time-indexed)=anti-pattern(약LP·big-M·대칭), tiny-T 교차검증만. DP oracle 유지.
+- **큰 T(10⁶) = exact 없음**: 구조 활용 — loop-order **클래스 해석적 스코어**(Timeloop/CoSA식; mixed-prec=closed-form W 비용) + windowed eviction + **Writeback-Aware Landlord**(plain GreedyDual 아님) + Lagrangian/FOO-L **honest 하한**. C 는 K-누적밴드 pin.
+- **min-cost flow 강등**: read-only **A/W 하한 생성기**로만(write-back·stall 무시→exact 아님).
+- **order/eviction 분리 금지** (stall+비-loop 최적 coupling). **joint 가 맞음.** RL 아님(오프라인+stdlib·결정론 깸).
+- **stdlib 충돌**: OR-Tools 외부 의존 → 오프라인 도구, stdlib 런타임 미탑재.
+
+**다음 스텝**: **CP-SAT joint 모델**(cumulative+reservoir+stall) 구축 → A* OOM 난 T=32/64 gap 실측·oracle 교차검증 → 큰 T 는 구조적 heuristic+honest 하한. refs: Writeback-Aware Caching SPAA'19, FOO POMACS'18(bound-not-exact), CoSA ISCA'21, OR-Tools CP-SAT.
 
 ## Next session kickoff (2026-06-24, **MXP_scheduler M1 — order+eviction joint exact 최적기 완료·main 병합**, RTL 무변, 미push)
 
@@ -16,7 +63,7 @@ spec `docs/superpowers/specs/2026-06-23-mxp-scheduler-precision-adaptive-design.
 
 **핵심 의미값**: `energy = (read+spill)·(dram+onchip)` — **first-touch 로드 floor 포함**(all-resident energy ≠ 0). final C write 는 schedule-invariant 상수로 g/h 제외(argmin 무영향 exact 재정식화). A*==oracle 으로 정확성 검증(랜덤 sweep 0 불일치).
 
-**다음 후보**: ① 큰 T scale (last_compute≥/g≤ dominance, heuristic 강화) ② 실 워크로드 wbits 맵 연동 ③ A* 결과를 `mxp_scheduler` report/CLI 에 통합 ④ M0+M1 origin push 여부 결정.
+**다음 후보**: → **2026-06-25 섹션(맨 위)에서 방향 재확정** — 큰-T 최적화는 수리최적화 솔버(A* scale·RL 아님; 정확한 솔버 선택은 문제정의 재조사로 결정). ② 실 워크로드 wbits 맵 연동 ③ optimize 결과를 `mxp_scheduler` report/CLI 통합.
 
 ## Next session kickoff (2026-06-23, **DRAM 에너지 계수 full-system 확정** — MXP_scheduler, RTL/코드로직 무변, 미커밋)
 
