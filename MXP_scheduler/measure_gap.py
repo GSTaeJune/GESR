@@ -65,7 +65,10 @@ def main(argv=None):
         precs = {"mixed": PRECS["mixed"]}
         mults = MULTS[:2]
 
-    print("backend=%s   ('*' = honest gap, not proven optimal)" % args.backend)
+    print("backend=%s   ('*' = NOT proven optimal)" % args.backend)
+    print("  gap% column: proven -> (warm-opt)/opt vs the proven optimum;")
+    print("               not proven -> (warm-incumbent)/incumbent* AND 'lbNx' = honest")
+    print("               lower-bound-relative gap (energy/lb). Negative* = incumbent worse than warm.")
     print("shape         T  prec  capxWS  warmE(e6) optE(e6)  proven  nodes   gap%")
     print("-" * 80)
     for (M, K, N) in shapes:
@@ -82,10 +85,13 @@ def main(argv=None):
                 optE, proven, nodes, gap = _solve(args.backend, w, hw, args.max_time)
                 warmE = warm[0] if warm else None
                 if warmE and optE and optE > 0:
-                    g = (warmE - optE) / optE * 100
-                    gaps = "%6.2f" % g if proven else "%6.2f*" % g    # measured vs proven optimum
+                    sg = (warmE - optE) / optE * 100          # structural opportunity vs the answer
+                    if proven:
+                        gaps = "%6.2f" % sg                   # gap-1 vs the PROVEN optimum
+                    else:
+                        gaps = "%+6.1f* lb%.0fx" % (sg, gap)  # not proven: struct-rel* AND honest lb gap
                 elif optE and not proven:
-                    gaps = "%5.1f*h" % (gap * 100)                    # honest lb-relative gap only
+                    gaps = "  -  * lb%.0fx" % gap             # no warm baseline; honest lb gap only
                 else:
                     gaps = "   -  "
                 we = "%8.2f" % (warmE / 1e6) if warmE else "   inf  "
