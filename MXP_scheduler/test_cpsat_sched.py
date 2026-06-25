@@ -68,3 +68,28 @@ def test_cpsat_matches_oracle_under_pressure():
     ref = o.dp_optimal(w, hw)
     assert res["proven_optimal"] is True
     assert res["energy"] == pytest.approx(ref["energy"])
+
+
+def test_stall0_returned_schedule_is_feasible():
+    # Finite BW: a returned schedule, re-scored by eval_sched, MUST be stall0-feasible.
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 2], [2, 2]], act_bits=2)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=64)        # finite BW
+    res = cps.optimize_exact(w, hw)
+    if res["feasible"]:
+        e = es.eval_sched(w, hw, res["order"], res["evictions"])
+        assert e["stall0_feasible"] is True and e["feasible"] is True
+
+
+def test_cpsat_matches_oracle_finite_bw():
+    # Finite BW so stall=0 BINDS: must match the stall0-constrained oracle (not the unconstrained one).
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 4], [2, 2]], act_bits=2)   # T=4 mixed
+    hw = s.HW(bank_size=2, banks=32, dram_bw=256, word_bits=1024)      # cap 65536, finite BW
+    import oracle as o
+    res = cps.optimize_exact(w, hw)
+    if res["feasible"]:
+        ref = o.dp_optimal(w, hw, stall0=True)
+        assert res["proven_optimal"] is True
+        assert res["energy"] == pytest.approx(ref["energy"])
+    else:
+        with pytest.raises(ValueError):           # oracle must also find nothing stall0-feasible
+            o.dp_optimal(w, hw, stall0=True)
