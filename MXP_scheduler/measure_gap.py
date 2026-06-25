@@ -67,8 +67,8 @@ def main(argv=None):
 
     print("backend=%s   ('*' = NOT proven optimal)" % args.backend)
     print("  gap% column: proven -> (warm-opt)/opt vs the proven optimum;")
-    print("               not proven -> (warm-incumbent)/incumbent* AND 'lbNx' = honest")
-    print("               lower-bound-relative gap (energy/lb). Negative* = incumbent worse than warm.")
+    print("               not proven -> (warm-incumbent)/incumbent* AND 'lbN' = honest")
+    print("               lower-bound-relative gap (energy-lb)/lb. Negative* = incumbent worse than warm.")
     print("shape         T  prec  capxWS  warmE(e6) optE(e6)  proven  nodes   gap%")
     print("-" * 80)
     for (M, K, N) in shapes:
@@ -89,9 +89,9 @@ def main(argv=None):
                     if proven:
                         gaps = "%6.2f" % sg                   # gap-1 vs the PROVEN optimum
                     else:
-                        gaps = "%+6.1f* lb%.0fx" % (sg, gap)  # not proven: struct-rel* AND honest lb gap
+                        gaps = "%+6.1f* lb%.0f" % (sg, gap)   # not proven: struct-rel* AND honest lb gap
                 elif optE and not proven:
-                    gaps = "  -  * lb%.0fx" % gap             # no warm baseline; honest lb gap only
+                    gaps = "  -  * lb%.0f" % gap              # no warm baseline; honest lb gap only
                 else:
                     gaps = "   -  "
                 we = "%8.2f" % (warmE / 1e6) if warmE else "   inf  "
