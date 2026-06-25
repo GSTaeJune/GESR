@@ -31,3 +31,40 @@ def test_global_scale_clears_fractional_bandwidth():
     bw = Fraction(hw.dram_bw)
     for c in cps._cubes_tiles(w)[0]:
         assert (bw * Fraction(es.cube_compute(c, w, hw)) * G).denominator == 1
+
+
+def test_all_resident_first_touch_floor_proven():
+    # Everything fits -> optimum has no reloads/spills; energy = first-touch A/W floor
+    # (2 A x 2048 + 4 W x 2048 = 12288 bits) * coef, NOT zero. Proven optimal.
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 2], [2, 2]], act_bits=2)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=10 ** 12)
+    coef = hw.coeffs["dram"] + hw.coeffs["onchip"]
+    res = cps.optimize_exact(w, hw)
+    assert res["proven_optimal"] is True
+    assert res["energy"] == pytest.approx(12288 * coef)
+    assert res["source"] == "cpsat"
+    assert isinstance(res["nodes_expanded"], int)
+
+
+def test_reconstruct_matches_eval_sched_bit_exact():
+    # Master check: feed the CP-SAT (order, evictions) back through the single source of truth.
+    w = s.Work(M=32, K=64, N=64, wbits=[[2, 4]], act_bits=2)            # MT=1,KT=2,NT=2,T=4
+    hw = s.HW(bank_size=38, banks=32, dram_bw=10 ** 12, word_bits=32)   # cap 38912: real pressure
+    res = cps.optimize_exact(w, hw)
+    assert res["feasible"] is True
+    e = es.eval_sched(w, hw, res["order"], res["evictions"])
+    assert e["feasible"] is True
+    # canonical equality on INTEGER traffic bits (exact for integer wbits)
+    assert round(res["energy"] / (hw.coeffs["dram"] + hw.coeffs["onchip"])) == \
+        round(e["dram_read_bits"] + e["dram_spill_bits"])
+    assert e["energy"] == pytest.approx(res["energy"])
+
+
+def test_cpsat_matches_oracle_under_pressure():
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 4], [2, 2]], act_bits=2)   # mixed-precision, T=4
+    hw = s.HW(bank_size=2, banks=32, dram_bw=10 ** 12, word_bits=1024)  # cap 65536
+    import oracle as o
+    res = cps.optimize_exact(w, hw)
+    ref = o.dp_optimal(w, hw)
+    assert res["proven_optimal"] is True
+    assert res["energy"] == pytest.approx(ref["energy"])
