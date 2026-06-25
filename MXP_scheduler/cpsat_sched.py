@@ -209,3 +209,59 @@ def optimize_exact(w, hw, max_time=None, random_seed=0):
                 "nodes_expanded": int(solver.NumBranches()), "source": "cpsat",
                 "min_steady_stall": None, "reason": None}
     return _infeasible_result(w, hw, solver.NumBranches())
+
+
+def selftest():
+    import oracle as o
+    # G1: all-resident floor = first-touch A/W bits * coef, proven at the root.
+    w1 = s.Work(M=64, K=64, N=32, wbits=[[2, 2], [2, 2]], act_bits=2)
+    hw1 = s.HW(bank_size=1024, banks=32, dram_bw=10 ** 12)
+    coef1 = hw1.coeffs["dram"] + hw1.coeffs["onchip"]
+    r1 = optimize_exact(w1, hw1)
+    assert r1["proven_optimal"] and abs(r1["energy"] - 12288 * coef1) < 1e-6, r1
+    # G4: reconstruct -> eval_sched parity.
+    e1 = es.eval_sched(w1, hw1, r1["order"], r1["evictions"])
+    assert e1["feasible"] and abs(e1["energy"] - r1["energy"]) < 1e-6, e1
+    # G2: cpsat == oracle under mixed-precision capacity pressure.
+    w2 = s.Work(M=64, K=64, N=32, wbits=[[2, 4], [2, 2]], act_bits=2)
+    hw2 = s.HW(bank_size=2, banks=32, dram_bw=10 ** 12, word_bits=1024)
+    r2 = optimize_exact(w2, hw2)
+    ref2 = o.dp_optimal(w2, hw2)
+    assert r2["proven_optimal"] and abs(r2["energy"] - ref2["energy"]) < 1e-6, (r2, ref2)
+    # G3: in-process determinism.
+    assert optimize_exact(w2, hw2)["order"] == r2["order"]
+    print("cpsat_sched selftest: OK")
+
+
+def main(argv=None):
+    import argparse
+    p = argparse.ArgumentParser(description="MXP_scheduler CP-SAT joint (order+eviction) optimizer")
+    p.add_argument("--selftest", action="store_true")
+    p.add_argument("--M", type=int); p.add_argument("--K", type=int); p.add_argument("--N", type=int)
+    p.add_argument("--act", type=int, default=8)
+    p.add_argument("--bank-size", type=int, default=1024)
+    p.add_argument("--banks", type=int, default=32)
+    p.add_argument("--dram-bw", type=float, default=64.0)
+    p.add_argument("--max-time", type=float, default=None)
+    args = p.parse_args(argv)
+    if args.selftest:
+        selftest(); return 0
+    if not (args.M and args.K and args.N):
+        p.error("provide --M --K --N (or --selftest)")
+    mt, kt = args.M // s.TILE, args.K // s.TILE
+    w = s.Work(M=args.M, K=args.K, N=args.N,
+               wbits=[[args.act] * kt for _ in range(mt)], act_bits=args.act)
+    hw = s.HW(bank_size=args.bank_size, banks=args.banks, dram_bw=args.dram_bw)
+    res = optimize_exact(w, hw, max_time=args.max_time)
+    if not res["feasible"]:
+        print("NO FEASIBLE SCHEDULE: %s" % res["reason"])
+        return 1                                      # CLI error, never a silent inf
+    status = ("PROVEN OPTIMAL" if res["proven_optimal"]
+              else "gap=%.1f%% (lb=%.0f)" % (res["gap"] * 100, res["lower_bound"]))
+    print("energy(variable DRAM) = %.0f   %s   branches=%d   source=%s"
+          % (res["energy"], status, res["nodes_expanded"], res["source"]))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

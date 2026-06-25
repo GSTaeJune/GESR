@@ -132,3 +132,16 @@ def test_capacity_infeasible_diagnostic():
     assert res["energy"] == float("inf")
     assert res["min_steady_stall"] is None
     assert "capacity" in res["reason"]
+
+
+def test_deterministic():
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 4], [2, 2]], act_bits=2)
+    hw = s.HW(bank_size=2, banks=32, dram_bw=10 ** 12, word_bits=1024)
+    r1 = cps.optimize_exact(w, hw)
+    r2 = cps.optimize_exact(w, hw)
+    assert r1["order"] == r2["order"]
+    assert r1["energy"] == pytest.approx(r2["energy"])
+
+
+def test_selftest_runs():
+    cps.selftest()   # prints "cpsat_sched selftest: OK"; raises on any golden mismatch
