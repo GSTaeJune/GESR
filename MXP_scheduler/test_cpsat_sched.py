@@ -93,3 +93,19 @@ def test_cpsat_matches_oracle_finite_bw():
     else:
         with pytest.raises(ValueError):           # oracle must also find nothing stall0-feasible
             o.dp_optimal(w, hw, stall0=True)
+
+
+def test_honest_gap_on_timeout():
+    # A capacity-pressured instance where proving optimality takes search; a tiny time budget
+    # forces a feasible-but-unproven return with an honest, lower-bound-relative gap.
+    # max_time=0.05 reliably yields a FEASIBLE incumbent on this machine (verified); the point is
+    # to exercise the honest-gap arithmetic when not proven. If CP-SAT proves optimality even at
+    # 0.05s the assertions are skipped and the test still passes (acceptable: CP-SAT closed it).
+    w = s.Work(M=32, K=160, N=32, wbits=[[2, 4, 8, 2, 6]], act_bits=2)  # KT=5, T=5
+    hw = s.HW(bank_size=48, banks=32, dram_bw=10 ** 12, word_bits=32)   # cap 49152 < footprint
+    res = cps.optimize_exact(w, hw, max_time=0.05)
+    assert res["feasible"] is True                  # a feasible incumbent is found quickly
+    if res["proven_optimal"] is False:              # the intended timeout branch
+        assert res["energy"] >= res["lower_bound"] - 1e-6
+        assert res["gap"] == pytest.approx((res["energy"] - res["lower_bound"]) / res["lower_bound"])
+        assert res["gap"] >= 0.0
