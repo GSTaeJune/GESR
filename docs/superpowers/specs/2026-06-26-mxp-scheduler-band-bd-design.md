@@ -76,10 +76,13 @@ resident(during band g, chunk c, after loading up to cube (m,k,n)) =
   U { A(k', n') : k' in chunk c, k' <= k, n' in group g, (k',n') loaded }   # this chunk's A so far
 ```
 - Loads are **demand-driven and spread cube-by-cube** (each cube loads only its own not-yet-resident A(k,n) and W(m,k)); this is what lets stall=0 hold (Section 6). Peak (chunk end) = the Section-5 formula.
-- `evictions[i]` for the first cube of chunk c (c>0) = `{W(m,k'), A(k',n') : k' in chunk c-1, n' in group g}`.
-- `evictions[i]` for the first cube of band g (g>0) = `{C(m,n') : n' in group g-1}` (those C are complete: counter == KT, so eval_sched charges 0 for their eviction -- a free drain, not a spill).
-- At region boundary (first cube of region m+1's first band) = evict any of region m's still-resident tiles (its last band's C; its last chunk's W/A) not needed by the new cube.
-- The flattened `(order, evictions)` is run once through `eval_sched.eval_sched` for the authoritative energy/feasibility (single source of truth). The state machine guarantees, by the eviction timing above, that the per-step resident bits never exceed the Section-5 peak, so `eval_sched`'s capacity check agrees with `footprint(m,B,d) <= cap`.
+- **Eviction = the exact set-difference of `resident(.)` across consecutive steps** (ONE uniform rule that covers chunk, band, and region boundaries -- do NOT use separate per-boundary rules, which strand tiles):
+  `evictions[i] = resident_after(step i-1)  MINUS  resident_required(step i)`,
+  i.e. at the start of cube i, drop every tile that was resident after the previous cube but is not in cube i's required resident set per the `resident(.)` definition above (evaluated for cube i's band/chunk, before its loads). Mirrors `apply_cube`'s evict-then-load order (`eval_sched.py:95-117`). Consequences fall out automatically:
+  - first cube of a new **chunk** (within a band): drops the **prior chunk's W(m,k') and A(k',n')** (k' in prior chunk).
+  - first cube of a new **band** (g>0; also chunk 0 of that band): drops the **prior band's completed C tiles** `{C(m,n'): n' in group g-1}` (counter == KT -> eval_sched charges 0, a free drain, not a spill) **AND** the prior band's last-chunk W/A (still resident, not needed by the new band). This union is the C1 fix -- a band boundary is simultaneously a chunk boundary, so both the C and the prior-chunk-W/A drops apply.
+  - first cube of a new **region** (m+1): drops all of region m's still-resident tiles.
+- Because eviction is exactly `resident(prev) - resident(cur)`, the per-step resident set is always exactly `resident(.)`, whose peak (chunk end) equals the Section-5 footprint. The flattened `(order, evictions)` is run once through `eval_sched.eval_sched` for the authoritative energy/feasibility (single source of truth); its capacity check agrees with `footprint(m,B,d) <= cap` by construction.
 
 ## 6. stall = 0 (unchanged semantics)
 
@@ -121,7 +124,7 @@ Concrete edits (else an implementer must guess):
 - `measure_gap.py:55` add `"band"` to `--backend choices`.
 - Add `BAND_SHAPES` (large T, beyond the exact range), e.g. `[(256,256,256), (512,512,256), (512,512,512)]` (T = 512, 2048, 4096) plus one Qwen-scale row; `shapes = BAND_SHAPES` when `backend == "band"`.
 - `_solve` (`measure_gap.py:41-50`) add a `band` branch: `import band_sched; r = band_sched.optimize_band(w, hw); return (r["energy"] if r["feasible"] else None, r["proven_optimal"], r["nodes_expanded"], r["gap"])`.
-- **No exact reference at large T**: for the band backend, do NOT compute a "vs optimum" gap. `warmstart.structural_incumbent` is the only baseline and is analytic (closed-form `gen_mappings` fold) so it runs at large T -- compute it as `warmE` for the structural-vs-band ratio column, but the headline is the **honest first-touch-floor gap** (`r["gap"]`, printed as `lb%.0f`). The proven column is always `False` for band. If `warmstart` is too slow on a given shape, skip it and print `warm = -` (LOG the skip).
+- **No exact reference at large T**: for the band backend, do NOT compute a "vs optimum" gap. `warmstart.structural_incumbent` is the only baseline; it is an **O(#mappings x T) fold** (it materializes a length-T order per mapping and folds `eval_sched` over it -- NOT closed-form), fine at BAND_SHAPES (T<=4096) but slow at Qwen scale (T up to ~10^6). Compute it as `warmE` for the structural-vs-band ratio column **only when feasible within a time/size budget**; if too slow on a given shape (e.g. T above a threshold), **skip it and print `warm = -` (LOG the skip)**. The headline is always the **honest first-touch-floor gap** (`r["gap"]`, printed as `lb%.0f`); the proven column is always `False` for band.
 - Columns for band rows: `shape | T | prec | capxWS | warmE(e6) | bandE(e6) | proven(False) | nodes(=#(B,d)) | gap%(= struct-rel) lb<honest>`.
 
 ## 12. Qwen Q/K/V demo (`demo_qwen.py`) -- the end-to-end deliverable
