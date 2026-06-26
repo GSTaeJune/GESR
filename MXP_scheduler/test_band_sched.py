@@ -55,3 +55,37 @@ def test_optimize_band_parity_and_not_below_optimum():
     assert r["energy"] == pytest.approx(res["energy"])                # module never self-computes cost
     opt = o.dp_optimal(w, hw)["energy"]
     assert res["energy"] >= opt - 1e-6                                # restriction cannot beat optimum
+
+
+def test_capacity_infeasible_reported():
+    w = s.Work(M=32, K=32, N=32, wbits=[[8]], act_bits=8)             # one cube A+W+C=49152
+    hw = s.HW(bank_size=1, banks=1, dram_bw=10 ** 12, word_bits=32)   # cap 32 << one cube
+    res = b.optimize_band(w, hw)
+    assert res["feasible"] is False and res["energy"] == float("inf")
+    assert res["gap"] == float("inf") and "capacity" in res["reason"]
+
+
+def test_stall_infeasible_reported():
+    w = s.Work(M=64, K=64, N=64, wbits=[[8, 8], [8, 8]], act_bits=8)
+    hw = s.HW(bank_size=4096, banks=32, dram_bw=1)                    # roomy cap, tiny BW
+    res = b.optimize_band(w, hw)
+    assert res["feasible"] is False and res["energy"] == float("inf")
+    assert "stall" in res["reason"] and res["min_steady_stall"] is not None
+
+
+@pytest.mark.parametrize("M,K,N,wb,act,bank_size,word_bits", [
+    (64, 64, 32, [[2, 2], [2, 2]], 2, 1024, 32),
+    (32, 64, 64, [[2, 8]], 2, 1024, 32),
+    (64, 64, 32, [[2, 4], [2, 2]], 2, 2, 1024),
+])
+def test_band_never_below_optimum(M, K, N, wb, act, bank_size, word_bits):
+    import oracle as o
+    w = s.Work(M=M, K=K, N=N, wbits=wb, act_bits=act)
+    hw = s.HW(bank_size=bank_size, banks=32, dram_bw=10 ** 12, word_bits=word_bits)
+    res = b.optimize_band(w, hw)
+    if res["feasible"]:
+        assert res["energy"] >= o.dp_optimal(w, hw)["energy"] - 1e-6
+
+
+def test_band_selftest_runs():
+    b.selftest()

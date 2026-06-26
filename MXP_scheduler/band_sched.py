@@ -192,3 +192,45 @@ def optimize_band(w, hw, skiplog=None):
             "nodes_expanded": n_eval, "source": "band",
             "min_steady_stall": None if r["feasible"] else r["steady_stall"],
             "reason": None if r["feasible"] else "constructed schedule infeasible under eval_sched"}
+
+
+def selftest():
+    w = s.Work(M=64, K=64, N=32, wbits=[[2, 2], [2, 2]], act_bits=2)
+    hw = s.HW(bank_size=1024, banks=32, dram_bw=10 ** 12)
+    coef = hw.coeffs["dram"] + hw.coeffs["onchip"]
+    r = optimize_band(w, hw)
+    assert r["feasible"] and r["source"] == "band" and not r["proven_optimal"]
+    assert abs(r["energy"] - 12288 * coef) < 1e-6, r          # all-resident floor
+    chk = es.eval_sched(w, hw, r["order"], r["evictions"])
+    assert chk["feasible"] and abs(chk["energy"] - r["energy"]) < 1e-6   # parity
+    print("band_sched selftest: OK")
+
+
+def main(argv=None):
+    import argparse
+    p = argparse.ArgumentParser(description="MXP_scheduler band-serpentine (B,d) heuristic scheduler")
+    p.add_argument("--selftest", action="store_true")
+    p.add_argument("--M", type=int); p.add_argument("--K", type=int); p.add_argument("--N", type=int)
+    p.add_argument("--act", type=int, default=8)
+    p.add_argument("--bank-size", type=int, default=1024)
+    p.add_argument("--banks", type=int, default=32)
+    p.add_argument("--dram-bw", type=float, default=64.0)
+    args = p.parse_args(argv)
+    if args.selftest:
+        selftest(); return 0
+    if not (args.M and args.K and args.N):
+        p.error("provide --M --K --N (or --selftest)")
+    mt, kt = args.M // s.TILE, args.K // s.TILE
+    w = s.Work(M=args.M, K=args.K, N=args.N,
+               wbits=[[args.act] * kt for _ in range(mt)], act_bits=args.act)
+    hw = s.HW(bank_size=args.bank_size, banks=args.banks, dram_bw=args.dram_bw)
+    res = optimize_band(w, hw)
+    if not res["feasible"]:
+        print("NO FEASIBLE SCHEDULE: %s" % res["reason"]); return 1
+    print("energy(variable DRAM) = %.0f   honest gap=%.1f%% (lb=%.0f)   (B,d) evaluated=%d   source=%s"
+          % (res["energy"], res["gap"] * 100, res["lower_bound"], res["nodes_expanded"], res["source"]))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
