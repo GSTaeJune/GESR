@@ -49,7 +49,7 @@ def _emit_region(order, evictions, w, hw, m, B, d, resident):
                     to_load = need - resident
                     protect = set(band_c) | need                  # current working set: never evict
                     cand = sorted((t for t in resident if t not in protect),
-                                  key=lambda t: -es.tile_size(t, w))   # largest-first
+                                  key=lambda t: (-es.tile_size(t, w), t))  # largest-first; tuple tie-break = deterministic across runs
                     ev = set()
                     ci = 0
                     while (sum(es.tile_size(t, w) for t in ((resident - ev) | to_load)) > cap
