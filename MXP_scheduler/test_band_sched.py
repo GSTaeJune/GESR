@@ -98,3 +98,13 @@ def test_measure_gap_band_backend_smoke():
     import measure_gap
     rc = measure_gap.main(["--backend", "band", "--quick"])
     assert rc == 0
+
+
+def test_demo_qwen_smoke(tmp_path):
+    import demo_qwen
+    out = str(tmp_path / "order.txt")
+    rc = demo_qwen.main(["--model", "qwen2.5-0.5b", "--proj", "q", "--seq", "64",
+                         "--bank-size", "4096", "--out", out])
+    assert rc == 0
+    import os
+    assert os.path.exists(out) and os.path.getsize(out) > 0
