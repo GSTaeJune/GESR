@@ -92,3 +92,9 @@ def test_band_never_below_optimum(M, K, N, wb, act, bank_size, word_bits):
 
 def test_band_selftest_runs():
     b.selftest()
+
+
+def test_measure_gap_band_backend_smoke():
+    import measure_gap
+    rc = measure_gap.main(["--backend", "band", "--quick"])
+    assert rc == 0

@@ -7,10 +7,12 @@ on timeout the CP-SAT backend prints the HONEST (lower-bound-relative) gap, mark
 Backends:
   --backend astar  : M1 A* (default; OOMs at T>=32 under pressure -- keep to T<=12 shapes).
   --backend cpsat  : CP-SAT engine; pushes to the T=32/64 shapes A* cannot reach.
+  --backend band   : band-serpentine (B,d) heuristic; large-T honest-gap rows (never proven).
 
 Run from MXP_scheduler/:
   python measure_gap.py --backend cpsat
   python measure_gap.py --backend cpsat --max-time 60
+  python measure_gap.py --backend band
 """
 import argparse
 import mxp_scheduler as s
@@ -21,6 +23,7 @@ BANKS, WB = 32, 32
 
 ASTAR_SHAPES = [(64, 64, 32), (64, 64, 64), (96, 64, 64)]            # T = 4, 8, 12
 CPSAT_SHAPES = [(64, 64, 32), (96, 64, 64), (128, 128, 64), (128, 128, 128)]  # T = 4, 12, 32, 64
+BAND_SHAPES = [(256, 256, 256), (512, 512, 256), (512, 512, 512)]    # T = 512, 2048, 4096
 PRECS = {
     "unif8": lambda MT, KT: [[8] * KT for _ in range(MT)],
     "unif2": lambda MT, KT: [[2] * KT for _ in range(MT)],
@@ -44,6 +47,11 @@ def _solve(backend, w, hw, max_time):
         r = astar.optimize_exact(w, hw)
         return (r["energy"] if r["feasible"] else None, r["proven_optimal"],
                 r["nodes_expanded"], r["gap"])
+    if backend == "band":
+        import band_sched
+        r = band_sched.optimize_band(w, hw)
+        return (r["energy"] if r["feasible"] else None, r["proven_optimal"],
+                r["nodes_expanded"], r["gap"])
     import cpsat_sched
     r = cpsat_sched.optimize_exact(w, hw, max_time=max_time)
     return (r["energy"] if r["feasible"] else None, r["proven_optimal"],
@@ -52,12 +60,14 @@ def _solve(backend, w, hw, max_time):
 
 def main(argv=None):
     p = argparse.ArgumentParser()
-    p.add_argument("--backend", choices=["astar", "cpsat"], default="astar")
+    p.add_argument("--backend", choices=["astar", "cpsat", "band"], default="astar")
     p.add_argument("--max-time", type=float, default=30.0, help="per-instance CP-SAT budget (s)")
     p.add_argument("--quick", action="store_true",
                    help="smallest shape, one prec, two capacities -- fast CI smoke (not the full sweep)")
     args = p.parse_args(argv)
-    shapes = ASTAR_SHAPES if args.backend == "astar" else CPSAT_SHAPES
+    shapes = (ASTAR_SHAPES if args.backend == "astar"
+              else CPSAT_SHAPES if args.backend == "cpsat"
+              else BAND_SHAPES)
     precs = PRECS
     mults = MULTS
     if args.quick:
@@ -81,7 +91,10 @@ def main(argv=None):
                 bank_size = max(1, int(mws * mult) // (BANKS * WB))
                 hw = s.HW(bank_size=bank_size, banks=BANKS, dram_bw=1e12, word_bits=WB)
                 capx = hw.cap_bits / mws
-                warm = ws.structural_incumbent(w, hw)
+                if args.backend == "band" and T > 4096:
+                    warm = None                                # large T: skip structural warmstart
+                else:
+                    warm = ws.structural_incumbent(w, hw)
                 optE, proven, nodes, gap = _solve(args.backend, w, hw, args.max_time)
                 warmE = warm[0] if warm else None
                 if warmE and optE and optE > 0:
@@ -94,7 +107,12 @@ def main(argv=None):
                     gaps = "  -  * lb%.0f" % gap              # no warm baseline; honest lb gap only
                 else:
                     gaps = "   -  "
-                we = "%8.2f" % (warmE / 1e6) if warmE else "   inf  "
+                if warmE:
+                    we = "%8.2f" % (warmE / 1e6)
+                elif warm is None:
+                    we = "  warm=-"                           # band large-T: warmstart skipped
+                else:
+                    we = "   inf  "
                 oe = "%8.2f" % (optE / 1e6) if optE else "   inf  "
                 print("%dx%dx%-4d %3d %6s %5.2fx  %s %s  %5s  %6d  %s"
                       % (M, K, N, T, pname, capx, we, oe, str(proven), nodes, gaps))
