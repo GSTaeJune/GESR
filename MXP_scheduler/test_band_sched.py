@@ -16,8 +16,11 @@ def test_band_schedule_is_full_permutation_and_feasible():
     assert r["feasible"] is True                                      # feasible by construction
 
 
-def test_footprint_matches_resident_peak():
-    # footprint(B,d) must equal the max per-step resident bits eval_sched sees for that region.
+def test_footprint_equals_peak_when_no_eviction():
+    # When (B,d) fills the single region with ample headroom (no eviction ever fires), the
+    # per-step resident peak equals footprint_bits. (Under lazy cross-region retention with
+    # multiple regions the peak can exceed footprint_bits up to cap; footprint_bits is the
+    # selection-filter lower bound, not the general peak -- see footprint_bits docstring.)
     w = s.Work(M=32, K=64, N=64, wbits=[[2, 8]], act_bits=2)          # MT=1,KT=2,NT=2
     hw = s.HW(bank_size=1024, banks=32, dram_bw=10 ** 12)
     B, d = 2, 2

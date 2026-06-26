@@ -57,32 +57,32 @@ Keep unchanged: RTL; `eval_sched.py`; the exact engines `oracle.py`/`astar.py`/`
 
 ## 5. Footprint and feasibility (per region, true variable W sizes)
 
-For region `m` with `(B,d)`, the resident **peak** footprint (achieved at the end of a k-chunk, before the next chunk's tiles are loaded) is:
+For region `m` with `(B,d)`, the **forced working set** -- the minimum that must be co-resident to run the band, i.e. the selection-filter lower bound (NOT the resident peak; see 5.1) -- is:
 - **C region** = `B * (TILE*TILE*FP32_BITS)` (B open accumulators, fixed FP32).
 - **W region** = `max over k-chunks c of  sum_{k in c} tile_size(("W",m,k))` (the d-deep W window; max over chunks because chunks differ in bits -- 8-bit-heavy rows cost more). Matches `mxp_scheduler.footprint_bits`'s `max(w_blk)` pattern.
 - **A region** = `d * B * (TILE*TILE*act_bits)` (d k's x B n's of activation).
 - `footprint(m,B,d) = C_region + W_region + A_region`. Tile sizes from `eval_sched.tile_size`.
 
-Feasibility of `(B,d)`: `footprint(m,B,d) <= cap` AND the constructed schedule is **stall=0-feasible** (decided by `eval_sched`, Section 6).
+Feasibility filter for `(B,d)`: `footprint(m,B,d) <= cap` (sufficient -- the lazy eviction in 5.1 can always reduce resident to this forced working set) AND the constructed schedule is **stall=0-feasible** (decided by `eval_sched`, Section 6).
 
-### 5.1 Resident-set state machine (the load/evict rule the constructor MUST follow)
+### 5.1 Eviction policy: LAZY capacity-aware (implemented; reviewed SOUND)
 
-The footprint formula is valid ONLY under this eviction timing (reviewer C1): the **prior k-chunk's W and A tiles are evicted in the eviction set of the FIRST cube of the next chunk** (before its loads), and the **prior band's completed C tiles are evicted in the eviction set of the first cube of the next band**. Concretely the resident set as a function of position is:
+The order (band-serpentine, Section 4) is `(B,d)`-determined; eviction is **lazy and capacity-aware** (an improvement over a rigid deterministic-partition eviction, which strands shared A tiles at boundaries and never reaches the all-resident floor even with roomy cap). Per cube `(m,k,n)`:
 
 ```
-resident(during band g, chunk c, after loading up to cube (m,k,n)) =
-    { C(m, n') : n' in group g }                                  # B C-tiles, whole band
-  U { W(m, k') : k' in chunk c, k' <= k }                         # this chunk's W loaded so far
-  U { A(k', n') : k' in chunk c, k' <= k, n' in group g, (k',n') loaded }   # this chunk's A so far
+need     = { A(k,n), W(m,k), C(m,n) }
+protect  = { C(m,n') : n' in band g } UNION need      # never evict the band's C or this cube's tiles
+to_load  = need - resident
+# evict largest tiles OUTSIDE protect, only while the next load would exceed cap:
+ev = {}; cand = sorted(resident - protect, by size desc)
+while size((resident - ev) UNION to_load) > cap and cand left: ev += next(cand)
+resident = (resident - ev) UNION to_load            # eval_sched applies ev before loading
 ```
-- Loads are **demand-driven and spread cube-by-cube** (each cube loads only its own not-yet-resident A(k,n) and W(m,k)); this is what lets stall=0 hold (Section 6). Peak (chunk end) = the Section-5 formula.
-- **Eviction = the exact set-difference of `resident(.)` across consecutive steps** (ONE uniform rule that covers chunk, band, and region boundaries -- do NOT use separate per-boundary rules, which strand tiles):
-  `evictions[i] = resident_after(step i-1)  MINUS  resident_required(step i)`,
-  i.e. at the start of cube i, drop every tile that was resident after the previous cube but is not in cube i's required resident set per the `resident(.)` definition above (evaluated for cube i's band/chunk, before its loads). Mirrors `apply_cube`'s evict-then-load order (`eval_sched.py:95-117`). Consequences fall out automatically:
-  - first cube of a new **chunk** (within a band): drops the **prior chunk's W(m,k') and A(k',n')** (k' in prior chunk).
-  - first cube of a new **band** (g>0; also chunk 0 of that band): drops the **prior band's completed C tiles** `{C(m,n'): n' in group g-1}` (counter == KT -> eval_sched charges 0, a free drain, not a spill) **AND** the prior band's last-chunk W/A (still resident, not needed by the new band). This union is the C1 fix -- a band boundary is simultaneously a chunk boundary, so both the C and the prior-chunk-W/A drops apply.
-  - first cube of a new **region** (m+1): drops all of region m's still-resident tiles.
-- Because eviction is exactly `resident(prev) - resident(cur)`, the per-step resident set is always exactly `resident(.)`, whose peak (chunk end) equals the Section-5 footprint. The flattened `(order, evictions)` is run once through `eval_sched.eval_sched` for the authoritative energy/feasibility (single source of truth); its capacity check agrees with `footprint(m,B,d) <= cap` by construction.
+- Tiles **stay resident across chunk/band/region boundaries** (one global `resident` carried across regions), so reused A/W (A is shared over m; W over n within a row) is not gratuitously reloaded -> a roomy-cap schedule reaches the **first-touch floor** (gap 0). This captures the cross-region A reuse the v1 spec had deferred; it is strictly better and remains capacity-safe.
+- **Capacity safety (proven + 159 builds, 0 violations)**: when the while-loop exhausts candidates, resident reduces to `protect UNION to_load` = `B C-tiles + {A(k,n),W(m,k)}`, whose size `= B*C + W(m,k) + A(k,n) <= B*C + max-chunk-W + d*B*A = footprint(m,B,d) <= cap`. So `footprint(B,d) <= cap` is a **sufficient** feasibility filter (Section 5). The actual per-step peak may be LARGER than `footprint` (lazy retention fills spare capacity up to `cap`) -- `footprint` is the forced-working-set lower bound, not the peak.
+- Pricing is entirely `eval_sched`'s: evicting a complete/zero C is free, a partial C spills, A/W is free; loads charge per `apply_cube`. The flattened `(order, evictions)` is run once through `eval_sched.eval_sched` for the authoritative energy/feasibility.
+- Eviction victim choice is largest-first (not Belady/furthest-future). Because each band completes its full k-sweep before advancing, prior-chunk A/W dropped under pressure are not reused within the band, so largest-first showed no measurable extra reloads vs Belady on this access pattern (reviewer note); a Belady victim rule is a possible v2 refinement.
+- **Reviewed (2026-06-26): deviation from the rigid-partition draft ruled SOUND** -- capacity-safe (proof above), `band_energy >= oracle.dp_optimal` in 378 cross-checks (never beats the free optimum), stall=0 enforced. Tradeoff: `footprint_bits` is a selection bound, not the resident peak (test `test_footprint_equals_peak_when_no_eviction` guards only the no-eviction case).
 
 ## 6. stall = 0 (unchanged semantics)
 

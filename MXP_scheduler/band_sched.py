@@ -79,7 +79,10 @@ def band_schedule(w, hw, knobs):
 
 
 def footprint_bits(w, hw, m, B, d):
-    """Resident peak for region m with (B,d): C(B) + W(max k-chunk) + A(d*B). Sizes via eval_sched."""
+    """Lower bound on the FORCED working set for region m with (B,d): C(B) + W(max k-chunk) + A(d*B).
+    Used as the (B,d) selection filter (footprint_bits <= cap => a feasible build exists, since the
+    lazy eviction can always reduce resident to this bound). NOT the resident peak: under lazy
+    cross-region retention the actual per-step peak may be larger (bounded by cap). Sizes via eval_sched."""
     c_region = B * TILE * TILE * FP32_BITS
     a_region = d * B * TILE * TILE * w.act_bits
     w_region = 0
@@ -139,7 +142,6 @@ def optimize_band(w, hw, skiplog=None):
     astar.optimize_exact-shaped dict. Heuristic: proven_optimal=False; gap vs first-touch floor.
     skiplog: optional list; appended with a note when the (B,d) candidate set is capped (no silent
     truncation)."""
-    coef = hw.coeffs["dram"] + hw.coeffs["onchip"]
     Bcand, dcand = _candidates(w.NT), _candidates(w.KT)
     if skiplog is not None and (len(Bcand) < w.NT or len(dcand) < w.KT):
         skiplog.append("(B,d) candidates capped: B in %s of 1..%d, d in %s of 1..%d"
@@ -191,7 +193,11 @@ def optimize_band(w, hw, skiplog=None):
             "lower_bound": lb, "gap": gap if r["feasible"] else float("inf"),
             "nodes_expanded": n_eval, "source": "band",
             "min_steady_stall": None if r["feasible"] else r["steady_stall"],
-            "reason": None if r["feasible"] else "constructed schedule infeasible under eval_sched"}
+            "reason": (None if r["feasible"]
+                       else ("constructed schedule stalls (steady_stall=%.1f) at a region/band "
+                             "boundary; raise dram_bw (eff_bw=%g)." % (r["steady_stall"], hw.eff_bw)
+                             if r["steady_stall"] > 0
+                             else "constructed schedule capacity-infeasible under eval_sched"))}
 
 
 def selftest():
