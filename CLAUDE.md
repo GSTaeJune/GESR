@@ -6,6 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 2. After completing a logical chunk of work (one or several related tasks, e.g. tasks 1–3), run `/superpowers:requesting-code-review` and `/review`, iterating on their feedback until no blocking issues remain. Reviews don't need to run per-task — group related tasks into a coherent unit before reviewing. Minor or optional suggestions don't need to block convergence.
 
+## Next session kickoff (2026-06-26, **band-serpentine (B,d) 휴리스틱 스케줄러 빌드·검증·main 병합 — 큰 T 스케일, Qwen Q/K/V 데모, honest gap. 미push**)
+
+**진행 상태**: `MXP_scheduler/band_sched.py`(신규, stdlib-only) + `demo_qwen.py`(신규) + `measure_gap.py --backend band` **빌드·검증·main 로컬 ff-병합 완료**(브랜치 `feat/mxp-scheduler-band` 삭제). **`origin/main` 보다 앞섬 — 미push**. RTL/M1/CP-SAT/mxp_scheduler/hwconfig **무변경**. 검증: `cd MXP_scheduler && python -m pytest -q` → **168 passed, 1 skip(CACTI)**, `band_sched.py --selftest` OK, stdlib-clean(ortools 미import).
+
+### 무엇 (spec rev2 converged + 6-task plan, subagent-driven, 2-리뷰어+수렴감사+deviation 리뷰)
+spec `docs/superpowers/specs/2026-06-26-mxp-scheduler-band-bd-design.md` → plan `docs/.../plans/2026-06-26-mxp-scheduler-band.md`. **큰 T(10³~10⁶)용 휴리스틱 + honest 하한**: 지수적 exact(CP-SAT/A*/oracle)가 못 가는 영역. 설계 = **region(=m-row)별 두 노브 (B=열린 C tile 수, d=K-depth)** + **band-serpentine order**(k-outer/n-inner → W를 band의 B열에 amortize). **eviction = lazy capacity-aware**(타일 상주 유지, cap 압박 시 largest-outside-working-set 축출, 튜플 tie-break로 결정론적; region 간 reuse 포착 — deviation 리뷰서 SOUND 판정, 용량안전 증명 + 378 oracle 교차검증서 절대 optimum 밑돌지 않음). 비용은 **eval_sched(단일진실)로 채점**(모듈 자체 비용계산 없음). **honest 하한 = first-touch A/W floor**, gap=(E−floor)/floor. 결과 dict는 astar.optimize_exact 형. **W sizing은 변경 불필요**(wbits 가 이미 per-tile fractional; uniform/3-값 가정은 W 아닌 A=act_bits 에만 — A는 uniform 유지). C-spill fallback(spec §7.2)은 v1서 **unreachable**(B=1,d=1=no-spill floor)이라 미구현(용량/stall 진단만).
+
+### Qwen 데모 (요청 산출물)
+`demo_qwen.py`: Qwen2.5(0.5b/7b/72b) Q/K/V projection dim → `Work(M=seq,K=H,N=H_out)` + **임의 per-tile avg-bit**(블록32 mixed 모사, 결정론 LCG) → `optimize_band` → order+(B,d)+honest gap 출력, 전체 cube order 파일 기록. 예: `--model qwen2.5-0.5b --proj q --seq 128` → M128·K896·N896, **T=3136, honest gap ~115%**(cap 디폴트), order `work/<label>/band_order.txt`. measure_gap band(T=512 mixed): honest gap **~7%**, warmstart 동급/우위.
+
+### 다음 후보
+- band 휴리스틱 품질 개선: Belady victim(현 largest-first), cross-region A reuse 명시 모델(현 lazy로 일부 포착), tighter honest 하한(read-only A/W min-cost-flow / Lagrangian — first-touch floor 보다 tight).
+- 실 워크로드 wbits 맵 연동(현 임의 assigner). CP-SAT first-touch cut + AddHint(별도, [[project_scheduler_cpsat_landed]]).
+
 ## Next session kickoff (2026-06-25, **CP-SAT joint 스케줄러 빌드·검증 완료 — 핵심 발견: T=32/64 prover 불가(honest gap만), main 로컬 병합·미push**)
 
 **진행 상태**: `MXP_scheduler/cpsat_sched.py` (신규, 오프라인 OR-Tools 도구) **빌드·검증·main 로컬 ff-병합 완료** (브랜치 `feat/mxp-scheduler-cpsat` 삭제). **`origin/main` 보다 앞섬 — 미push** (M0+M1+CP-SAT 로컬만). RTL/M1 4모듈(eval_sched/warmstart/oracle/astar)/mxp_scheduler/hwconfig **무변경**. 검증: `cd MXP_scheduler && python -m pytest -q` → **156 passed, 1 skip(CACTI)**, `cpsat_sched.py --selftest`/`astar.py --selftest` OK, runtime-clean(런타임이 ortools/cpsat_sched 미import). 메모리: `project_scheduler_cpsat_landed`.
