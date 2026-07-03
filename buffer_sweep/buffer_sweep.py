@@ -15,9 +15,10 @@ Dataflow (fixed): O-stationary. For each output tile (i,j) (i over M, j over N),
 sweep kk innermost accumulating into the O buffer; write the finished FP32 tile
 to DRAM once (no psum spill/reload). Loop order: for i: for j: for kk.
 Ping-pong: while computing step t, prefetch step t+1's W/A tiles into the shadow
-copies; a finished O tile drains from the shadow O during the next tile's first
-step. A tile is fetched iff its tile id differs from the previous step's id
-(so Kt==1 keeps W(i) resident across the whole j sweep, etc.).
+copies; a finished O tile drains from the shadow O spread evenly across the next
+tile's Kt steps (see o_share below). A tile is fetched iff its tile id differs
+from the previous step's id (so Kt==1 keeps W(i) resident across the whole j
+sweep, etc.).
 
 Cost model:
     stall(t)   = max(0, (load(t+1) + o_share(t)) / eff_bw - compute(t))
@@ -86,7 +87,9 @@ EFF_BW = DRAM_BW_BITS_PER_CYCLE * DRAM_FREQ_MHZ / CHIP_FREQ_MHZ  # bits per chip
 
 CYCLES_PER_BIT = 1.0      # on-chip cycles per weight bit-plane (bit-serial SA)
 
-OUT_DIR = os.path.join("work", "buffer_sweep")
+# anchored to the repo root (next to this file's parent), not the cwd
+OUT_DIR = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "work", "buffer_sweep"))
 
 # ----------------------------------------------------------------------------
 # Workload library. Each model: list of (name, M, K, N, count_per_layer) x layers.
@@ -260,7 +263,8 @@ def eval_gemm(M, K, N, m, k, n, bw=None):
             first = (i == 0 and j == 0)
             last = (i == Mt - 1 and j == Nt - 1)
 
-            # O write of the PREVIOUS tile (drained during this tile's 1st step)
+            # O write of the PREVIOUS tile (drained evenly across this tile's
+            # Kt steps via `share` below)
             if first:
                 prev_o = 0.0
             elif j > 0:
@@ -362,7 +366,15 @@ def model_cost(model, m, k, n):
 # Sweep driver
 # ----------------------------------------------------------------------------
 def sweep_model(model, caps_kb, klist):
-    """Enumerate all feasible (cap, k, m, n) and cost them. Returns row dicts."""
+    """Enumerate all feasible (cap, k, m, n) and cost them. Returns row dicts.
+    m/n larger than every GEMM's padded dim are strictly dominated (identical
+    cost, more SRAM), so enumeration is capped there -- noted on the console,
+    no silent truncation."""
+    spec = MODELS[model]
+    max_m = max(pad32(M) for (_g, M, _K, _N, _c) in spec["gemms"])
+    max_n = max(pad32(N) for (_g, _M, _K, N, _c) in spec["gemms"])
+    print("%s: m capped at %d, n at %d (model's max padded dims)"
+          % (model, max_m, max_n))
     rows = []
     for cap_kb in caps_kb:
         cap_bits = cap_kb * 1024 * 8
@@ -370,9 +382,9 @@ def sweep_model(model, caps_kb, klist):
             if budget_bits(TILE, k, TILE) > cap_bits:
                 continue                                  # k alone too deep
             m = TILE
-            while budget_bits(m, k, TILE) <= cap_bits:
+            while m <= max_m and budget_bits(m, k, TILE) <= cap_bits:
                 n = TILE
-                while budget_bits(m, k, n) <= cap_bits:
+                while n <= max_n and budget_bits(m, k, n) <= cap_bits:
                     c = model_cost(model, m, k, n)
                     rows.append({
                         "model": model, "cap_kb": cap_kb, "k": k, "m": m, "n": n,
@@ -399,12 +411,13 @@ def write_csv(rows, path):
 
 def print_top(rows, model, cap_kb, top=10):
     sub = [r for r in rows if r["cap_kb"] == cap_kb]
+    print("%s  cap=%dKB  (%d feasible configs)" % (model, cap_kb, len(sub)))
     if not sub:
         print("  (no feasible configuration)")
         return
-    by_e = sorted(sub, key=lambda r: (r["energy_pj"], r["cycles"]))
-    by_c = min(sub, key=lambda r: (r["cycles"], r["energy_pj"]))
-    print("%s  cap=%dKB  (%d feasible configs)" % (model, cap_kb, len(sub)))
+    # sram_bits last: among cost ties prefer the smallest physical SRAM
+    by_e = sorted(sub, key=lambda r: (r["energy_pj"], r["cycles"], r["sram_bits"]))
+    by_c = min(sub, key=lambda r: (r["cycles"], r["energy_pj"], r["sram_bits"]))
     print("  %4s %5s %5s %14s %14s %12s" % ("k", "m", "n", "energy(uJ)", "cycles(M)", "stall(cyc)"))
     for r in by_e[:top]:
         print("  %4d %5d %5d %14.3f %14.3f %12.0f"
@@ -418,14 +431,22 @@ def print_top(rows, model, cap_kb, top=10):
 # ----------------------------------------------------------------------------
 # Plots
 # ----------------------------------------------------------------------------
+def _plt():
+    """Lazy matplotlib import; None if unavailable (plots skipped, sweep continues)."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        return plt
+    except ImportError:
+        return None
+
+
 def plot_model(rows, model, cap_kb, metric, out_path):
     """One figure per (model, cap, metric): heatmap over (m,n) per k subplot."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+    plt = _plt()
     sub = [r for r in rows if r["cap_kb"] == cap_kb]
-    if not sub:
+    if plt is None or not sub:
         return False
     ks = sorted({r["k"] for r in sub})
     best = min(sub, key=lambda r: r[metric])
@@ -439,8 +460,9 @@ def plot_model(rows, model, cap_kb, metric, out_path):
         grid = [[math.nan] * len(ns) for _ in ms]
         for r in kk:
             grid[ms.index(r["m"])][ns.index(r["n"])] = r[metric]
+        half = TILE // 2
         im = ax.imshow(grid, origin="lower", aspect="auto", vmin=vmin, vmax=vmax,
-                       extent=[ns[0] - 16, ns[-1] + 16, ms[0] - 16, ms[-1] + 16])
+                       extent=[ns[0] - half, ns[-1] + half, ms[0] - half, ms[-1] + half])
         ax.set_title("k=%d" % k)
         ax.set_xlabel("n")
         ax.set_ylabel("m")
@@ -457,10 +479,9 @@ def plot_model(rows, model, cap_kb, metric, out_path):
 
 def plot_summary(all_rows, caps_kb, metric, out_path):
     """Best <metric> vs cap, one line per model."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+    plt = _plt()
+    if plt is None or not all_rows:
+        return False
     fig, ax = plt.subplots(figsize=(6, 4))
     for model in sorted({r["model"] for r in all_rows}):
         xs, ys = [], []
@@ -479,6 +500,7 @@ def plot_summary(all_rows, caps_kb, metric, out_path):
     fig.tight_layout()
     fig.savefig(out_path, dpi=110)
     plt.close(fig)
+    return True
 
 
 # ----------------------------------------------------------------------------
@@ -496,9 +518,11 @@ def selftest():
                     for k in (32, 64, 160):
                         for n in (32, 96, 224):
                             shapes.append((M, K, N, m, k, n))
+    shapes.append((224, 1024, 224, 32, 32, 32))   # deep-K spot check (Kt=32)
+    shapes.append((197, 192, 160, 32, 64, 96))    # ragged M (DeiT S=197 -> 224)
     n_checked = 0
     for (M, K, N, m, k, n) in shapes:
-        for bw in (EFF_BW, 1.0, 1e9):     # stall-heavy, stall-free, default
+        for bw in (EFF_BW, 1.0, 1e9):     # default, stall-heavy, stall-free
             a = walk_gemm(M, K, N, m, k, n, bw)
             b = eval_gemm(M, K, N, m, k, n, bw)
             for key in ("reads", "writes", "fill", "steady", "drain", "compute"):
@@ -521,6 +545,21 @@ def selftest():
     Mp, Kp, Np = pad32(M), pad32(K), pad32(N)
     Mt = Mp // m
     assert r["reads"] == Mp * Kp * WBITS + Mt * Kp * Np * ABITS
+
+    # ragged dims pad to the same problem: 197 == 224 after pad32
+    for (m, k, n) in ((32, 32, 32), (64, 96, 32)):
+        assert gemm_cost(197, 192, 192, m, k, n) == gemm_cost(224, 192, 192, m, k, n)
+
+    # energy/cycles rollup, hand-checked on a single-cube GEMM (Mt=Nt=Kt=1)
+    c = gemm_cost(32, 32, 32, 32, 32, 32)
+    reads = 2 * 32 * 32 * 8                       # one W + one A tile, first touch
+    writes = 32 * 32 * OBITS                      # one O tile
+    onchip = reads + 32 * 32 * (ABITS + WBITS)    # refill + SA reads of 1 cube
+    assert c["dram_read"] == reads and c["dram_write"] == writes
+    assert math.isclose(c["energy"], (reads + writes) * C_DRAM + onchip * C_ONCHIP
+                        + 32 ** 3 * C_MAC + 32 * 32 * C_RMW)
+    assert math.isclose(c["cycles"],
+                        CYCLES_PER_BIT * WBITS * 32 + reads / EFF_BW + writes / EFF_BW)
 
     # budget arithmetic
     assert budget_bits(32, 1024, 32) == 2 * (8 * 32 * 1024 + 8 * 1024 * 32 + 32 * 32 * 32)
@@ -553,12 +592,20 @@ def main(argv=None):
         klist = [int(x) for x in a.klist.split(",")]
     except ValueError as e:
         p.error("--caps/--klist must be comma-separated integers (%s)" % e)
+    caps = list(dict.fromkeys(caps))          # dedupe, keep order
+    klist = list(dict.fromkeys(klist))
+    for c in caps:
+        if c <= 0:
+            p.error("cap %d must be a positive KB count" % c)
     for k in klist:
-        if k % TILE:
-            p.error("k=%d not a multiple of %d" % (k, TILE))
+        if k <= 0 or k % TILE:
+            p.error("k=%d must be a positive multiple of %d" % (k, TILE))
     models = sorted(MODELS) if a.model == "all" else [a.model]
     os.makedirs(a.out, exist_ok=True)
+    if _plt() is None:
+        print("WARNING: matplotlib not available -- plots skipped, CSVs still written")
 
+    METRICS = {"energy_pj": "energy", "cycles": "cycles"}  # metric key -> file tag
     all_rows = []
     for model in models:
         rows = sweep_model(model, caps, klist)
@@ -566,16 +613,17 @@ def main(argv=None):
         write_csv(rows, os.path.join(a.out, "%s.csv" % model))
         for cap in caps:
             print_top(rows, model, cap, a.top)
-            for metric in ("energy_pj", "cycles"):
-                name = "%s_cap%d_%s.png" % (model, cap,
-                                            "energy" if metric == "energy_pj" else "cycles")
+            for metric, tag in METRICS.items():
+                name = "%s_cap%d_%s.png" % (model, cap, tag)
                 plot_model(rows, model, cap, metric, os.path.join(a.out, name))
             print()
 
-    for metric in ("energy_pj", "cycles"):
+    for metric, tag in METRICS.items():
         plot_summary(all_rows, caps, metric,
-                     os.path.join(a.out, "summary_%s.png"
-                                  % ("energy" if metric == "energy_pj" else "cycles")))
+                     os.path.join(a.out, "summary_%s.png" % tag))
+    if not all_rows:
+        print("no feasible configuration for any model/cap -- nothing to report")
+        return 1
     print("wrote CSVs and plots to %s" % a.out)
     return 0
 
