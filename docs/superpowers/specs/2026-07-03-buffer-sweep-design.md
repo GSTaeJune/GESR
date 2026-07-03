@@ -41,6 +41,11 @@ accumulates. A tile is fetched **iff its tile id differs from the one currently
 held** (so e.g. Kt==1 keeps W(i) resident across the whole j sweep — the traffic
 and stall models must both honor this reuse rule).
 
+Decision (2026-07-03, review round 1): shadow copies are **prefetch/drain staging
+only** — they never extend residency. At Kt==2 the two W copies could physically
+hold both k-chunks and skip W refetch across the j sweep; the model deliberately
+still charges it (conservative, keeps the controller a simple toggle).
+
 ## 4. Cost model
 
 Dims padded up to multiples of 32 per GEMM (only S=197 -> 224 is actually ragged);
@@ -52,10 +57,14 @@ traffic/compute use padded dims (models HW zero-padding; slightly pessimistic).
   corner cases (Kt==1, Nt==1) are handled by the walk, not by special-cased formulas.
 - **Compute cycles** (order-invariant): per 32^3 cube = `cycles_per_bit * 32 * 8`
   (bit-serial, 8b weights); total = #cubes * that.
-- **Stall** (ping-pong prefetch): per step transition,
-  `stall = max(0, fetch_bits/eff_bw - compute_cycles(current step))`.
-  fill = step 0's W+A fetch; each output tile's O write is charged on its final kk
-  step (hidden by the next tile's compute via O ping-pong); the last O tile is drain.
+- **Stall** (ping-pong prefetch): per step,
+  `stall = max(0, (load(next step) + o_share)/eff_bw - compute_cycles(step))`.
+  Decision (2026-07-03, review round 1): a finished O tile's DRAM write is spread
+  **evenly over the next tile's Kt steps** (`o_share = prev_O_bits / Kt`) — the
+  shadow O only has to be empty by the time the next tile finishes, so its drain
+  competes for BW across the whole tile, not a single step (the one-step-window
+  alternative created phantom stalls for small (m,n) x shallow k).
+  fill = step 0's W+A fetch; the last O tile is drain.
   `total_cycles = compute + fill + steady_stall + drain`.
 - **Grouped evaluation**: steps are NOT enumerated one by one (too slow in Python).
   Tile sizes per axis take at most 2 values (full, residual), so transitions are
@@ -67,8 +76,10 @@ traffic/compute use padded dims (models HW zero-padding; slightly pessimistic).
   per cube. mac/rmw are config-invariant but included for absolute totals. EDP
   reported too.
 - **Coeffs** live in an editable CONFIG block at the top of the file: DRAM = 9.0
-  pJ/b (LPDDR5 full-system, docs/dram-energy/), onchip default 6.0 pJ/b with a
-  per-cap comment (refresh from CACTI later), DRAM BW/freqs -> eff_bw, cycles_per_bit.
+  pJ/b (LPDDR5 full-system, docs/dram-energy/); onchip/mac/rmw keep M0's relative
+  structure (200:6:1:5) rescaled to the 9.0 anchor -> onchip 0.27, mac 0.045,
+  rmw 0.225 pJ (decision 2026-07-03: physically-plausible pJ, refresh onchip from
+  CACTI per cap later); DRAM BW/freqs -> eff_bw; cycles_per_bit.
 
 ## 5. Workloads (embedded table)
 

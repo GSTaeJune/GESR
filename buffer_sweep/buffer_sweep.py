@@ -20,11 +20,25 @@ step. A tile is fetched iff its tile id differs from the previous step's id
 (so Kt==1 keeps W(i) resident across the whole j sweep, etc.).
 
 Cost model:
-    stall(t)   = max(0, (load(t+1) + owrite(t-1)) / eff_bw - compute(t))
+    stall(t)   = max(0, (load(t+1) + o_share(t)) / eff_bw - compute(t))
+    o_share(t) = prev tile's O write bits / Kt, spread evenly over the current
+                 tile's Kt steps (the shadow O only has to be empty by the time
+                 the CURRENT tile finishes, so its drain competes for DRAM BW
+                 across the whole tile, not a single step) -- decision 2026-07-03
     fill       = load(0) / eff_bw          (first fetch, nothing to hide it)
     drain      = owrite(T-1) / eff_bw      (last O write, nothing to hide it)
     cycles     = compute_total + fill + steady_stall + drain
     energy_pj  = dram_bits*C_DRAM + onchip_bits*C_ONCHIP + mac*C_MAC + rmw*C_RMW
+
+Known modeling conservatisms (deliberate; decisions 2026-07-03):
+  * Ping-pong shadow copies are PREFETCH/DRAIN STAGING ONLY -- they never extend
+    residency. E.g. at Kt==2 the two W copies could physically hold both k-chunks
+    and skip all W refetch across the j sweep; the model still charges the
+    refetch (up to ~2x W traffic overstatement for exactly-Kt==2 partitions).
+    Keeps the controller model a simple toggle.
+  * The O drain is spread EVENLY over the next tile's steps (trickle writeback);
+    an optimal scheduler could exploit per-step slack slightly better.
+  * EFF_BW is peak DRAM bandwidth (no effective-BW derate); stalls are optimistic.
 
 Two evaluators (single cost semantics, two implementations):
     walk_gemm()  -- naive per-step reference walk (slow, exact)
@@ -79,9 +93,10 @@ OUT_DIR = os.path.join("work", "buffer_sweep")
 # Attention BMMs included (count = #query heads). Dims are padded up to
 # multiples of TILE at evaluation time (only S=197 -> 224 is actually ragged).
 # ----------------------------------------------------------------------------
-def _transformer_gemms(S, D, heads, kv_heads, head_dim, mlp, mlp_gemms):
+def _transformer_gemms(S, D, heads, kv_heads, head_dim, mlp_gemms):
     """Per-layer GEMM list shared by all four models.
-    mlp_gemms: [("fc1", D, mlp), ...] extra flexibility for SwiGLU vs plain MLP."""
+    mlp_gemms: [(name, K_in, N_out, count), ...] -- plain MLP (fc1/fc2) or
+    SwiGLU (gate/up/down)."""
     q_out = heads * head_dim
     kv_out = kv_heads * head_dim
     g = [
@@ -101,27 +116,27 @@ MODELS = {
     "deit_tiny": {
         "layers": 12,
         "gemms": _transformer_gemms(
-            S=197, D=192, heads=3, kv_heads=3, head_dim=64, mlp=768,
+            S=197, D=192, heads=3, kv_heads=3, head_dim=64,
             mlp_gemms=[("fc1", 192, 768, 1), ("fc2", 768, 192, 1)]),
     },
     "deit_small": {
         "layers": 12,
         "gemms": _transformer_gemms(
-            S=197, D=384, heads=6, kv_heads=6, head_dim=64, mlp=1536,
+            S=197, D=384, heads=6, kv_heads=6, head_dim=64,
             mlp_gemms=[("fc1", 384, 1536, 1), ("fc2", 1536, 384, 1)]),
     },
     # Qwen2.5 prefill S=128. GQA (kv_heads < heads). SwiGLU (gate+up+down).
     "qwen2.5-0.5b": {
         "layers": 24,
         "gemms": _transformer_gemms(
-            S=128, D=896, heads=14, kv_heads=2, head_dim=64, mlp=4864,
+            S=128, D=896, heads=14, kv_heads=2, head_dim=64,
             mlp_gemms=[("gate", 896, 4864, 1), ("up", 896, 4864, 1),
                        ("down", 4864, 896, 1)]),
     },
     "qwen2.5-1.5b": {
         "layers": 28,
         "gemms": _transformer_gemms(
-            S=128, D=1536, heads=12, kv_heads=2, head_dim=128, mlp=8960,
+            S=128, D=1536, heads=12, kv_heads=2, head_dim=128,
             mlp_gemms=[("gate", 1536, 8960, 1), ("up", 1536, 8960, 1),
                        ("down", 8960, 1536, 1)]),
     },
@@ -190,10 +205,15 @@ def walk_gemm(M, K, N, m, k, n, bw=None):
 
     fill = load[0] / bw
     steady = 0.0
-    for t in range(T):
+    for t, (i, j, q) in enumerate(steps):
         nxt = load[t + 1] if t + 1 < T else 0.0
-        prv = owr[t - 1] if t - 1 >= 0 else 0.0
-        steady += max(0.0, (nxt + prv) / bw - comp[t])
+        # previous tile's O write drains evenly across this tile's Kt steps
+        if (i, j) != (0, 0):
+            pi, pj = (i, j - 1) if j > 0 else (i - 1, Nt - 1)
+            share = msz(pi) * nsz(pj) * OBITS / Kt
+        else:
+            share = 0.0
+        steady += max(0.0, (nxt + share) / bw - comp[t])
     drain = owr[T - 1] / bw
     return {"reads": sum(load), "writes": sum(owr), "fill": fill,
             "steady": steady, "drain": drain, "compute": sum(comp)}
@@ -274,25 +294,26 @@ def eval_gemm(M, K, N, m, k, n, bw=None):
             # ---- stall ----
             comp_f = _comp(ms, kf, ns)
             comp_l = _comp(ms, kl, ns)
+            share = prev_o / Kt          # prev-tile O drain, spread over Kt steps
             if Kt == 1:
-                # single-step tile: window = succ load + prev O write
-                steady += mult * max(0.0, (succ_l + prev_o) / bw - comp_l)
+                # single-step tile: window = succ load + the whole O share
+                steady += mult * max(0.0, (succ_l + share) / bw - comp_l)
             else:
-                # first step hides: 2nd step's W+A + previous tile's O write
-                w0 = (ms * k1 * WBITS + k1 * ns * ABITS + prev_o)
+                # first step hides: 2nd step's W+A + its O drain share
+                w0 = (ms * k1 * WBITS + k1 * ns * ABITS + share)
                 steady += mult * max(0.0, w0 / bw - comp_f)
                 # interior steps q=1..Kt-2 hide load of step q+1 (full k except last)
                 n_into_full = max(0, Kt - 3)
                 if n_into_full:
-                    wf = (ms * kf * WBITS + kf * ns * ABITS)
+                    wf = (ms * kf * WBITS + kf * ns * ABITS + share)
                     steady += mult * n_into_full * max(0.0, wf / bw - comp_f)
                 if Kt >= 3:
                     # transition s[Kt-2] -> s[Kt-1] (into the residual-k step);
                     # for Kt==2 that transition IS the first step's window above.
-                    wl = (ms * kl * WBITS + kl * ns * ABITS)
+                    wl = (ms * kl * WBITS + kl * ns * ABITS + share)
                     steady += mult * max(0.0, wl / bw - comp_f)
-                # final step hides the successor tile's first load
-                steady += mult * max(0.0, succ_l / bw - comp_l)
+                # final step hides the successor tile's first load + O share
+                steady += mult * max(0.0, (succ_l + share) / bw - comp_l)
             if last:
                 drain = ms * ns * OBITS / bw
 
@@ -311,7 +332,10 @@ def gemm_cost(M, K, N, m, k, n):
     cubes = (Mp // TILE) * (Kp // TILE) * (Np // TILE)
     dram = r["reads"] + r["writes"]
     # on-chip accesses: DRAM refill writes + SA-facing reads (A and W each read
-    # once per cube) + O accumulate accesses are in the rmw term.
+    # once per cube). O-buffer accumulate accesses (32b read+write per output
+    # element per k-chunk) are folded into the rmw term at C_RMW per lane op --
+    # a known undercount in absolute pJ, but config-invariant (does not move
+    # the argmin over (m,k,n)).
     onchip = r["reads"] + cubes * TILE * TILE * (ABITS + WBITS)
     mac = Mp * Kp * Np
     rmw = cubes * TILE * TILE           # one RMW lane op per output element pass
@@ -405,6 +429,8 @@ def plot_model(rows, model, cap_kb, metric, out_path):
         return False
     ks = sorted({r["k"] for r in sub})
     best = min(sub, key=lambda r: r[metric])
+    vmin = min(r[metric] for r in sub)          # shared color scale across k
+    vmax = max(r[metric] for r in sub)
     fig, axes = plt.subplots(1, len(ks), figsize=(4 * len(ks), 4), squeeze=False)
     for ax, k in zip(axes[0], ks):
         kk = [r for r in sub if r["k"] == k]
@@ -413,7 +439,7 @@ def plot_model(rows, model, cap_kb, metric, out_path):
         grid = [[math.nan] * len(ns) for _ in ms]
         for r in kk:
             grid[ms.index(r["m"])][ns.index(r["n"])] = r[metric]
-        im = ax.imshow(grid, origin="lower", aspect="auto",
+        im = ax.imshow(grid, origin="lower", aspect="auto", vmin=vmin, vmax=vmax,
                        extent=[ns[0] - 16, ns[-1] + 16, ms[0] - 16, ms[-1] + 16])
         ax.set_title("k=%d" % k)
         ax.set_xlabel("n")
@@ -461,8 +487,10 @@ def plot_summary(all_rows, caps_kb, metric, out_path):
 def selftest():
     shapes = []
     # battery: Mt/Nt/Kt in {1,2,3,4,5} incl. residual tiles and reuse corners
+    # (K=128 with k=32 gives Kt=4: first case with BOTH an interior-full and a
+    #  residual transition in one tile)
     for M in (32, 64, 96, 160, 224):
-        for K in (32, 96, 160):
+        for K in (32, 96, 128, 160):
             for N in (32, 64, 224):
                 for m in (32, 64, 96):
                     for k in (32, 64, 160):
@@ -520,8 +548,11 @@ def main(argv=None):
     if a.selftest:
         return selftest()
 
-    caps = [int(x) for x in a.caps.split(",")]
-    klist = [int(x) for x in a.klist.split(",")]
+    try:
+        caps = [int(x) for x in a.caps.split(",")]
+        klist = [int(x) for x in a.klist.split(",")]
+    except ValueError as e:
+        p.error("--caps/--klist must be comma-separated integers (%s)" % e)
     for k in klist:
         if k % TILE:
             p.error("k=%d not a multiple of %d" % (k, TILE))
