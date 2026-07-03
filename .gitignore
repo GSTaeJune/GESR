@@ -40,6 +40,9 @@ MXP_Tools/**/__pycache__/
 # Integration sim work/ — MXP_Tools generated inputs + HW dumps
 work/
 
+# buffer_sweep generated outputs (CSVs + plots)
+buffer_sweep/results/
+
 # Reference papers / PDFs (not source)
 References/
 

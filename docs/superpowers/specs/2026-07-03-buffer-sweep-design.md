@@ -101,7 +101,7 @@ Loop: model x cap x k in K_LIST (default powers of two 32..1024) x all feasible
 (m,n) 32-multiples. **One (m,k,n) per model** (buffer partition is a hardware
 decision): cost = sum over all its GEMMs.
 
-Outputs to `work/buffer_sweep/`:
+Outputs to `buffer_sweep/results/` (next to the program; gitignored):
 - `<model>.csv`: cap_kb, k, m, n, dram_bits, energy_pj, cycles, steady_stall, edp
 - plots (matplotlib, per model x cap): `<model>_cap<KB>_energy.png` and
   `<model>_cap<KB>_cycles.png` — (m,n) heatmaps, one subplot per k, best cell marked

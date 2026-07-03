@@ -51,7 +51,7 @@ Usage:
     python buffer_sweep.py                       # all models, caps 64/128/256 KB
     python buffer_sweep.py --model deit_tiny --caps 64
     python buffer_sweep.py --selftest
-Outputs: work/buffer_sweep/<model>.csv, <model>_cap<KB>_{energy,cycles}.png,
+Outputs: buffer_sweep/results/<model>.csv, <model>_cap<KB>_{energy,cycles}.png,
 summary_{energy,cycles}.png, console top-10 tables (ASCII only).
 """
 import argparse
@@ -87,9 +87,8 @@ EFF_BW = DRAM_BW_BITS_PER_CYCLE * DRAM_FREQ_MHZ / CHIP_FREQ_MHZ  # bits per chip
 
 CYCLES_PER_BIT = 1.0      # on-chip cycles per weight bit-plane (bit-serial SA)
 
-# anchored to the repo root (next to this file's parent), not the cwd
-OUT_DIR = os.path.normpath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "work", "buffer_sweep"))
+# results live next to this file (buffer_sweep/results/), not under work/
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 
 # ----------------------------------------------------------------------------
 # Workload library. Each model: list of (name, M, K, N, count_per_layer) x layers.
