@@ -6,7 +6,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 2. After completing a logical chunk of work (one or several related tasks, e.g. tasks 1–3), run `/superpowers:requesting-code-review` and `/review`, iterating on their feedback until no blocking issues remain. Reviews don't need to run per-task — group related tasks into a coherent unit before reviewing. Minor or optional suggestions don't need to block convergence.
 
-## Next session kickoff (2026-06-26, **band-serpentine (B,d) 휴리스틱 스케줄러 빌드·검증·main 병합 — 큰 T 스케일, Qwen Q/K/V 데모, honest gap. 미push**)
+## Next session kickoff (2026-07-03, **방향 전환: joint 스케줄러 폐기 예정 → buffer_sweep(SRAM 버퍼분할 sweep) 빌드·리뷰·main 병합. 미push**)
+
+**방향 전환 (사용자 결정)**: MXP_scheduler 의 joint order+eviction 라인(M1/cpsat/band)은 **폐기 예정** — 스케줄러 개선 제안 금지. 새 방향 = **SRAM 구성·dataflow 를 먼저 고정하고 매핑**. 기존 M0/M1/cpsat/band 코드는 무변경 보존.
+
+**진행 상태**: `buffer_sweep/buffer_sweep.py` (신규 top-level 디렉토리, **단일 파일 standalone** — MXP_scheduler 무의존, 사용자가 직접 읽고 수정하는 파일) 빌드·리뷰 2라운드 수렴·**main 로컬 ff-병합 완료**(브랜치 `feat/buffer-sweep` 삭제). **`origin/main` 보다 28커밋 앞섬 — 미push**. spec: `docs/superpowers/specs/2026-07-03-buffer-sweep-design.md`. 검증: `python buffer_sweep/buffer_sweep.py --selftest` → **4,866케이스 OK** (walk==grouped 이중평가기 상호일치; 리뷰어 독립 fuzz 20k케이스 추가 무결).
+
+### 무엇 (spec + 리뷰 확정 의미론)
+- **SRAM 고정 구성**: W(m·k·8b) / A(k·n·8b) / O(m·n·32b) 세 공간, **각각 핑퐁 ×2**. budget `2(8mk+8kn+32mn) ≤ cap`, cap ∈ {64,128,256}KB, m/k/n 32배수, 정밀도 8/8/32 고정.
+- **dataflow 고정 = O-stationary**: 출력타일 (i,j)마다 kk innermost, O 버퍼 누적, DRAM write 1회(psum spill 없음). fetch 규칙 = "직전 step 과 tile id 다르면 fetch"(Kt==1 이면 W(i)가 j sweep 내내 상주).
+- **사용자 확정 3건**: ① 핑퐁 shadow = prefetch/drain 전용(residency 확장 안 함 — Kt==2 W traffic ≤2× 과대는 의도된 보수성) ② **O writeback 은 다음 타일 Kt step 전체에 균등분산**(한-step 창은 가짜 stall) ③ C_ONCHIP=0.27 pJ/b (M0 비율을 DRAM 9.0 pJ/b 앵커로 재스케일; argmin 은 onchip 계수 무관).
+- **워크로드**: deit_tiny/small(S=197→224 패딩) + qwen2.5-0.5b/1.5b(prefill 128, GQA, SwiGLU), **attention BMM 포함**(count=Q헤드).
+- **산출물**: `buffer_sweep/results/` (gitignored) — 모델별 CSV + cap별 energy/cycles heatmap(별=best) + summary 2장. 콘솔 top-10(energy 순, cycles 병기) ASCII-only.
+- 결과 요지: cap↑ → best energy 단조감소(예: deit_small 64→256KB 에서 16.1→9.9 mJ), cycles 최적은 stall=0 작은 타일. m/n 은 모델 최대 패딩치수에서 클리핑(dominated 구성 제거, 콘솔 명기).
+
+### 다음 후보
+- CACTI 로 cap별 C_ONCHIP 실측 갱신(현 0.27 고정) / effective-BW derate / seq-length sweep(`--seq`) / 정밀도 sweep((W,A)∈{2,4,8}²) / k>KT residency(핑퐁 양쪽 카피 reuse 인정 모델) / RTL 연동 검증.
+
+## Next session kickoff (2026-06-26, **band-serpentine (B,d) 휴리스틱 스케줄러 빌드·검증·main 병합 — 큰 T 스케일, Qwen Q/K/V 데모, honest gap. 미push** — 참고: 2026-07-03 방향 전환으로 이 라인은 폐기 예정)
 
 **진행 상태**: `MXP_scheduler/band_sched.py`(신규, stdlib-only) + `demo_qwen.py`(신규) + `measure_gap.py --backend band` **빌드·검증·main 로컬 ff-병합 완료**(브랜치 `feat/mxp-scheduler-band` 삭제). **`origin/main` 보다 앞섬 — 미push**. RTL/M1/CP-SAT/mxp_scheduler/hwconfig **무변경**. 검증: `cd MXP_scheduler && python -m pytest -q` → **168 passed, 1 skip(CACTI)**, `band_sched.py --selftest` OK, stdlib-clean(ortools 미import).
 
