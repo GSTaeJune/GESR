@@ -1,0 +1,82 @@
+architecture:
+  # ============================================================
+  # GEMM accelerator smoke-test model (timeloopfe v0.4 dialect)
+  #
+  # DRAM -> { W buffer | A buffer | O buffer } (dedicated, per-dataspace)
+  #      -> 32x32 systolic array of MACs (row = K, col = N, M temporal)
+  #
+  # Dataspace naming (gemm_ABZ problem shape):
+  #   A = Weights      (M x K operand, 8-bit)  -> w_buffer
+  #   B = Activations  (K x N operand, 8-bit)  -> a_buffer
+  #   Z = Outputs      (M x N psums,  32-bit)  -> o_buffer
+  # ============================================================
+  version: 0.4
+  nodes: # Top-level is hierarchical
+  - !Container # Top-level system
+    name: system
+    attributes:
+      technology: "45nm"
+      global_cycle_seconds: 1e-9
+
+  - !Component # DRAM main memory (LPDDR5-ish; BW not modeled for smoke test)
+    name: DRAM
+    class: DRAM
+    attributes:
+      type: "LPDDR4"     # closest built-in Accelergy DRAM preset
+      width: 64
+      datawidth: 8       # NOTE: counts words in 8b units; Z is 32b (see NOTES.md pitfall 4)
+
+  - !Container # The GEMM accelerator
+    name: gemm_accel
+    attributes:
+      technology: "45nm"
+
+  - !Parallel # Three dedicated buffers, one dataspace each (ping-pong halves)
+    nodes:
+    - !Component # W buffer: Weights only (MxK), 8 KiB, 8-bit words
+      name: w_buffer
+      class: smartbuffer_SRAM
+      attributes:
+        depth: 8192
+        width: 8
+        datawidth: 8
+      constraints:
+        dataspace: {keep: [A], bypass: [B, Z]}
+
+    - !Component # A buffer: Activations only (KxN), 8 KiB, 8-bit words
+      name: a_buffer
+      class: smartbuffer_SRAM
+      attributes:
+        depth: 8192
+        width: 8
+        datawidth: 8
+      constraints:
+        dataspace: {keep: [B], bypass: [A, Z]}
+
+    - !Component # O buffer: Output psums only (MxN), 16 KiB, 32-bit words
+      name: o_buffer
+      class: smartbuffer_SRAM
+      attributes:
+        depth: 4096
+        width: 32
+        datawidth: 32
+      constraints:
+        dataspace: {keep: [Z], bypass: [A, B]}
+
+  - !Container # 32x32 systolic array: row axis = K (32-way), col axis = N (32-way)
+    name: PE
+    spatial: {meshX: 32, meshY: 32}
+    constraints:
+      spatial:
+        # split = index in permutation where X dims end and Y dims begin:
+        # X = {M=1, K=32} -> meshX (SA row axis = K), Y = {N=32} -> meshY (SA col axis = N)
+        permutation: [M, K, N]
+        split: 2
+        factors: [K=32, N=32, M=1]
+
+  - !Component # MAC unit (8b x 8b multiply, 32b accumulate)
+    name: mac
+    class: intmac
+    attributes:
+      multiplier_width: 8
+      adder_width: 32

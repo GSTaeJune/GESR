@@ -1,0 +1,10 @@
+mapper:
+  version: 0.4
+  optimization_metrics: [edp]
+  live_status: False
+  num_threads: 8
+  search_size: 400          # hard cap: stop each thread after this many VALID mappings evaluated
+  timeout: 3000             # per-thread bailout after this many consecutive INVALID mappings
+  victory_condition: 50     # per-thread stop after this many consecutive non-improving VALID mappings
+  algorithm: linear_pruned  # prunes redundant permutations of unit-factor loops
+  diagnostics: False        # set True to dump per-fail-class diagnostics when no valid mapping found

@@ -1,0 +1,28 @@
+problem:
+  # GEMM: Z[m,n] += A[m,k] * B[k,n]
+  # deit_tiny fc1, padded dims: M=224, K=192, N=768
+  version: 0.4
+  instance:
+    M: 224
+    K: 192
+    N: 768
+  shape:
+    name: gemm_ABZ
+    dimensions:
+    - M
+    - N
+    - K
+    data_spaces:
+    - name: A            # Weights (M x K)
+      projection:
+      - - - M
+      - - - K
+    - name: B            # Activations (K x N)
+      projection:
+      - - - N
+      - - - K
+    - name: Z            # Outputs (M x N)
+      projection:
+      - - - M
+      - - - N
+      read_write: true

@@ -63,3 +63,7 @@ MXP_scheduler/cacti_last_failure.log
 *~
 Thumbs.db
 .DS_Store
+
+# timeloop smoke/sweep generated outputs
+buffer_sweep/timeloop/output/
+buffer_sweep/timeloop/mapper_run.log
