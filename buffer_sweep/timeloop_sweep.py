@@ -46,8 +46,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TL_DIR = os.path.join(HERE, "timeloop")
 OUT_DIR = os.path.join(HERE, "results", "timeloop")
 
-SLICES = 6              # partition grid: cap/2 split into this many slices
-JOBS = 3                # parallel mapper jobs inside WSL
+SLICES = 8              # partition grid: cap/2 split into this many slices
+                        # (must divide cap/2 evenly -- power of two for KB caps)
+JOBS = 4                # parallel mapper jobs inside WSL (x num_threads 2 = 8 cores)
 
 
 def _cache_dir():
@@ -166,6 +167,10 @@ def parse_map_yaml(text):
         fmap = {}
         for tok in fac.split():
             fmap[tok[0]] = int(tok[1:])
+        unknown = (set(fmap) | set(perm)) - set("MKN")
+        if unknown:
+            raise ValueError("mapping has unknown dim(s) %s (only M/K/N "
+                             "supported)" % sorted(unknown))   # review F4
         loops = [(d, fmap.get(d, 1)) for d in reversed(perm)]   # outer -> inner
         levels[lv] = [(d, f) for (d, f) in loops if f > 1]
     # spatial sanity: the SA constraint must have been respected
@@ -318,7 +323,8 @@ def eval_nest(levels, M, K, N, bw=None):
             complete_flag[i] = True             # departs complete (final write)
         else:
             spilled.add(oid)                    # departs partial (spill write)
-    assert all(len(s) == k_req for s in seen.values()), "O accumulation incomplete"
+    if not all(len(s) == k_req for s in seen.values()):
+        raise ValueError("O accumulation incomplete (internal error)")  # not assert: survives -O
 
     # traffic (bits)
     n_w, n_a, n_o = len(intervals["W"]), len(intervals["A"]), len(o_iv)
@@ -367,6 +373,8 @@ def rollup(M, K, N, r):
     Mp, Kp, Np = bs.pad32(M), bs.pad32(K), bs.pad32(N)
     cubes = (Mp // bs.TILE) * (Kp // bs.TILE) * (Np // bs.TILE)
     dram = r["reads"] + r["writes"]
+    # known small asymmetry (review minor 10): a spill's o_buffer drain READ is
+    # not charged onchip (~3% of the spill's DRAM cost under our coefficients)
     onchip = r["reads"] + cubes * bs.TILE * bs.TILE * (bs.ABITS + bs.WBITS)
     mac = Mp * Kp * Np
     rmw = cubes * bs.TILE * bs.TILE
@@ -394,13 +402,18 @@ def partitions(cap_kb, slices=SLICES):
     """Split the per-copy budget (cap/2, ping-pong) into (W,A,O) bit triples on
     a slices-grid, each >= 1 slice. Returns [(w_bits, a_bits, o_bits), ...]."""
     half = cap_kb * 1024 * 8 // 2
-    assert half % slices == 0
+    if half % slices or (half // slices) % 32:
+        raise ValueError("slices=%d does not evenly divide cap %dKB/2 into "
+                         "32-bit-aligned units" % (slices, cap_kb))
     unit = half // slices
     out = []
     for wi in range(1, slices - 1):
         for ai in range(1, slices - wi):
             oi = slices - wi - ai
             out.append((wi * unit, ai * unit, oi * unit))
+    if not out:
+        raise ValueError("slices=%d yields no (W,A,O) partition (need >= 3)"
+                         % slices)             # review F8: no silent empty sweep
     return out
 
 
@@ -418,13 +431,23 @@ def gen_jobs(models, caps, slices):
             for model in models:
                 for shape in model_shapes(model):
                     keys.add((shape, part))
+    # cache siblings from other mapper configs: warn so hours of compute are
+    # never silently orphaned by a mapper_sweep.yaml edit (review C1/F6)
+    root = os.path.dirname(CACHE_DIR)
+    sibs = [s for s in (os.listdir(root) if os.path.isdir(root) else [])
+            if s.startswith("cfg_") and os.path.join(root, s) != CACHE_DIR]
+    if sibs:
+        print("NOTE: active cache is %s; sibling caches from OTHER mapper "
+              "configs exist: %s" % (os.path.basename(CACHE_DIR), sibs))
     n_new = 0
     for (shape, part) in sorted(keys):
         key = job_key(shape, part)
         d = os.path.join(CACHE_DIR, key)
-        if os.path.isdir(d):
+        # keyed on problem.yaml (written last): a crash mid-generation leaves a
+        # dir that is regenerated, not skipped forever (review minor 7)
+        if os.path.isfile(os.path.join(d, "problem.yaml")):
             continue
-        os.makedirs(d)
+        os.makedirs(d, exist_ok=True)
         (M, K, N), (wb, ab, ob) = shape, part
         with open(os.path.join(d, "arch.yaml"), "w", newline="\n") as f:
             f.write(ARCH_TEMPLATE.format(w_depth=wb // 8, a_depth=ab // 8,
@@ -452,11 +475,14 @@ def run_jobs(jobs=JOBS, deadline=240):
 
 
 def load_job(shape, part):
-    """Cached mapper result -> (levels, tl_cycles, tl_energy_uj) or None if the
-    mapper found no valid mapping for this partition."""
+    """Cached mapper result -> (levels, tl_cycles, tl_energy_uj); None if the
+    mapper found no valid mapping; "pending" if the job has not run yet
+    (review F5: scoring mid-sweep must not crash on missing files)."""
     d = os.path.join(CACHE_DIR, job_key(shape, part))
     if os.path.isfile(os.path.join(d, "INVALID")):
         return None
+    if not os.path.isfile(os.path.join(d, "map.yaml")):
+        return "pending"
     with open(os.path.join(d, "map.yaml")) as f:
         levels = parse_map_yaml(f.read())
     with open(os.path.join(d, "stats.txt")) as f:
@@ -509,6 +535,7 @@ def v1_best(model, part):
 def score(models, caps, slices, top=5):
     os.makedirs(OUT_DIR, exist_ok=True)
     all_rows = []
+    n_pending = 0
     for model in models:
         shapes = model_shapes(model)
         rows = []
@@ -520,7 +547,15 @@ def score(models, caps, slices, top=5):
                        "steady": 0.0, "tl_cycles": 0.0, "tl_uj": 0.0}
                 bad = None
                 for shape, wgt in sorted(shapes.items()):
-                    job = load_job(shape, part)
+                    try:
+                        job = load_job(shape, part)
+                    except ValueError as e:      # corrupt cache entry: name it,
+                        print("WARNING: %s: %s" % (job_key(shape, part), e))
+                        job = "pending"          # treat as retryable (review I3)
+                    if job == "pending":
+                        n_pending += 1
+                        bad = shape
+                        break
                     if job is None:
                         bad = shape
                         break
@@ -584,6 +619,9 @@ def score(models, caps, slices, top=5):
     for metric, tag in (("best_energy_pj", "energy"), ("best_cycles", "cycles")):
         _plot_summary(all_rows, caps, metric,
                       os.path.join(OUT_DIR, "summary_%s.png" % tag))
+    if n_pending:
+        print("WARNING: %d jobs not yet run (rows fell back to the v1 floor); "
+              "re-run scoring after the sweep finishes" % n_pending)
     print("score: wrote CSVs and plots to %s" % OUT_DIR)
     return all_rows
 
@@ -754,8 +792,9 @@ def main(argv=None):
     p.add_argument("--caps", default="64,128,256")
     p.add_argument("--slices", type=int, default=SLICES)
     p.add_argument("--jobs", type=int, default=JOBS)
-    p.add_argument("--deadline", type=int, default=240,
-                   help="per-job mapper wall-clock (s); SIGINT dumps best-so-far")
+    p.add_argument("--deadline", type=int, default=120,
+                   help="per-job mapper wall-clock (s), multiple of 10; "
+                        "SIGINT dumps best-so-far")
     p.add_argument("--score-only", action="store_true",
                    help="skip the WSL mapper stage; score cached jobs only")
     p.add_argument("--quick", action="store_true",
@@ -773,6 +812,9 @@ def main(argv=None):
         caps = [int(x) for x in a.caps.split(",")]
     except ValueError as e:
         p.error("--caps must be comma-separated integers (%s)" % e)
+    if a.deadline <= 0 or a.deadline % 10:
+        p.error("--deadline must be a positive multiple of 10 (the runner "
+                "polls every 10s)")           # review F1: driver-side guard
     slices = a.slices
     if a.quick:
         models, caps, slices = ["deit_tiny"], [64], 4

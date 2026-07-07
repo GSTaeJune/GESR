@@ -15,9 +15,12 @@ mapper:
   version: 0.4
   optimization_metrics: [last_level_accesses, delay]
   live_status: False
-  num_threads: 4            # run_jobs.sh runs several jobs in parallel
-  search_size: 8000
+  num_threads: 2            # 2 threads x 4 parallel jobs = 8 cores saturated
+  search_size: 2000
   timeout: 200000
-  victory_condition: 1200
+  # 250 consecutive non-improving valids per thread: easy shapes self-terminate
+  # in seconds; factor-rich shapes are cut by the run_jobs.sh wall-clock
+  # deadline (SIGINT -> best-so-far). Quality floor is min() with v1 anyway.
+  victory_condition: 250
   algorithm: random_pruned
   diagnostics: False

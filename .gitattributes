@@ -1,0 +1,5 @@
+# WSL/bash executes these directly -- a CRLF checkout breaks them with
+# $'\r' errors (core.autocrlf=true would otherwise convert on checkout).
+*.sh   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf

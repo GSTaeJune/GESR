@@ -177,6 +177,14 @@ spatial dims).
    undercounted in this smoke config (Z DRAM traffic is small here; acceptable
    for smoke). For the real sweep either give Z its own DRAM-side accounting or
    post-scale Z DRAM energy by 4.
+   SWEEP STATUS (2026-07-07, review I6): deliberately NOT fixed for the
+   partition sweep -- the `last_level_accesses` proposer objective therefore
+   under-weights psum spills (1/4 per bit vs W/A), biasing the proposer toward
+   spill-heavy mappings on K-deep shapes. Final numbers are unaffected (our
+   scorer charges 32b; best = min(tl, v1)); revisit with a Z-corrected arch if
+   tl rarely wins there. (This note lives HERE and not in mapper_sweep.yaml
+   because that file's md5 keys the job cache -- comment edits would orphan
+   running sweeps.)
 5. **Module name drift**: `import pytimeloop.timeloopfe.v4` (as used by current
    accelergy-exercises `run_example_designs.py`) fails on this install; it ships
    `timeloopfe` as a top-level package.

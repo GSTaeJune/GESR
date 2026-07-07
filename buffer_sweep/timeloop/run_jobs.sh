@@ -38,7 +38,7 @@ echo "run_jobs: $total pending, parallel=$JOBS"
 export CACHE SCRATCH DEADLINE
 printf '%s\n' "$pending" | xargs -r -P "$JOBS" -I{} bash -c '
   set -e
-  n="{}"
+  n="$1"
   rm -rf "$SCRATCH/$n"; mkdir -p "$SCRATCH/$n"
   cp "$CACHE/$n/arch.yaml" "$CACHE/$n/problem.yaml" "$SCRATCH/$n/"
   cp -r "$SCRATCH/_shared/components" "$SCRATCH/_shared/mapper_sweep.yaml" \
@@ -47,32 +47,53 @@ printf '%s\n' "$pending" | xargs -r -P "$JOBS" -I{} bash -c '
   python run_job.py > run.log 2>&1 &
   jpid=$!
   waited=0
+  int_sent=0
   while kill -0 $jpid 2>/dev/null; do
     sleep 10; waited=$((waited+10))
-    if [ "$waited" -eq "$DEADLINE" ]; then
-      # deadline: SIGINT only the timeloop-mapper BINARY of this job (exe
-      # check avoids the /bin/sh wrapper; the pattern cannot match this
-      # scripts own cmdline because there $n is still unexpanded text).
-      for p in $(pgrep -f "$n/output/parsed-processed-input.yaml"); do
-        if [ "$(readlink /proc/$p/exe 2>/dev/null)" = "/usr/local/bin/timeloop-mapper" ]; then
+    if [ "$int_sent" -eq 0 ] && [ "$waited" -ge "$DEADLINE" ]; then
+      int_sent=1
+      # deadline: SIGINT only the timeloop-mapper BINARY of this job. Match by
+      # process NAME (pgrep -x cannot self-match this script) and scope to this
+      # job via its cmdline. NOTE: do NOT match /proc/pid/exe against
+      # /usr/local/bin/timeloop-mapper -- that path is a symlink and exe
+      # resolves to the real binary, so the compare never fired (2026-07-07:
+      # orphan mappers piled up because no INT was ever delivered).
+      for p in $(pgrep -x timeloop-mapper); do
+        if grep -q "$n" "/proc/$p/cmdline" 2>/dev/null; then
           kill -INT "$p" 2>/dev/null || true
         fi
       done
       echo "note:    $n hit ${DEADLINE}s deadline, SIGINT sent (best-so-far)"
-    elif [ "$waited" -ge $((DEADLINE + 180)) ]; then
+    elif [ "$waited" -ge $((DEADLINE + 120)) ]; then
+      # dump/parse did not finish: hard-kill python AND this jobs mapper
+      # (no apostrophes in this quoted block -- it would end the xargs quote)
+      for p in $(pgrep -x timeloop-mapper); do
+        grep -q "$n" "/proc/$p/cmdline" 2>/dev/null && kill -9 "$p" 2>/dev/null || true
+      done
       kill -9 $jpid 2>/dev/null || true      # dump/parse did not finish: give up
       break
     fi
   done
   wait $jpid 2>/dev/null || true
-  if [ -f output/timeloop-mapper.map.yaml ] && [ -s output/timeloop-mapper.stats.txt ]; then
-    cp output/timeloop-mapper.map.yaml "$CACHE/$n/map.yaml"
-    cp output/timeloop-mapper.stats.txt "$CACHE/$n/stats.txt"
+  if [ -f output/timeloop-mapper.map.yaml ] && [ -s output/timeloop-mapper.stats.txt ] \
+     && grep -q "Summary Stats" output/timeloop-mapper.stats.txt; then
+    # publish via rename: a crash mid-copy must not leave truncated files that
+    # look done (review F3)
+    cp output/timeloop-mapper.map.yaml "$CACHE/$n/.map.tmp"
+    cp output/timeloop-mapper.stats.txt "$CACHE/$n/.stats.tmp"
+    mv "$CACHE/$n/.stats.tmp" "$CACHE/$n/stats.txt"
+    mv "$CACHE/$n/.map.tmp" "$CACHE/$n/map.yaml"
+    rm -f "$CACHE/$n/TIMEOUT"
     echo "done:    $n"
+  elif grep -q "Utilization =" run.log 2>/dev/null; then
+    # mapper HAD valid mappings but died before dumping: leave the job
+    # retryable, do not poison the cache with a false INVALID (review C2)
+    tail -3 run.log > "$CACHE/$n/TIMEOUT" 2>/dev/null || true
+    echo "timeout: $n (retryable; valid mappings were seen)"
   else
     tail -5 run.log > "$CACHE/$n/INVALID" 2>/dev/null || echo no-valid-mapping > "$CACHE/$n/INVALID"
     echo "invalid: $n"
   fi
   rm -rf "$SCRATCH/$n"
-'
+' _ {}
 echo "run_jobs: all finished"

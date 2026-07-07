@@ -57,15 +57,17 @@ infrastructure. Re-visit trigger: multi-level SRAM hierarchy or fusion schedulin
      `wsl bash -lc 'source ~/miniconda3/bin/activate timeloop && timeloop-mapper ...'`
    - mapping parser: per-level tile sizes -> (m,k,n); temporal permutation
    - result cache keyed by (partition, GEMM) so re-runs are incremental
-3. Evaluator extension in `buffer_sweep/buffer_sweep.py`: `walk_gemm` generalized
-   to an arbitrary tile-loop permutation, with partial-psum spill/reload charging
-   (32b write + read per eviction of an incomplete O tile; zero-init free,
-   final write once) and the O-drain window generalized to "until the shadow O
-   is next needed". The grouped analytic stays O-stationary-only (v1); Timeloop
-   mappings arrive one per sweep point, so the slow reference walk is fast enough
-   to be the scorer. Selftest: walk-vs-grouped equality retained for the
-   O-stationary perm; spill accounting hand-checked cases for one non-O-stationary
-   perm.
+3. Evaluator: `eval_nest()` in `timeloop_sweep.py` (implementation deviation
+   from the original "extend buffer_sweep.py" wording -- the generalized walker
+   lives next to the parser that feeds it). Walks the FULL Timeloop nest:
+   per-operand tiles (multi-level splits allowed), partial-psum spill/reload
+   charging (32b write + read per eviction of an incomplete O tile; zero-init
+   free, final write once), and each operand's next-tile prefetch spread over
+   the current tile's residency interval. Selftest: eval_nest == walk_gemm on
+   O-stationary synthetic nests (Kt>=2 exact; Kt==1 traffic equal, steady <=),
+   hand-checked spill nest, smoke-mapping traffic reproduction. Independently
+   cross-validated by two review agents (828 fuzz/adversarial nests, 0
+   mismatches).
 4. Outputs (same style as v1, `buffer_sweep/results/`): CSV per model with
    partition, Timeloop-chosen (m,k,n, perm), our energy/cycles, Timeloop's own
    energy/cycles (sanity columns); plots: best energy/cycles vs partition per cap;
@@ -78,8 +80,9 @@ infrastructure. Re-visit trigger: multi-level SRAM hierarchy or fusion schedulin
   unscaled (uniform compute scaling rarely flips traffic-dominated rankings);
   our evaluator applies the real x WBITS timing. If rankings look wrong at the
   cross-check, derate the arch DRAM bandwidth by 1/WBITS instead.
-- Partition step granularity (runtime vs resolution) — start coarse (16 steps),
-  refine near the winner if needed.
+- Partition step granularity: settled at an 8-slice grid (21 partitions/cap;
+  slices must divide cap/2 into 32-bit-aligned units). Refine near the winner
+  if needed.
 - BMM shapes (S x d x S per head): mapper cost amortizes over count x layers.
 
 ## 5. Non-goals
