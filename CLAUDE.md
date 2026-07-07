@@ -6,6 +6,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 2. After completing a logical chunk of work (one or several related tasks, e.g. tasks 1–3), run `/superpowers:requesting-code-review` and `/review`, iterating on their feedback until no blocking issues remain. Reviews don't need to run per-task — group related tasks into a coherent unit before reviewing. Minor or optional suggestions don't need to block convergence.
 
+## Next session kickoff (2026-07-07, **buffer_sweep + timeloop-sweep 완료 — 이 라인 종료(사용자 결정). scheduler 라인도 함께 종료. main 로컬 ff-병합, 미push**)
+
+**사용자 결정 (2026-07-07)**: "buffer_sweep이나 스케쥴러는 이걸로 다 끝내자" — **buffer/timeloop 매핑 라인과 MXP_scheduler(joint order+eviction: M1/cpsat/band) 라인 둘 다 종료.** 두 라인 모두 코드 무변경 보존. 새 방향 나오기 전까지 이쪽 개선 제안 금지.
+
+**진행 상태**: `buffer_sweep/timeloop_sweep.py` (신규 standalone 드라이버) + `buffer_sweep/timeloop/` (arch/problem/mapper YAML 템플릿 + `run_jobs.sh` + `NOTES.md`) **빌드·리뷰 round1 수렴·main 로컬 ff-병합 완료**(브랜치 `feat/timeloop-sweep` 삭제, 5커밋). RTL/MXP_scheduler/buffer_sweep.py(v1) **무변경**. **`origin/main` 보다 앞섬 — 미push**. 검증: `python buffer_sweep/buffer_sweep.py --selftest`(4,866) + `python buffer_sweep/timeloop_sweep.py --selftest`(25) OK. eval_nest math core는 리뷰어 2명 독립 fuzz 828케이스 0불일치 확인.
+
+### 무엇 (spec `docs/superpowers/specs/2026-07-06-timeloop-sweep-design.md`, survey `docs/superpowers/notes/2026-07-06-mapper-survey.md`)
+- **buffer_sweep v1 정정**: "dataflow 고정 = O-stationary"는 **intra-tile(SA bit-serial row=K/col=N/cycle=M, RTL 고정)만** 의미. **inter-tile 스케줄(loop order+tiling)은 search space** — Timeloop 같은 매퍼가 탐색하는 영역. 그래서 tile 스케줄은 하드코딩 안 함.
+- **역할 분담**: Timeloop(WSL, timeloopfe v4)이 **proposer**(파티션·32배수 HW조건을 arch로 받고 (m,k,n)+perm 제안), 우리 `eval_nest`가 **scorer**(bit-serial×8, 핑퐁 stall, psum spill 정확과금, LPDDR5 9pJ/b). **best = min(timeloop, v1 O-stationary floor)** per metric.
+- **sweep 축**: cap을 (W,A,O) 버퍼로 분할(21 파티션/cap, 8-slice). (m,k,n)·loop order는 Timeloop 출력. 워크로드=buffer_sweep과 동일(deit_tiny/small + qwen0.5b/1.5b, attention BMM 포함).
+- **왜 CoSA/최신매퍼 아님**: 작은 single-level dense-GEMM mapspace에선 exhaustive가 최적. CoSA/GAMMA/DOSA는 거대 multi-level mapspace의 근사해(proxy objective)용 — 우리 regime엔 과잉. 재검토 트리거 = multi-level SRAM 계층/fusion.
+
+### 핵심 결과 (실측)
+- **Timeloop이 v1에 100% 패배**: 64KB 84개 파티션(21×4모델) 전부 best_src=v1. tl_E가 v1보다 **3.5~8배 나쁨**(qwen0.5b 8×). 원인 = Timeloop이 K-outer(psum spill) 순열을 다수 제안(details 438행 중 321행이 K@DRAM=spill), 우리 scorer가 32b psum spill을 정확과금. → **min()=v1**. Timeloop은 "명백한 손해 없음"의 독립 cross-check로만 유효. 128/256은 사용자 결정으로 **v1-only 산출**(tl 컬럼 blank, best=v1).
+- **cap↑ → best energy 단조감소** (모든 모델 -33~-42%, 64→256KB): deit_tiny 5.32→4.30→3.57 / deit_small 16.07→12.46→10.63 / qwen0.5b 113.8→86.6→68.4 / qwen1.5b 386.5→288.6→223.0 mJ. (deit_small 16.07mJ = buffer_sweep v1과 일치 → 상호검증.)
+- **best 파티션 = 항상 O-heavy 1:1:6** (W/A/O = 8/8/48, 16/16/96, 32/32/192 KB). DRAM 분해로 필연: O write=`M·N·32b` 고정(psum 완성 1회write), A read=`(M/T_m)·K·N·8`, W read=`(N/T_n)·M·K·8` → 줄일 수 있는 입력 refetch가 T_m·T_n(=O tile=O버퍼)에 반비례. **이긴 타일이 매번 T_m·T_n로 O버퍼를 꽉 채움**(예 256KB 128/·/192 → 96KB=O/2), **T_k는 작게**(32~64). cycles는 cap 무관 ~flat(compute-bound). "psum 용량 최대 + K 안쪽 완성"이 실측 최적 규칙.
+
+### 산출물 / 다음 후보
+- `buffer_sweep/results/timeloop/` (gitignored): 모델별 `*.csv`(파티션×cap best) + `*_details.csv`(shape별 nest/E/cyc) + cap별 energy/cycles heatmap 24 + summary 2. `--score-only`로 캐시 재채점(수분). 캐시는 `results/tl_cache/cfg_<md5(mapper_sweep.yaml)>`.
+- 다음(재개 시): CACTI로 cap별 C_ONCHIP 실측 / seq·정밀도 sweep / RTL 연동 검증 / (tl이 이기게 하려면) Z-corrected DRAM arch(현 8b-O undercount bias, NOTES.md 참조).
+
 ## Next session kickoff (2026-07-03, **방향 전환: joint 스케줄러 폐기 예정 → buffer_sweep(SRAM 버퍼분할 sweep) 빌드·리뷰·main 병합. 미push**)
 
 **방향 전환 (사용자 결정)**: MXP_scheduler 의 joint order+eviction 라인(M1/cpsat/band)은 **폐기 예정** — 스케줄러 개선 제안 금지. 새 방향 = **SRAM 구성·dataflow 를 먼저 고정하고 매핑**. 기존 M0/M1/cpsat/band 코드는 무변경 보존.
