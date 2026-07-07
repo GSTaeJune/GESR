@@ -1,0 +1,23 @@
+mapper:
+  # Sweep mapper knobs -- measured on the worst-case shape (224x768x192, tight
+  # buffers; see NOTES.md + 2026-07-06 session):
+  #   * optimization_metrics: Timeloop's own energy model is on-chip dominated,
+  #     OURS is DRAM dominated (LPDDR5 9 pJ/b) -> rank by DRAM accesses
+  #     (last_level_accesses), tie-break by delay.
+  #   * algorithm: linear_pruned enumerates a redundant space (same schedule
+  #     expressed as many multi-level factor splits) and plateaus in a bad
+  #     corner; random_pruned samples widely and reaches good families.
+  #   * timeout counts CONSECUTIVE INVALID candidates per thread -- keep large,
+  #     invalid candidates are rejected in ~us (3000 made every thread bail
+  #     before ONE valid mapping on K=768 shapes).
+  # The mapper is a PROPOSER only: timeloop_sweep.py scores its mapping with
+  # our evaluator and takes min() against the v1 O-stationary exhaustive floor.
+  version: 0.4
+  optimization_metrics: [last_level_accesses, delay]
+  live_status: False
+  num_threads: 4            # run_jobs.sh runs several jobs in parallel
+  search_size: 8000
+  timeout: 200000
+  victory_condition: 1200
+  algorithm: random_pruned
+  diagnostics: False
