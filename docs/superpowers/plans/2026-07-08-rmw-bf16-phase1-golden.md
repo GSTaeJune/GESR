@@ -20,12 +20,12 @@
 - `MXP_Tools/pyproject.toml` — **modify**: `ml_dtypes` optional extra.
 - `MXP_Tools/tests/_bf16_ref.py` — **create**: independent pure-python bf16-RNE reference (test anchor).
 - `MXP_Tools/tests/test_bf16_ref.py` — **create**: validate `ml_dtypes` rounding against the independent reference.
-- `MXP_Tools/tests/test_gemm_bf16.py` — **create**: bf16 golden gate tests (determinism, subset, uniform==mixed, zero, invalid-dtype, rounding-topology, subnormal).
+- `MXP_Tools/tests/test_gemm_bf16.py` — **create**: bf16 golden gate tests (determinism, subset, uniform==mixed, zero, invalid-dtype, rounding-topology, subnormal, fp64-truth tolerance, hand-derived single-block value).
 - `MXP_Tools/tests/test_gemm_fp32_frozen.py` — **create**: fp32 byte-identical frozen regression.
 - `MXP_Tools/tests/fixtures/golden_fp32_frozen.npz` — **create**: captured pre-refactor fp32 output.
 - `MXP_Tools/tests/test_cli_ref_bf16.py` — **create**: `ref --accum bf16` writes suffixed npz with `accum` meta.
 
-All commands below run from `MXP_Tools/` unless noted (`cd MXP_Tools`).
+All commands below run from `MXP_Tools/` unless noted (`cd MXP_Tools`). **Run them via the Bash tool** — the `&&` chaining and the `'.[bf16]'` extra are POSIX-shell idioms; the environment default shell is PowerShell (where `&&` is a parse error and the unquoted `.[bf16]` is fragile), but the Bash tool is available and is what the repo's sim scripts already use.
 
 ---
 
@@ -60,9 +60,9 @@ def f32_to_bf16_bits_rne(x_f32):
     mant = b & 0x7FFFFF
     top = b >> 16
     if exp == 0xFF:                       # inf / NaN
-        if mant != 0 and (top & 0x7F) == 0:
-            top |= 1                      # keep NaN a NaN (don't truncate to inf)
-        return top & 0xFFFF
+        if mant != 0:
+            return (top & 0x8000) | 0x7FC0   # NaN -> canonical quiet NaN (matches ml_dtypes)
+        return top & 0xFFFF                  # +/- inf
     lsb = (b >> 16) & 1
     round_bit = (b >> 15) & 1
     sticky = (b & 0x7FFF) != 0
@@ -117,24 +117,17 @@ def test_subnormal_range():
     _check(vals)
 ```
 
-- [ ] **Step 3: Run to verify it fails (import path not yet wired)**
+- [ ] **Step 3: Run to verify the anchor passes**
 
-Run: `cd MXP_Tools && python -m pytest tests/test_bf16_ref.py -q`
-Expected: FAIL if `tests` is not importable as a package. If it fails with `ModuleNotFoundError: tests`, add an empty `tests/__init__.py` (Step 4). If ml_dtypes is absent, it SKIPS — install it first: `pip install ml_dtypes`.
+This is a **characterization/anchor** test, not a red->green test: it validates `ml_dtypes` against the independent reference, so it PASSES immediately (there is no failing implementation to write). `MXP_Tools/tests/__init__.py` already exists (tracked), so `from tests._bf16_ref import ...` resolves under the repo's pytest config.
 
-- [ ] **Step 4: Make `tests` importable**
+Run (via the Bash tool): `cd MXP_Tools && python -m pytest tests/test_bf16_ref.py -q`
+Expected: PASS (3 tests). SKIP only if ml_dtypes is absent (`pip install ml_dtypes`). If `test_subnormal_range` fails, do NOT weaken it — investigate whether the reference or ml_dtypes is IEEE-correct (this is the anchor; spec §3.3).
 
-Create empty file `MXP_Tools/tests/__init__.py` (so `from tests._bf16_ref import ...` resolves). If the suite already collects fine without it, skip.
-
-- [ ] **Step 5: Run to verify it passes**
-
-Run: `cd MXP_Tools && python -m pytest tests/test_bf16_ref.py -q`
-Expected: PASS (3 tests). If `test_subnormal_range` fails, do NOT weaken it — investigate whether the reference or ml_dtypes is wrong (this is the anchor; a real discrepancy must be understood, per spec §3.3).
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-cd MXP_Tools && git add tests/_bf16_ref.py tests/test_bf16_ref.py tests/__init__.py
+cd MXP_Tools && git add tests/_bf16_ref.py tests/test_bf16_ref.py
 git commit -m "test(rmw-bf16): independent bf16-RNE reference anchors ml_dtypes"
 ```
 
@@ -308,10 +301,10 @@ def test_invalid_accum_dtype_raises():
         mxint_gemm_golden(*_rand_case(3), accum_dtype="fp16")
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 2: Run to verify the red phase**
 
 Run: `cd MXP_Tools && python -m pytest tests/test_gemm_bf16.py -q`
-Expected: FAIL — the bf16 path is not implemented (results won't be bf16-representable / determinism aside, `test_bf16_output_is_bf16_representable` fails because fp32 accumulation isn't rounded to bf16). `test_invalid_accum_dtype_raises` already passes from Task 2.
+Expected: the file exits non-zero because `test_bf16_output_is_bf16_representable` **FAILS** — before the bf16 branch exists, `accum_dtype="bf16"` is a valid value (Task 2) that falls through to the fp32 path, whose values are not bf16-representable. Per-test: `test_bf16_output_is_bf16_representable` = FAIL (the real red); `test_bf16_deterministic`, `test_bf16_uniform_prec_array_matches_scalar`, `test_bf16_zero_inputs_zero_output` = PASS **spuriously** on the fp32 fallthrough (they are not the discriminating tests); `test_invalid_accum_dtype_raises` = PASS (Task 2 guard). The real discriminating power is `representable` here plus the Task 4 anchors — this is expected.
 
 - [ ] **Step 3: Implement the bf16 branch**
 
@@ -452,18 +445,56 @@ def test_bf16_subnormal_dequant_self_consistent():
     golden = mxint_gemm_golden(int_A, scale_A, INT8, int_B, scale_B, INT8, accum_dtype="bf16")
     ref = _per_add_bf16_ref(int_A, scale_A, INT8, int_B, scale_B, INT8)
     assert np.array_equal(golden, ref)
+
+
+def test_bf16_tracks_fp64_truth():
+    """GATE, independent of the E-formula: the bf16 golden must track the true
+    fp64 matmul within (MX-quant + bf16-accum) error. This is the one test that
+    catches a *systematic* dequant/exponent-formula bug — the ml_dtypes-based
+    tests and _per_add_bf16_ref all share the same E formula and cannot. Bound
+    (5%) is well above the observed ~1.6% error at K=64 and trips on a formula bug
+    (which gives ~100% error). Satisfies spec 5.2 #7 (correctness anchor)."""
+    rng = np.random.default_rng(20)
+    M, K, N = 32, 64, 32
+    A = rng.standard_normal((M, K)).astype(np.float32) * 0.5
+    B = rng.standard_normal((K, N)).astype(np.float32) * 0.5
+    C_truth = (A.astype(np.float64) @ B.astype(np.float64)).astype(np.float32)
+    int_A, scale_A = quantize_matrix_mx(A, INT8, block_axis=1)
+    int_B, scale_B = quantize_matrix_mx(B, INT8, block_axis=0)
+    C = mxint_gemm_golden(int_A, scale_A, INT8, int_B, scale_B, INT8, accum_dtype="bf16")
+    rel = np.abs(C - C_truth).max() / np.abs(C_truth).max()
+    assert rel < 5e-2, f"bf16 golden must track FP32 truth, got rel={rel}"
+
+
+def test_bf16_single_block_hand_derived_value():
+    """Hand-derived end-to-end value (spec formula + IEEE bf16; NO ml_dtypes in the
+    expectation). Single K-block => one exact add to zero.
+      32 ones . 32 ones = block_int = 32 (every element).
+      e_a = e_b = 127 (2^0); INT8 implicit = 6 each.
+      E = 127 + 127 - 254 - 6 - 6 = -12.
+      value = 32 * 2^-12 = 2^-7 = 0.0078125, exactly bf16-representable.
+    A wrong E-formula (e.g. -253) changes this exact value, so it is a hard
+    non-tautological anchor for the dequant/exponent math."""
+    int_A = np.ones((32, 32), dtype=np.int8)
+    int_B = np.ones((32, 32), dtype=np.int8)
+    scale_A = np.full((32, 1), 127, dtype=np.uint8)
+    scale_B = np.full((1, 32), 127, dtype=np.uint8)
+    C = mxint_gemm_golden(int_A, scale_A, INT8, int_B, scale_B, INT8, accum_dtype="bf16")
+    assert np.all(C == np.float32(2.0 ** -7))
 ```
 
 - [ ] **Step 2: Run to verify they pass**
 
 Run: `cd MXP_Tools && python -m pytest tests/test_gemm_bf16.py -q`
-Expected: PASS. If `test_bf16_rounds_per_k_tile_not_once` fails on the `not array_equal` line, the chosen case did not diverge — change the seed in `_rand_case(7, ...)` (try 8, 9, …) until per-add and cast-once differ, then confirm the first assertion still holds.
+Expected: PASS (all bf16 tests incl. the 4 new anchors). Seed 7 is confirmed non-vacuous (per-add differs from cast-once at 662/1024 elements). If `test_bf16_rounds_per_k_tile_not_once` ever fails on the `not array_equal` line, the case did not diverge — change the seed in `_rand_case(7, ...)` (try 8, 9, …) until per-add and cast-once differ, then confirm the first assertion still holds.
+
+Sanity that the truth gate actually bites: temporarily change `- 254` to `- 253` in the gemm.py bf16 branch and re-run — `test_bf16_tracks_fp64_truth` and `test_bf16_single_block_hand_derived_value` must FAIL (the ml_dtypes-only tests stay green, proving they alone are insufficient). Revert the change.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 cd MXP_Tools && git add tests/test_gemm_bf16.py
-git commit -m "test(rmw-bf16): per-K-tile rounding topology + subnormal-dequant anchors"
+git commit -m "test(rmw-bf16): topology + subnormal + fp64-truth + hand-derived E-formula anchors"
 ```
 
 ---
@@ -573,6 +604,8 @@ In the `ref` argparse block, add the flag:
                    help="golden accumulator precision (default fp32)")
 ```
 
+While editing `cli.py`, honor the repo's ASCII-only display rule (memory `feedback_ascii_only_displays`): replace the non-ASCII `→` in `cmd_emit`'s `print(f"emit: {name}  →  {sub}/...")` with `->`. (The new `ref` print above already uses ASCII `x`/`->`.) Do not touch any other `cmd_emit` logic.
+
 - [ ] **Step 5: Run to verify it passes**
 
 Run: `cd MXP_Tools && python -m pytest tests/test_cli_ref_bf16.py -q`
@@ -607,7 +640,7 @@ dev = ["pytest>=7", "matplotlib>=3.5", "ml_dtypes>=0.4"]
 
 - [ ] **Step 2: Verify the extra installs and the suite is green**
 
-Run: `cd MXP_Tools && pip install -e .[bf16] && python -m pytest -q`
+Run: `cd MXP_Tools && pip install -e '.[bf16]' && python -m pytest -q`
 Expected: install succeeds; PASS (all tests, no skips for bf16).
 
 - [ ] **Step 3: Verify graceful behavior without ml_dtypes (optional check)**
@@ -634,5 +667,6 @@ git commit -m "build(rmw-bf16): ml_dtypes as optional [bf16] extra"
 
 ## Self-review notes (author)
 
-- **Spec coverage:** D1 (parameterize) → Task 2/3; D2 (ml_dtypes optional+lazy) → Task 3/6; single-exponent-shift dequant (§3.2) → Task 3; dtype guard → Task 3; §5.2 gate: independent ref #1 → Task 1, topology #2 → Task 4, subnormal #3 → Task 4, uniform==mixed #4 → Task 3, bf16-subset #5 → Task 3, fp32 frozen #6 → Task 2, reference-semantics #7 → covered by Task 1 (directed ties are hand-derived spec values), informational SNR #8 → Task 5. `ref --accum` → Task 5. D5 loop-order: the golden loops 0..n-1 by construction; the *runtime guard* against a different RTL feed order is a Phase-2 concern (documented in the Task-3 comment).
+- **Spec coverage:** D1 (parameterize) → Task 2/3; D2 (ml_dtypes optional+lazy) → Task 3/6; single-exponent-shift dequant (§3.2) → Task 3; dtype guard → Task 3; §5.2 gate: independent ref #1 → Task 1, topology #2 → Task 4, subnormal #3 → Task 4, uniform==mixed #4 → Task 3, bf16-subset #5 → Task 3, fp32 frozen #6 → Task 2, **reference-semantics #7 → Task 4** (`test_bf16_single_block_hand_derived_value` = hand-derived exact value from the spec formula, no ml_dtypes in the expectation; backed by `test_bf16_tracks_fp64_truth` as an E-formula-independent gate), informational SNR #8 → Task 5. `ref --accum` → Task 5.
+- **D5 loop-order guard (spec §5.1) — intentional Phase-1 N/A, flagged not dropped:** the bf16 golden loops K-blocks `0..n-1` by construction and takes **no order input**, so a runtime `assert` would have nothing to check (it would be vacuous). The enforceable guard belongs in Phase 2b, where the RTL/TB drive a concrete feed order that must be asserted to equal `0..n-1` before the bf16 sweep can claim bit-exact. The Task-3 bf16 branch documents the `0..n-1` assumption in-code (`# ... in order 0..n-1 (see spec D5)`). This is a deliberate deviation from §5.1's wording, recorded here so it is not silently lost.
 - **Deferred to later plans (not Phase 1):** HardFloat re-vendor, int_to_bf16/bf16_adder + cross-check TBs (Phase 2a); RTL width narrowing, hwio bf16 reader, integration sweep (Phase 2b).
