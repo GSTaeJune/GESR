@@ -35,6 +35,7 @@ third_party/berkeley-hardfloat/generated/
 MXP_Tools/work/
 MXP_Tools/__pycache__/
 MXP_Tools/**/__pycache__/
+MXP_Tools/*.egg-info/
 *.pyc
 
 # Integration sim work/ — MXP_Tools generated inputs + HW dumps
