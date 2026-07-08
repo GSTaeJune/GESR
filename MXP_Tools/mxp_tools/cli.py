@@ -89,7 +89,7 @@ def cmd_emit(args):
             os.path.join(sub, f"quant_{name}.npz"),
             a_int=a_int, a_scale=a_sc, b_int=b_int, b_scale=b_sc, prec=prec,
         )
-        print(f"emit: {name}  →  {sub}/ (a_input_BS/BP, b_input, a/b_scale, quant_{name}.npz)")
+        print(f"emit: {name}  ->  {sub}/ (a_input_BS/BP, b_input, a/b_scale, quant_{name}.npz)")
 
 
 def cmd_ref(args):
@@ -109,11 +109,19 @@ def cmd_ref(args):
             C_sw_pad = gemm.mxint_gemm_golden(
                 qa["a_int"], qa["a_scale"], pa,
                 qb["b_int"], qb["b_scale"], pb,
+                accum_dtype=args.accum,
             )
             C_sw = C_sw_pad[:M, :N]
-            path = os.path.join(out_ref, f"C_sw_{PREC_NAMES[pa]}_{PREC_NAMES[pb]}.npz")
-            np.savez(path, C_sw=C_sw, C_fp32=C_fp32, prec_a=pa, prec_b=pb)
-            print(f"ref: {PREC_NAMES[pa]} × {PREC_NAMES[pb]}  →  {path}")
+            suffix = "" if args.accum == "fp32" else f"_{args.accum}"
+            path = os.path.join(out_ref, f"C_sw_{PREC_NAMES[pa]}_{PREC_NAMES[pb]}{suffix}.npz")
+            np.savez(path, C_sw=C_sw, C_fp32=C_fp32, prec_a=pa, prec_b=pb, accum=args.accum)
+            print(f"ref: {PREC_NAMES[pa]} x {PREC_NAMES[pb]} [{args.accum}]  ->  {path}")
+            if args.accum == "bf16":
+                s = cmp_mod.bf16_accuracy_stats(C_sw, C_fp32)
+                print(f"  bf16 vs fp32-truth: SNR={s['snr_db']:.2f} dB  rmse={s['rmse']:.3e}")
+                if s["catastrophic"]:
+                    print("  WARNING: bf16 SNR < 0 dB - accumulation may be unusable; "
+                          "consider the fp32 fallback (spec D4).")
 
 
 def _resolve_mapping(args, M, N):
@@ -197,6 +205,8 @@ def main(argv=None):
     _add_io(g)
     g.add_argument("--prec-a", type=int, choices=ALL_PRECS, default=None)
     g.add_argument("--prec-b", type=int, choices=ALL_PRECS, default=None)
+    g.add_argument("--accum", choices=("fp32", "bf16"), default="fp32",
+                   help="golden accumulator precision (default fp32)")
     g.set_defaults(func=cmd_ref)
 
     g = sp.add_parser("compare", help="3-way diff: HW vs SW vs FP32")

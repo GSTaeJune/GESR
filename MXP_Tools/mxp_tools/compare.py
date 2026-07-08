@@ -120,3 +120,15 @@ def print_stats(result, label=""):
     hw_sw = s["hw_sw"]
     verdict = "PASS" if hw_sw["n_nonzero_diff"] == 0 else "FAIL"
     print(f"summary: hw_sw {verdict}  n_diff={hw_sw['n_nonzero_diff']}/{hw_sw['n_total']}")
+
+
+def bf16_accuracy_stats(C_sw, C_fp32):
+    """Informational: bf16 golden vs FP32 truth. Reuses _pair_stats.
+
+    Returns the _pair_stats dict (snr_db, rmse, ...). NOT a gate - the compare
+    pass/fail gate stays hw_sw-only. `catastrophic` flags negative-dB SNR so the
+    fp32-fallback decision (spec D4) is actionable rather than buried.
+    """
+    stats = _pair_stats(C_sw.astype(np.float32), C_fp32.astype(np.float32))
+    stats["catastrophic"] = bool(np.isfinite(stats["snr_db"]) and stats["snr_db"] < 0.0)
+    return stats
