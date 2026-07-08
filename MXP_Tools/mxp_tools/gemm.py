@@ -1,4 +1,5 @@
-"""Golden-reference FP32 MXINT GEMM. Pure numpy; matches MXP_Soft mxint_gemm.
+"""Golden-reference FP32 MXINT GEMM. Pure numpy (ml_dtypes is used only for
+accum_dtype='bf16'); matches MXP_Soft mxint_gemm.
 
 Per OCP MX Spec §6.3.2:
 
@@ -30,7 +31,7 @@ def _e8m0_to_fp32(scale_e8m0):
     return (2.0 ** (scale_e8m0.astype(np.float64) - 127.0)).astype(np.float32)
 
 
-def mxint_gemm_golden(int_A, scale_A, prec_A, int_B, scale_B, prec_B):
+def mxint_gemm_golden(int_A, scale_A, prec_A, int_B, scale_B, prec_B, accum_dtype="fp32"):
     """Block-wise int32→FP32 accumulator GEMM. Inputs are pre-quantized.
 
     Args:
@@ -57,6 +58,8 @@ def mxint_gemm_golden(int_A, scale_A, prec_A, int_B, scale_B, prec_B):
         raise TypeError(f"int_A, int_B must be int8 (got {int_A.dtype}, {int_B.dtype})")
     if scale_A.dtype != np.uint8 or scale_B.dtype != np.uint8:
         raise TypeError(f"scale_A, scale_B must be uint8 (got {scale_A.dtype}, {scale_B.dtype})")
+    if accum_dtype not in ("fp32", "bf16"):
+        raise ValueError(f"accum_dtype must be 'fp32' or 'bf16', got {accum_dtype!r}")
 
     M, K = int_A.shape
     K2, N = int_B.shape
