@@ -1,9 +1,11 @@
-"""Golden-reference FP32 MXINT GEMM. Pure numpy; matches MXP_Soft mxint_gemm.
+"""Golden-reference MXINT GEMM. Matches MXP_Soft mxint_gemm.
 
-``accum_dtype='bf16'`` is reserved (accepted by the signature) but NOT yet
-implemented in this file -- a later task adds the bf16 accumulation branch
-(which will import ml_dtypes). Until that lands, this module uses only numpy
-and every accum_dtype value takes the fp32 path.
+``accum_dtype='fp32'`` (default) is the pure-numpy path described below.
+``accum_dtype='bf16'`` accumulates in bfloat16 via ml_dtypes, mirroring the
+HW RMW datapath: per K-block (order 0..n-1) it forms the exact int32 block
+sum, rounds int->bf16 (RNE), applies a single integer exponent shift 2^E,
+and adds into a native bf16 accumulator (RNE). It imports ml_dtypes lazily
+(only when accum_dtype='bf16'), so the fp32 path stays numpy-only.
 
 Per OCP MX Spec §6.3.2:
 
@@ -104,6 +106,38 @@ def mxint_gemm_golden(int_A, scale_A, prec_A, int_B, scale_B, prec_B, accum_dtyp
         if prec_A not in IMPLICIT_SCALE_EXP:
             raise ValueError(f"prec_A must be in {sorted(IMPLICIT_SCALE_EXP)} or ndarray, got {prec_A}")
         impl_a_scalar = IMPLICIT_SCALE_EXP[prec_A]
+
+    if accum_dtype == "bf16":
+        try:
+            from ml_dtypes import bfloat16
+        except ImportError as e:
+            raise ImportError(
+                "accum_dtype='bf16' requires ml_dtypes. Install with: "
+                "pip install ml_dtypes  (or `pip install -e .[bf16]`)."
+            ) from e
+        # Mirror the HW RMW datapath, per K-block in order 0..n-1 (see spec D5):
+        #   int32 block sum (exact) -> int->bf16 (RNE, = INToRecFN)
+        #   -> single integer exponent shift 2^E (exact, = recoded exp-add)
+        #   -> bf16 add (RNE, = AddRecFN).
+        # E = (e_a - 127) + (e_b - 127) - impl_a - impl_b, per (m, n).
+        ea = scale_A.astype(np.int64)          # (M, n_blocks) E8M0 biased exponent
+        eb = scale_B.astype(np.int64)          # (n_blocks, N)
+        C = np.zeros((M, N), dtype=bfloat16)
+        for blk in range(n_blocks):
+            sl = slice(blk * BLOCK_SIZE, (blk + 1) * BLOCK_SIZE)
+            block_int = int_A[:, sl].astype(np.int32) @ int_B[sl, :].astype(np.int32)
+            if prec_a_is_array:
+                impl_a_here = impl_a_mat[:, blk][:, np.newaxis]        # (M, 1)
+            else:
+                impl_a_here = impl_a_scalar                            # scalar
+            E = ea[:, blk:blk + 1] + eb[blk:blk + 1, :] - 254 - impl_a_here - impl_b
+            # block_int magnitude < 2^20, so float32 is exact and the cast to bf16 is RNE.
+            r = block_int.astype(np.float32).astype(bfloat16)
+            # ldexp scales by 2^E in float64 (no premature underflow), then one bf16 round.
+            fp_a = np.ldexp(r.astype(np.float64), E).astype(bfloat16)
+            C = C + fp_a                                              # native bf16 add
+            assert C.dtype == bfloat16, "bf16 accumulator was promoted to a wider dtype"
+        return C.astype(np.float32)
 
     a_scale_fp = _e8m0_to_fp32(scale_A)
     b_scale_fp = _e8m0_to_fp32(scale_B)
