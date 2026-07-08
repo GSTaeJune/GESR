@@ -1,5 +1,9 @@
-"""Golden-reference FP32 MXINT GEMM. Pure numpy (ml_dtypes is used only for
-accum_dtype='bf16'); matches MXP_Soft mxint_gemm.
+"""Golden-reference FP32 MXINT GEMM. Pure numpy; matches MXP_Soft mxint_gemm.
+
+``accum_dtype='bf16'`` is reserved (accepted by the signature) but NOT yet
+implemented in this file -- a later task adds the bf16 accumulation branch
+(which will import ml_dtypes). Until that lands, this module uses only numpy
+and every accum_dtype value takes the fp32 path.
 
 Per OCP MX Spec §6.3.2:
 
