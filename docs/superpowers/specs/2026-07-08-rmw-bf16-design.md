@@ -163,23 +163,43 @@ All changes in `MXP_Tools/`. No RTL, no sweep-script changes.
 
 ### 6.1 Phase 2a — HardFloat + primitives
 
-- **Re-vendor bf16 HardFloat** (e8/s8) via `docs/hardfloat-setup.md` (sbt/Chisel). The bundle
-  is currently FP32-only (`INToRecFN_i32_e8_s24`, `AddRecFN` e8/s24, `RecFN/FN` wrappers with
-  baked-in widths); e8/s8 is a valid config but requires **regeneration**, not a Verilog
-  parameter edit.
-- **`int_to_bf16.v`**: `int_to_fp32.v` with narrower significand. Because bf16 and fp32
-  **share expWidth=8**, the recoded exponent field is 9 bits in both and the scale-exponent-
-  add logic is width-invariant (the same 9-bit combined scale is reused). Concrete edits:
-  `REC_W 33→17`, `sig_field [22:0]→[6:0]`, primitives `_e8_s24 → _e8_s8`, and re-derive the
-  `in_int==0` zero-passthrough for bf16.
-- **`bf16_adder.v`**: `fp32_adder.v` with `AddRecFN` e8/s8, RNE, `detectTininess=0`.
-- **Unit TBs** `int_to_bf16_tb`, `bf16_adder_tb` cross-check **HardFloat bf16 == ml_dtypes
-  bf16**:
-  - `int_to_bf16`: **near-exhaustive** over the realizable domain (`|block_int| ≲ 2^20` ×
+**REVISED 2026-07-09 after a re-vendor feasibility spike.** Empirical findings:
+- Java 17 (Temurin) + sbt build Chisel 3.5.6 fine **if** `JAVA_TOOL_OPTIONS` uses the `=` form
+  (`--add-opens=java.base/java.lang=ALL-UNNAMED ...`); JDK 11 is not needed.
+- **`INToRecFN_i32_e8_s8`** (io_out[16:0], retains `io_detectTininess` → drive `1'b0`) and
+  **`FNFromRecFN_bf16_wrapper`** (in[16:0]→out[15:0]) generate cleanly; no name collision with
+  the FP32 bundle. (`RecFNFromFN_bf16_wrapper` also generates but is unused — see below.)
+- **`AddRecFN(8,8)` does NOT elaborate** — HardFloat's `AddRawFN`/`primitives.lowMask` hits an
+  invalid bit range for sigWidth=8 (the 8-bit significand is too small for the stock adder
+  core; FP32's sigWidth=24 is fine). This is a HardFloat limitation, not a toolchain issue.
+
+**Resolution — compute bf16 add in the FP32 domain, then RNE-narrow** (this is exactly the
+Phase-1 golden's model, so bit-exactness is preserved by construction and already validated):
+
+- **`fp32_to_bf16_rne.v`** (NEW, combinational): round-half-to-even narrow of an IEEE FP32 to
+  bf16. Same logic as the Phase-1 `f32_to_bf16_bits_rne` reference (top 16 bits + RNE on the
+  discarded low 16: round bit [15], sticky [14:0], lsb [16]; NaN→canonical qNaN; inf→top16).
+  This is the ONE new correctness-critical block; its unit TB cross-checks ml_dtypes.
+- **`int_to_bf16.v`**: uses `INToRecFN_i32_e8_s8` + the **same scale-exponent-add** as
+  `int_to_fp32.v` (bf16 and fp32 share expWidth=8, so the recoded exp field is 9 bits in both;
+  `REC_W 33→17`, `sig_field [22:0]→[6:0]`) + `FNFromRecFN_bf16_wrapper`. Rounds int→8-bit
+  significand FIRST (matching the golden's `bf16(block_int)` then shift), so subnormal
+  double-rounding matches the golden. Re-derive the `in_int==0` zero-passthrough for bf16.
+- **`bf16_adder.v`**: bf16→fp32 widen is EXACT (`{bf16[15:0], 16'h0}` is the fp32 of the bf16
+  value, since bf16 = fp32's top 16 bits — holds for normal/subnormal/inf/NaN) → feed the
+  **existing, trusted FP32 adder** (`RecFNFromFN_wrapper` → `AddRecFN` e8/s24 → `FNFromRecFN_wrapper`,
+  or instantiate `fp32_adder` directly) → `fp32_to_bf16_rne`. `round_bf16(round_fp32(a+b)) =
+  round_bf16(a+b)` = true bf16 add (double-rounding safe, 24 ≥ 2·8+2). No bf16 `AddRecFN`
+  needed; the blocked module is sidestepped.
+
+- **Unit TBs** cross-check against ml_dtypes:
+  - `fp32_to_bf16_rne_tb`: **near-exhaustive over the critical fp32 bands** (subnormal→normal
+    boundary, overflow→inf, tie grid) — this locks the one new block to IEEE RNE / ml_dtypes.
+  - `int_to_bf16_tb`: **near-exhaustive** over the realizable domain (`|block_int| ≲ 2^20` ×
     the finite scale set), incl. int RNE ties at the 8-bit boundary, INT32_MIN, mantissa
     carry-out across a power of two, scale extremes exercising `new_exp` truncation/wrap,
     zero-passthrough-with-nonzero-scale.
-  - `bf16_adder`: **large randomized** (1e5–1e6) + directed edges: tie-to-even, ±0 from
+  - `bf16_adder_tb`: **large randomized** (1e5–1e6) + directed edges: tie-to-even, ±0 from
     cancellation, subnormal±subnormal, carry→exponent increment/overflow→inf, inf+(−inf)→NaN,
     and a **defined NaN-equality policy** (HardFloat vs ml_dtypes NaN payloads may differ).
 
