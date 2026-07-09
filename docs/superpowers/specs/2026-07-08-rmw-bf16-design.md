@@ -205,6 +205,27 @@ Phase-1 golden's model, so bit-exactness is preserved by construction and alread
 
 Passing 2a clears D6 (the golden is now a proven model of the HW).
 
+**Phase 2a outcome (2026-07-09) — DONE, all 3 primitives bit-exact to ml_dtypes:**
+`fp32_to_bf16_rne` (70012 vectors), `int_to_bf16` (24072), `bf16_adder` (200005) all
+pass their cross-check TBs; fp32 datapath untouched (fp32 unit TBs still pass). **D6 cleared
+within the tested operating domain.** Two findings carried to Phase 2b:
+
+1. **`int_to_bf16` deep-underflow divergence (must fix in 2b).** `int_to_bf16` inherits
+   `int_to_fp32`'s `new_exp = new_exp10[8:0]` 9-bit truncation with **no underflow-to-zero
+   clamp**. For a very negative combined scale (`comb_s < 0`, which real workloads produce
+   when act/weight E8M0 < 127) the truncation wraps and the result diverges ~1 ULP+ from the
+   golden's `ldexp`-flush-to-zero. The 9-mode fp32 workload never hit this (comb_s ≈ 115), and
+   the Phase-2a oracle only tests scale ∈ [0,254], so it is currently un-gated. **Phase 2b must:
+   (a) extend `sim/bf16_vectors.py` to test negative 9-bit scales, (b) add an underflow clamp to
+   `int_to_bf16` (it is a NEW file, unlike the preserved `int_to_fp32`) so it flushes to zero
+   like the golden.** The integration sweep will surface it on real workloads if unfixed.
+2. **inf−inf NaN sign convention differs** (HardFloat emits +qNaN, ml_dtypes/x86 emits −qNaN;
+   IEEE leaves it unspecified). `bf16_adder_tb` compares NaN sign/payload-agnostically. Practically
+   irrelevant for bit-exactness — bounded GEMM accumulation never produces inf/NaN — but if
+   Phase-2b's bit-exact compare ever sees a NaN it would mismatch (the golden treats non-finite as
+   a mismatch anyway). Note: the plan's claim that the oracle canonicalizes NaN to 0x7FC0 was
+   inaccurate — it is sign-preserving.
+
 ### 6.2 Phase 2b — width propagation + integration
 
 Datapath narrows 32→16 for the psum/SRAM side; `in_GEMM` (INT32 into RMW) stays 32.
