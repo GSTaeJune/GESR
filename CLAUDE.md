@@ -6,6 +6,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 2. After completing a logical chunk of work (one or several related tasks, e.g. tasks 1–3), run `/superpowers:requesting-code-review` and `/review`, iterating on their feedback until no blocking issues remain. Reviews don't need to run per-task — group related tasks into a coherent unit before reviewing. Minor or optional suggestions don't need to block convergence.
 
+## Next session kickoff (2026-07-09, **RMW FP32->BF16 새 라인: Phase 1(golden) + Phase 2a(RTL bf16 primitives) 랜딩 완료. 다음 = Phase 2b(RTL 32->16 하드교체+통합). main 로컬 ff-병합, 미push**)
+
+**활성 라인** (이전 "모든 라인 종료" 상태를 뒤집음): RMW inter-tile accumulator 를 **FP32->BF16** 으로. SRAM psum 저장 절반 + DRAM O-write 에너지(지배항) 절반. 자세한 배경/결정/발견은 메모리 `project_rmw_bf16_phase1_landed` 참조. **spec**: `docs/superpowers/specs/2026-07-08-rmw-bf16-design.md` (D1~D6 결정 + §6.1 Phase 2a 결과·이월).
+
+### 랜딩 완료 (main, 미push)
+- **Phase 1 (golden)** plan `docs/superpowers/plans/2026-07-08-rmw-bf16-phase1-golden.md`: `mxint_gemm_golden(accum_dtype in {fp32(기본),bf16})`. fp32 byte-identical(frozen 회귀), bf16 = ml_dtypes(optional `[bf16]` extra, lazy). 모델 = K-block당 int32 sum -> `int->bf16` RNE -> `np.ldexp` 단일 exp-shift -> native bf16 add. `ref --accum bf16`(파일명 분리 + 정보성 SNR). 검증 `cd MXP_Tools && python -m pytest -q` -> **69 passed**. 비-tautology 게이트(독립 bf16-RNE 레퍼런스 + fp64-truth + hand-derived + topology + subnormal).
+- **Phase 2a (RTL primitives)** plan `docs/superpowers/plans/2026-07-09-rmw-bf16-phase2a.md`: **핵심 아키텍처 = bf16 add는 fp32 도메인에서** (스파이크가 HardFloat `AddRecFN(8,8)` elaborate 불가 발견 -> widen `{bf16,16'h0}` exact -> 기존 fp32 `AddRecFN` -> RNE narrow = golden 모델과 일치, provably bit-exact). 3 primitive 전부 ml_dtypes 와 bit-exact(각 cross-check TB, 게이트 실측): `fp32_to_bf16_rne.v`(70012) / `int_to_bf16.v`(24072, `INToRecFN_i32_e8_s8`+exp-add) / `bf16_adder.v`(200005). vendored `third_party/berkeley-hardfloat/HardFloatBundle_bf16.v`. oracle `sim/bf16_vectors.py`. 검증 `bash sim/run_{fp32_to_bf16_rne,int_to_bf16,bf16_adder}.sh` (각 `ALL ... TESTS PASSED`). fp32 데이터패스 byte-identical, fp32 unit TB 무회귀. **D6 클리어**.
+
+### 다음 = Phase 2b (RTL 폭 32->16 하드교체 + 통합) — 각자 spec/plan/구현/리뷰 사이클
+1. **[MUST FIX 먼저] `int_to_bf16` 깊은 언더플로 발산**: int_to_fp32 에서 물려받은 `new_exp=new_exp10[8:0]` 절단에 underflow clamp 없음. 음수 `comb_s`(작은 act/weight, E8M0<127 인 실워크로드)에서 wrap -> golden 의 ldexp-flush-to-zero 와 발산. 현재 oracle 이 scale in [0,254] 만 테스트해 **un-gated**. 조치: `sim/bf16_vectors.py` 에 음수 9-bit scale 벡터 추가 + `int_to_bf16.v`(신규 파일, 수정 가능)에 flush-to-zero clamp. int_to_fp32.v 는 보존(무변경).
+2. **폭 전파 32->16** (spec §6.2 구체 사이트): `RMW.v` in_SRAM/out_RMW/sram_dly 16b(in_GEMM은 INT32 유지) + int_to_fp32->int_to_bf16 / fp32_adder->bf16_adder 스왑; `sram_1rw*` DATA_WIDTH 16; `gemm_sram_top.v:75,80,81` `*32->*16`+`16'h0`; TB dump `%08x->%04x`; `hwio.py` bf16 reader(16b word->fp32 upcast) + **gap sentinel 분리**(bf16 `0x0000` 이 unwritten-slot sentinel 과 충돌 -> written-mask 별도).
+3. **fp32 RTL 하드교체 전 git 태그**(복구용), fp32 단위 RTL/TB는 HEAD 보존. 그 뒤 **통합 sweep(bf16 golden, `ref --accum bf16`) 재-bit-exact** = Phase 2b 게이트. (MUST-FIX 1 이 여기서 실워크로드로 드러남.)
+4. inf-inf NaN 부호 차이(HardFloat +qNaN vs ml_dtypes -qNaN, IEEE 미규정) — 실질 무해(bounded GEMM엔 inf/NaN 없음), bf16_adder_tb 는 NaN sign-agnostic 비교.
+
+**재vendor 재현**: bf16 emit 은 `C:/Users/ptj72/hf_src`(HardFloat clone, Chisel 3.5.6) 의 `hardfloat/src/main/scala/EmitBf16.scala` + Java 17 은 `JAVA_TOOL_OPTIONS="--add-opens=java.base/java.lang=ALL-UNNAMED ..."`(= form) 로 `sbt "runMain hardfloat.EmitBf16 ./generated_bf16"`. AddRecFN(8,8) 는 elaborate 안 됨(의도적으로 미사용).
+
 ## Next session kickoff (2026-07-07, **buffer_sweep + timeloop-sweep 완료 — 이 라인 종료(사용자 결정). scheduler 라인도 함께 종료. main 로컬 ff-병합, 미push**)
 
 **사용자 결정 (2026-07-07)**: "buffer_sweep이나 스케쥴러는 이걸로 다 끝내자" — **buffer/timeloop 매핑 라인과 MXP_scheduler(joint order+eviction: M1/cpsat/band) 라인 둘 다 종료.** 두 라인 모두 코드 무변경 보존. 새 방향 나오기 전까지 이쪽 개선 제안 금지.

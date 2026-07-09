@@ -182,6 +182,49 @@ Task 2 (`bash sim/run_rmw_smoke.sh`) 를 돌려서 elaboration 성공 + round-tr
 2. 이후엔 sbt 환경 없이도 사용 가능 (`third_party/` 안의 .v 파일만 있으면 됨).
 3. HardFloat 업데이트 필요 시에만 sbt 환경에서 재생성.
 
+## bf16 (e8/s8) variant — RMW BF16 라인 (2026-07-09)
+
+`third_party/berkeley-hardfloat/HardFloatBundle_bf16.v` 는 이 절차의 **sigWidth=8** 변형으로 생성됨. 재현용 emit driver (Chisel 3.5.6 에는 `--module-name` CLI 옵션이 없어 `desiredName` override 사용; `ChiselStage.emitVerilog(gen)` 는 2-arg 아님 -> 반환 String 을 파일로 씀):
+
+`hardfloat_src/hardfloat/src/main/scala/EmitBf16.scala`:
+```scala
+package hardfloat
+import chisel3._
+import chisel3.stage.ChiselStage
+import java.io.PrintWriter
+import java.nio.file.{Files, Paths}
+
+class RecFNFromFN_bf16_wrapper extends RawModule {
+  override def desiredName = "RecFNFromFN_bf16_wrapper"
+  val in = IO(Input(UInt(16.W))); val out = IO(Output(UInt(17.W)))
+  out := recFNFromFN(8, 8, in)
+}
+class FNFromRecFN_bf16_wrapper extends RawModule {
+  override def desiredName = "FNFromRecFN_bf16_wrapper"
+  val in = IO(Input(UInt(17.W))); val out = IO(Output(UInt(16.W)))
+  out := fNFromRecFN(8, 8, in)
+}
+object EmitBf16 extends App {
+  val outDir = if (args.length > 0) args(0) else "generated_bf16"
+  Files.createDirectories(Paths.get(outDir))
+  def emit(name: String, v: String): Unit = {
+    val pw = new PrintWriter(Paths.get(outDir, name + ".v").toFile); pw.write(v); pw.close()
+  }
+  emit("INToRecFN_i32_e8_s8", ChiselStage.emitVerilog(new INToRecFN(32, 8, 8)))  // desiredName natural
+  emit("RecFNFromFN_bf16_wrapper", ChiselStage.emitVerilog(new RecFNFromFN_bf16_wrapper))
+  emit("FNFromRecFN_bf16_wrapper", ChiselStage.emitVerilog(new FNFromRecFN_bf16_wrapper))
+  // NOTE: new AddRecFN(8,8) 는 elaborate 실패 (primitives.lowMask degenerate range for sigWidth=8).
+  // bf16 add 는 fp32 도메인에서 처리 (widen -> 기존 fp32 AddRecFN -> fp32_to_bf16_rne). 미생성.
+}
+```
+
+**Java 17 gotcha**: Chisel 3.5.6 는 JDK 8/11 권장이나 Java 17 에서도 됨 — 단 `JAVA_TOOL_OPTIONS` 는 **`=` form** 이어야 함 (공백 form 은 JVM arg 파서가 거부):
+```bash
+export JAVA_TOOL_OPTIONS="--add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED"
+sbt "runMain hardfloat.EmitBf16 ./generated_bf16"
+```
+생성된 3 파일을 `HardFloatBundle_bf16.v` 로 concat (맨 위 `` `timescale 1ns/1ps `` 추가; VENDORING.md 참고). fp32 번들과 이름 충돌 없음(param-suffix / `_bf16_wrapper`).
+
 ## 참고 자료
 
 - [Chisel 3 docs](https://www.chisel-lang.org/chisel3/)
