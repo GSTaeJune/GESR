@@ -1,0 +1,108 @@
+`timescale 1ns/1ps
+//////////////////////////////////////////////////////////////////////////////////
+// bf16_adder_tb - bf16_adder 크로스체크 TB.
+//
+// 검증 목적:
+//   gemm_sram.srcs/sources_1/new/bf16_adder.v 의 bf16 + bf16 -> bf16 덧셈
+//   (fp32 도메인 확장 -> 검증된 fp32_adder -> fp32_to_bf16_rne narrow) 이
+//   ml_dtypes 의 bfloat16 덧셈과 bit-exact 로 일치하는지 확인.
+//   (a)+(b) 조합: fp32 AddRecFN == IEEE fp32 RNE (기존 fp32 TB 신뢰) +
+//   fp32_to_bf16_rne == ml_dtypes fp32->bf16 (Task 2 검증) 의 합성.
+//
+// 검증 내용 (sim/bf16_vectors.py 생성 work/bf16_vec/bf16_add.mem):
+//   - random bf16 x 다양한 크기 (200k)
+//   - directed edges: inf+(-inf)->NaN, inf+inf, 1.0+(-1.0), subnormal 합,
+//     +0 + (-0) 상쇄.
+//
+// 동작 의도:
+//   free-running clock. 벡터마다 a/b 를 negedge 에 인가하고 L_ADD+1 posedge 를
+//   기다린 뒤 (파이프라인 통과) sum 을 샘플, 기대 bf16 워드와 !== 로 비교.
+//   latency-tolerant serial loop.
+//
+// NaN 부호 처리:
+//   IEEE-754 는 inf+(-inf) 로 생기는 NaN 의 부호를 규정하지 않는다. HardFloat
+//   AddRecFN 은 +qNaN(0x7FC0..) 을, ml_dtypes/numpy(x86) 는 -qNaN(0xFFC0..) 을
+//   낸다 -> 부호만 다른 qNaN. 산술적으로 NaN==NaN 이므로 got/exp 가 둘 다 bf16
+//   NaN 이면 일치로 처리(부호/payload 무시). 유한/inf 값은 그대로 !== bit-exact
+//   비교라 수치 버그는 여전히 잡힌다.
+//////////////////////////////////////////////////////////////////////////////////
+
+module bf16_adder_tb;
+    localparam L_ADD = 3;
+
+    // bf16 NaN 판정: exp 전부 1 (bit14:7 == 0xFF) 이고 mantissa(bit6:0) 비영.
+    function is_bf16_nan;
+        input [15:0] x;
+        is_bf16_nan = (x[14:7] == 8'hFF) && (|x[6:0]);
+    endfunction
+
+    reg         clk;
+    reg         rst;
+    reg  [15:0] a;
+    reg  [15:0] b;
+    wire [15:0] sum;
+
+    bf16_adder #(.L_ADD(L_ADD)) dut (
+        .clk (clk),
+        .rst (rst),
+        .a   (a),
+        .b   (b),
+        .sum (sum)
+    );
+
+    // free-running clock
+    initial clk = 1'b0;
+    always #5 clk = ~clk;
+
+    integer fd, r, nfail, ntot, k;
+    reg [15:0] a_w;
+    reg [15:0] b_w;
+    reg [15:0] exp_w;
+
+    initial begin
+        rst   = 1'b1;
+        a     = 16'h0;
+        b     = 16'h0;
+        nfail = 0;
+        ntot  = 0;
+
+        // reset once at start
+        @(posedge clk);
+        @(posedge clk);
+        rst = 1'b0;
+
+        fd = $fopen("work/bf16_vec/bf16_add.mem", "r");
+        if (fd == 0) begin
+            $display("bf16_adder_tb: FAIL cannot open vectors");
+            $finish;
+        end
+
+        r = $fscanf(fd, "%h %h %h\n", a_w, b_w, exp_w);
+        while (r == 3) begin
+            // drive on negedge for clean setup before the capturing posedge
+            @(negedge clk);
+            a = a_w;
+            b = b_w;
+            // wait for the value to traverse the L_ADD pipeline stages
+            for (k = 0; k < L_ADD + 1; k = k + 1)
+                @(posedge clk);
+            #1;  // let combinational narrow settle after the last posedge
+            // 둘 다 NaN 이면 부호/payload 무시하고 통과, 그 외는 bit-exact.
+            if (!(is_bf16_nan(sum) && is_bf16_nan(exp_w)) && (sum !== exp_w)) begin
+                if (nfail < 10)
+                    $display("MISMATCH a=%04x b=%04x got=%04x exp=%04x",
+                             a_w, b_w, sum, exp_w);
+                nfail = nfail + 1;
+            end
+            ntot = ntot + 1;
+            r = $fscanf(fd, "%h %h %h\n", a_w, b_w, exp_w);
+        end
+        $fclose(fd);
+
+        if (nfail == 0)
+            $display("bf16_adder_tb: ALL %0d TESTS PASSED", ntot);
+        else
+            $display("bf16_adder_tb: FAIL %0d/%0d", nfail, ntot);
+        $finish;
+    end
+endmodule
