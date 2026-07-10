@@ -143,7 +143,12 @@ def cmd_compare(args):
     M, N = C_sw.shape
 
     mapping = _resolve_mapping(args, M, N)
-    C_hw = hwio.gather_banks(args.hw_banks, M, N, mapping)
+    # HW dump word format follows the golden's accumulator dtype, recorded in
+    # the ref npz by `ref --accum` (absent in pre-bf16 npz files -> fp32).
+    accum = str(ref_npz["accum"]) if "accum" in ref_npz.files else "fp32"
+    reader = (hwio.read_writememh_bf16 if accum == "bf16"
+              else hwio.read_writememh_fp32)
+    C_hw = hwio.gather_banks(args.hw_banks, M, N, mapping, reader=reader)
     result = cmp_mod.diff_3way(C_hw, C_sw, C_fp32)
     cmp_mod.print_stats(result, label=os.path.basename(args.ref))
 

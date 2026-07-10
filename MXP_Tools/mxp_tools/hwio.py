@@ -3,7 +3,10 @@
 Input  : SW emits .mem files that the FPGA's $readmemh consumes (quantized
          A/B, scales, bit-serial patterns). Format mirrors what HW expects.
 Output : HW produces .mem files via $writememh. Each line is one 32-bit hex
-         word; we treat it as an IEEE-754 FP32 bit pattern. `@<addr>` header
+         word; we treat it as an IEEE-754 FP32 bit pattern (read via
+         `read_writememh_fp32`). The bf16 datapath instead dumps 16-bit bf16
+         words, read via `read_writememh_bf16` which upcasts them exactly to
+         FP32 (bits << 16, since bf16 is fp32's top 16 bits). `@<addr>` header
          lines set the destination address of the next payload word (so
          sparse / non-zero-origin dumps stay aligned to the matrix), and
          `//` comments are skipped.
@@ -88,6 +91,39 @@ def read_writememh_int32(path):
     for a, w in items:
         buf[a] = np.uint32(w)
     return buf.view(np.int32).copy()
+
+
+def read_writememh_bf16(path):
+    """Parse a $writememh dump of 16-bit bf16 words → flat FP32 array.
+
+    Upcast is exact: fp32_bits = uint32(bf16_bits) << 16 (bf16 is fp32's top
+    16 bits, for normal/subnormal/inf/NaN alike). Unwritten slots (`@` gaps)
+    are NaN via a separate written-mask — a written bf16 0x0000 is a
+    legitimate +0.0 and must not be confused with the zero-initialized
+    buffer (this is why the mask exists; mirrors read_writememh_fp32).
+    Rejects words wider than 16 bits (catches accidentally reading a 32-bit
+    fp32 dump with this reader). The REVERSE mistake — reading a 16-bit
+    dump with read_writememh_fp32 — silently misparses each word as a tiny
+    fp32 denormal: a compare where C_hw is uniformly ~1e-41 means exactly
+    that; check the ref npz `accum` field.
+    """
+    items = list(_iter_writememh_words(path))
+    if not items:
+        return np.empty(0, dtype=np.float32)
+    n_words = max(a for a, _ in items) + 1
+    buf = np.zeros(n_words, dtype=np.uint32)
+    written = np.zeros(n_words, dtype=bool)
+    for a, w in items:
+        if w > 0xFFFF:
+            raise ValueError(
+                f"read_writememh_bf16: word {w:#x} at addr {a} exceeds 16 bits "
+                f"(is this a 32-bit fp32 dump?)"
+            )
+        buf[a] = np.uint32(w) << np.uint32(16)
+        written[a] = True
+    out = buf.view(np.float32).copy()
+    out[~written] = np.nan
+    return out
 
 
 # ─────────────────────────── writers ───────────────────────────────────────
