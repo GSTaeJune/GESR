@@ -7,7 +7,8 @@
 //   변환 (INToRecFN_i32_e8_s8 + 지수-더하기 + FNFromRecFN_bf16_wrapper) 이
 //   ml_dtypes 기반 오라클과 bit-exact 로 일치하는지 확인.
 //   오라클 모델: bf16(int -> bf16) * 2^(scale-127) = int->bf16 후 지수 shift
-//   (INToRecFN 이 8-sig 로 먼저 라운딩, FNFromRecFN 이 subnormal 라운딩 담당과 정합).
+//   (INToRecFN 이 8-sig 로 먼저 라운딩 = golden r8; 이후 fp32 도메인 exact shift 후
+//    fp32_to_bf16_rne 가 단일 RNE — subnormal 포함).
 //
 // 검증 내용 (sim/bf16_vectors.py 생성 work/bf16_vec/int_to_bf16.mem):
 //   - realizable block_int 크기 (|.| < 2^20) x 다양한 결합 스케일

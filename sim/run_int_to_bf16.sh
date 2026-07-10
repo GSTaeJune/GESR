@@ -17,7 +17,9 @@ python bf16_vectors.py --out work/bf16_vec
 
 # 2) compile bf16 HardFloat bundle + DUT + TB
 xvlog -nolog \
+    "$HF"/HardFloatBundle.v \
     "$HF"/HardFloatBundle_bf16.v \
+    "$SRC"/fp32_to_bf16_rne.v \
     "$SRC"/int_to_bf16.v \
     ../tb/int_to_bf16_tb.v
 
