@@ -2,6 +2,8 @@
 
 Each line is space-separated hex words: inputs then expected output. TBs read
 with $readmemh into a reg array and split fields by bit-slicing. ASCII-only.
+
+int_to_bf16 vectors cover the full signed 9-bit scale domain (negative scales -> underflow flush) plus directed subnormal-boundary binades (recoded exp 115..133).
 """
 import argparse
 import os
@@ -38,22 +40,48 @@ def gen_fp32_to_bf16(path, seed=0):
 
 def gen_int_to_bf16(path, seed=1):
     # Model int_to_bf16(in_int, scale) = bf16(int -> bf16) * 2^(scale-127), matching
-    # the golden's int->bf16 then exponent-shift. scale is the 9-bit combined value.
+    # the golden's int->bf16 then exponent-shift. scale is the 9-bit combined value,
+    # SIGNED: [-256, 255]. Negative scales arise in real workloads (act/weight
+    # E8M0 < 127) and force deep underflow, which must flush to +-0 exactly like
+    # the golden's ldexp -> fp32 -> bf16 chain (spec 6.1 carry-over #1). The
+    # boundary section densely covers the bf16 subnormal band (recoded exp
+    # 122..129), where v1's FNFromRecFN truncation diverged from RNE.
     rng = np.random.default_rng(seed)
     rows = []
+
+    def expect(iv, sc):
+        with np.errstate(over="ignore"):
+            r = np.float32(iv).astype(bfloat16)          # int -> bf16 (RNE), exact int32<2^24
+            val = np.ldexp(np.float64(r), sc - 127)      # * 2^(scale-127)
+            return int(np.float32(val).astype(bfloat16).view(np.uint16))
+
     # realizable block_int magnitudes (|.| < 2^20) and E8M0-derived combined scales.
     ints = list(rng.integers(-(2**19), 2**19, 4000)) + [0, 1, -1, 127, -128,
              2**19 - 1, -(2**19), 255, 256, 257, 2**15, 2**15 + 1]
-    # combined scale = e_a + e_b - impl_a - impl_b (still a 9-bit signed value fed as
-    # the RMW `scale` port, centered at 127). Sample a wide range incl. subnormal-inducing.
-    scales = list(rng.integers(40, 200, 60)) + [127, 0, 1, 254, 60, 62, 70, 100, 150, 200]
+    # combined scale: full 9-bit signed domain, incl. the negative underflow band
+    # (un-tested in Phase 2a -- this is what gates the v2 subnormal/flush path).
+    scales = (list(rng.integers(40, 200, 60))
+              + list(rng.integers(-256, 40, 60))
+              + [127, 0, 1, 254, 255, 60, 62, 70, 100, 150, 200,
+                 -1, -2, -64, -127, -128, -200, -255, -256])
     for iv in ints:
-        for sc in rng.choice(scales, size=6, replace=False):
+        for sc in rng.choice(scales, size=8, replace=False):
             iv = int(iv); sc = int(sc)
-            r = np.float32(iv).astype(bfloat16)          # int -> bf16 (RNE), exact int32<2^24
-            val = np.ldexp(np.float64(r), sc - 127)      # * 2^(scale-127)
-            out = int(np.float32(val).astype(bfloat16).view(np.uint16))
-            rows.append((iv & 0xFFFFFFFF, sc & 0x1FF, out))
+            rows.append((iv & 0xFFFFFFFF, sc & 0x1FF, expect(iv, sc)))
+
+    # Boundary-directed: land the RESULT exponent on the flush / round-up /
+    # deep-subnormal binades around bf16 min subnormal 2^-133 (recoded exp
+    # band ~115..133). Includes the exact tie 2^-134 (iv=1, target -134 -> +0
+    # ties-to-even) and the round-up 1.5*2^-134 (iv=3 -> min subnormal).
+    # sc chosen so r * 2^(sc-127) has exponent `target`.
+    for iv in [1, -1, 3, -3, 5, 255, -255, 257, 2**19 - 1, -(2**19), 127, 129]:
+        r = float(np.float32(iv).astype(bfloat16))
+        e_r = int(np.floor(np.log2(abs(r))))
+        for target in range(-141, -123):
+            sc = target - e_r + 127
+            if -256 <= sc <= 255:
+                rows.append((int(iv) & 0xFFFFFFFF, sc & 0x1FF, expect(int(iv), sc)))
+
     with open(path, "w") as f:
         for a, s, o in rows:
             f.write(f"{a:08x} {s:03x} {o:04x}\n")
