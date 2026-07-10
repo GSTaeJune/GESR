@@ -4,7 +4,7 @@
 //
 // 검증 목적:
 //   weight 의 (M-row, K-block) 단위 random W_PREC ∈ {2,4,8} mix 가 RTL
-//   변경 없이 GEMM+RMW+SRAM end-to-end 에서 FP32 bit-exact 동작함을
+//   변경 없이 GEMM+RMW+SRAM end-to-end 에서 bf16 bit-exact 동작함을
 //   검증. 9-mode sweep TB 는 행렬 전체 균일 mode 만 검증하므로 본 TB
 //   가 cycle 단위 in_Wcontrol 갱신 + Accumulator cnt 의 mixed-mode
 //   fire 정합성을 보강.
@@ -105,7 +105,7 @@ module gemm_sram_top_mixed_tb;
     // RMW (32 col)
     reg  [32*32-1:0]          rmw_in_GEMM       = 0;
     reg  [32*9-1:0]           rmw_scale         = 0;
-    wire [32*32-1:0]          rmw_out_RMW;
+    wire [32*16-1:0]          rmw_out_RMW;
 
     // SRAM (32 bank, depth=1024 → AW=10)
     localparam integer NB        = 32;
@@ -115,9 +115,9 @@ module gemm_sram_top_mixed_tb;
     reg  [NB-1:0]             sram_CEB        = {NB{1'b1}};
     reg  [NB-1:0]             sram_WEB        = {NB{1'b1}};
     reg  [NB*AW-1:0]          sram_A          = 0;
-    reg  [NB*32-1:0]          sram_WMASK      = {NB*32{1'b1}};
+    reg  [NB*16-1:0]          sram_WMASK      = {NB*16{1'b1}};
     reg                       sram_D_use_zero = 1'b1;
-    wire [NB*32-1:0]          sram_Q;
+    wire [NB*16-1:0]          sram_Q;
 
     // ─── DUT 인스턴스 ──────────────────────────────────────────────
     gemm_sram_top #(
@@ -805,7 +805,7 @@ module gemm_sram_top_mixed_tb;
         integer w, bi;
         begin
             sram_D_use_zero <= 1'b1;
-            sram_WMASK      <= {NB*32{1'b1}};
+            sram_WMASK      <= {NB*16{1'b1}};
             for (w = 0; w < BD; w = w + 1) begin
                 @(posedge clk);
                 sram_CEB <= {NB{1'b0}};
@@ -885,7 +885,7 @@ module gemm_sram_top_mixed_tb;
                             sram_CEB[dc]                        <= 1'b0;
                             sram_WEB[dc]                        <= 1'b0;
                             sram_A[dc*AW +: AW]                 <= drain_addr[dc] >> 5;
-                            sram_WMASK[dc*32 +: 32]             <= 32'hFFFFFFFF;
+                            sram_WMASK[dc*16 +: 16]             <= 16'hFFFF;
                             drain_state[dc]                     <= 4'd6;
                         end
                         4'd6: begin
@@ -922,7 +922,7 @@ module gemm_sram_top_mixed_tb;
     task dump_banks;
         integer bi, w, fd;
         reg [8*512-1:0] path_str;
-        reg [31:0] q_word;
+        reg [15:0] q_word;
         begin
             for (bi = 0; bi < NB; bi = bi + 1) begin
                 $sformat(path_str, "%0s/bank%0d.mem", DUMP_DIR, bi);
@@ -939,8 +939,8 @@ module gemm_sram_top_mixed_tb;
                     @(posedge clk);
                     sram_CEB[bi]                    <= 1'b1;
                     @(posedge clk);
-                    q_word = sram_Q[bi*32 +: 32];
-                    $fwrite(fd, "%08x\n", q_word);
+                    q_word = sram_Q[bi*16 +: 16];
+                    $fwrite(fd, "%04x\n", q_word);
                 end
                 $fclose(fd);
             end

@@ -7,6 +7,7 @@
 // 32 개의 독립 R/W 가능. 매핑 책임은 호출자 (TB).
 //
 // Spec: docs/superpowers/specs/2026-05-15-rmw-32x-design.md
+// Phase 2b: psum/SRAM 데이터폭 16b (bf16). in_GEMM(INT32) 은 32b 유지.
 //////////////////////////////////////////////////////////////////////////////
 
 module gemm_sram_top #(
@@ -35,15 +36,15 @@ module gemm_sram_top #(
     // ───── RMW 32 lane input (TB 가 각 lane 별 직접 발사) ─────
     input  wire [NUM_BANKS*32-1:0]           rmw_in_GEMM,    // flat slice
     input  wire [NUM_BANKS*9-1:0]            rmw_scale,      // flat slice
-    output wire [NUM_BANKS*32-1:0]           rmw_out_RMW,    // probe (flat)
+    output wire [NUM_BANKS*16-1:0]           rmw_out_RMW,    // probe (flat)
 
     // ───── SRAM 32 bank control (TB 가 각 bank 별 직접 발사) ─────
     input  wire [NUM_BANKS-1:0]                                CEB,
     input  wire [NUM_BANKS-1:0]                                WEB,
     input  wire [NUM_BANKS*$clog2(BANK_DEPTH)-1:0]             A,
-    input  wire [NUM_BANKS*32-1:0]                             WMASK,
+    input  wire [NUM_BANKS*16-1:0]                             WMASK,
     input  wire                                                sram_D_use_zero,  // 모든 bank 공통
-    output wire [NUM_BANKS*32-1:0]                             Q                 // probe (flat)
+    output wire [NUM_BANKS*16-1:0]                             Q                 // probe (flat)
 );
 
     // ─── GEMM ──────────────────────────────────────────────────────
@@ -64,27 +65,27 @@ module gemm_sram_top #(
     );
 
     // ─── RMW[32] + SRAM bank D-mux per col ─────────────────────────
-    wire [NUM_BANKS*32-1:0] sram_D_w;
+    wire [NUM_BANKS*16-1:0] sram_D_w;
     genvar c;
     generate
         for (c = 0; c < NUM_BANKS; c = c + 1) begin : g_lane
-            wire [31:0] rmw_out_c;
+            wire [15:0] rmw_out_c;
             RMW u_rmw (
                 .clk    (clk),
                 .rst    (rst),
-                .in_SRAM(Q          [c*32 +: 32]),
+                .in_SRAM(Q          [c*16 +: 16]),
                 .in_GEMM(rmw_in_GEMM[c*32 +: 32]),
                 .scale  (rmw_scale  [c*9  +: 9 ]),
                 .out_RMW(rmw_out_c)
             );
-            assign rmw_out_RMW[c*32 +: 32] = rmw_out_c;
-            assign sram_D_w  [c*32 +: 32] = sram_D_use_zero ? 32'h00000000 : rmw_out_c;
+            assign rmw_out_RMW[c*16 +: 16] = rmw_out_c;
+            assign sram_D_w  [c*16 +: 16] = sram_D_use_zero ? 16'h0000 : rmw_out_c;
         end
     endgenerate
 
     // ─── SRAM (per-bank port) ──────────────────────────────────────
     sram_1rw_banked_mp #(
-        .DATA_WIDTH (32),
+        .DATA_WIDTH (16),
         .NUM_BANKS  (NUM_BANKS),
         .BANK_DEPTH (BANK_DEPTH),
         .PIPELINE   (0)

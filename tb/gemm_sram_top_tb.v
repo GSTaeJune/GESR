@@ -36,7 +36,7 @@
 //        cd MXP_Tools
 //        python -m mxp_tools gen   --out ../work/A8_B8 -M 128 -K 128 -N 128 --seed 0
 //        python -m mxp_tools emit  --out ../work/A8_B8
-//        python -m mxp_tools ref   --out ../work/A8_B8 --prec-a 8 --prec-b 8
+//        python -m mxp_tools ref   --out ../work/A8_B8 --prec-a 8 --prec-b 8 --accum bf16
 //        mkdir -p ../work/A8_B8/hw_out
 //   2) Vivado 에서 `gemm_sram.xpr` 열기.
 //   3) Flow Navigator → Simulation → Simulation Settings → Simulation tab:
@@ -52,7 +52,7 @@
 //        cd MXP_Tools
 //        BANKS=$(printf "../work/A8_B8/hw_out/bank%d.mem " {0..31})
 //        python -m mxp_tools compare \
-//          --ref ../work/A8_B8/sw_ref/C_sw_mxint8_mxint8.npz \
+//          --ref ../work/A8_B8/sw_ref/C_sw_mxint8_mxint8_bf16.npz \
 //          --hw-banks ${BANKS} --layout interleaved_row_major_32bank
 //
 // PASS/FAIL 배너 의미:
@@ -60,7 +60,7 @@
 //     - 캡처 총 push 수 == 드레인 총 pop 수 == EXPECTED (65536)
 //     - bank-col 매핑 assert 가 한 번도 $finish FATAL 트리거 안 함
 //     - 32 bank dump 파일이 모두 정상 open
-//   비트 정확도 (FP32 값 일치) 는 외부 Python compare 가 담당.
+//   비트 정확도 (bf16 값 일치) 는 외부 Python compare 가 담당.
 //////////////////////////////////////////////////////////////////////////////
 
 module gemm_sram_top_tb;
@@ -105,7 +105,7 @@ module gemm_sram_top_tb;
     integer total_drained;
 
     // X-prime: drain 시작 전 파이프라인 X 채움 cycle. 가장 깊은 파이프라인
-    // (RMW.sram_dly + fp32_adder.recFN_b_dly) 보다 길어야 함.
+    // (RMW.sram_dly + bf16_adder(내부 fp32_adder).recFN_b_dly) 보다 길어야 함.
     localparam integer PRIME_CYC    = 16;
     // Stage 5 tail 길이: in-flight fire 들을 모두 캡처할 때까지 W_INTn 유지.
     // 최악 = symmetric chain delay (col 0/31 에서 15 cy 최대) +
@@ -139,7 +139,7 @@ module gemm_sram_top_tb;
     // RMW (32 col)
     reg  [32*32-1:0]          rmw_in_GEMM       = 0;
     reg  [32*9-1:0]           rmw_scale         = 0;
-    wire [32*32-1:0]          rmw_out_RMW;
+    wire [32*16-1:0]          rmw_out_RMW;
 
     // SRAM (32 bank, depth=1024 → AW=10)
     localparam integer NB        = 32;
@@ -149,9 +149,9 @@ module gemm_sram_top_tb;
     reg  [NB-1:0]             sram_CEB        = {NB{1'b1}};
     reg  [NB-1:0]             sram_WEB        = {NB{1'b1}};
     reg  [NB*AW-1:0]          sram_A          = 0;
-    reg  [NB*32-1:0]          sram_WMASK      = {NB*32{1'b1}};
+    reg  [NB*16-1:0]          sram_WMASK      = {NB*16{1'b1}};
     reg                       sram_D_use_zero = 1'b1;
-    wire [NB*32-1:0]          sram_Q;
+    wire [NB*16-1:0]          sram_Q;
 
     // ─── DUT 인스턴스 ──────────────────────────────────────────────
     gemm_sram_top #(
@@ -224,7 +224,7 @@ module gemm_sram_top_tb;
     //   A4: n_g_top = n_pair*64 + 32 + col,    (2 lanes, n_pair = n_t)
     //       n_g_bot = n_pair*64 +  0 + col
     //   A2: n_g_l0 = 96 + col, n_g_l1 = 64 + col, n_g_l2 = 32 + col, n_g_l3 = col
-    // flat = m_global * N_DIM + n_global   (FP32 word 의 SRAM 평탄 주소)
+    // flat = m_global * N_DIM + n_global   (bf16 word 의 SRAM 평탄 주소)
     integer fc, n_t_dec, k_t_dec, m_t_dec, m_in_dec, m_g;
     integer ci;
     reg signed [20:0] acc_lane_a8;
@@ -703,7 +703,7 @@ module gemm_sram_top_tb;
         integer w, bi;
         begin
             sram_D_use_zero <= 1'b1;
-            sram_WMASK      <= {NB*32{1'b1}};
+            sram_WMASK      <= {NB*16{1'b1}};
             for (w = 0; w < BD; w = w + 1) begin
                 @(posedge clk);
                 sram_CEB <= {NB{1'b0}};
@@ -795,7 +795,7 @@ module gemm_sram_top_tb;
                             sram_CEB[dc]                        <= 1'b0;
                             sram_WEB[dc]                        <= 1'b0;
                             sram_A[dc*AW +: AW]                 <= drain_addr[dc] >> 5;
-                            sram_WMASK[dc*32 +: 32]             <= 32'hFFFFFFFF;
+                            sram_WMASK[dc*16 +: 16]             <= 16'hFFFF;
                             // sram_D_use_zero 은 단일 reg 라 multi-driver 회피 위해
                             // 메인 시퀀스에서 drain 시작 전에 한 번 0 으로 설정함.
                             drain_state[dc]                     <= 4'd6;
@@ -834,7 +834,7 @@ module gemm_sram_top_tb;
     task dump_banks;
         integer bi, w, fd;
         reg [8*512-1:0] path_str;
-        reg [31:0] q_word;
+        reg [15:0] q_word;
         begin
             for (bi = 0; bi < NB; bi = bi + 1) begin
                 $sformat(path_str, "%0s/bank%0d.mem", DUMP_DIR, bi);
@@ -851,8 +851,8 @@ module gemm_sram_top_tb;
                     @(posedge clk);
                     sram_CEB[bi]                    <= 1'b1;
                     @(posedge clk);
-                    q_word = sram_Q[bi*32 +: 32];
-                    $fwrite(fd, "%08x\n", q_word);
+                    q_word = sram_Q[bi*16 +: 16];
+                    $fwrite(fd, "%04x\n", q_word);
                 end
                 $fclose(fd);
             end

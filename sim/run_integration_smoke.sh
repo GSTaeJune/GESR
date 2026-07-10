@@ -16,10 +16,13 @@ HF_ROOT="third_party/berkeley-hardfloat"
 (cd "$BUILD" && \
     xvlog -sv \
         ../../../$HF_ROOT/HardFloatBundle.v \
+        ../../../$HF_ROOT/HardFloatBundle_bf16.v \
         ../../../$SRC_ROOT/imports/Desktop/MXP/MXP.srcs/sources_1/new/*.v \
         ../../../$SRC_ROOT/imports/Desktop/sram/rtl/*.v \
-        ../../../$SRC_ROOT/new/int_to_fp32.v \
         ../../../$SRC_ROOT/new/fp32_adder.v \
+        ../../../$SRC_ROOT/new/fp32_to_bf16_rne.v \
+        ../../../$SRC_ROOT/new/int_to_bf16.v \
+        ../../../$SRC_ROOT/new/bf16_adder.v \
         ../../../$SRC_ROOT/new/RMW.v \
         ../../../$SRC_ROOT/new/sram_1rw_banked_mp.v \
         ../../../$SRC_ROOT/new/GEMM.v \
