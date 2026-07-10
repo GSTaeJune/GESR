@@ -356,7 +356,7 @@ def main():
              prec_map=prec_map, A_PREC=np.int32(args.A))
     (out / "hw_out").mkdir(exist_ok=True)
 
-    print(f"[gen_mixed] done: hex+golden+viz → {out}")
+    print(f"[gen_mixed] done: hex+golden+viz -> {out}")
 
 
 if __name__ == "__main__":

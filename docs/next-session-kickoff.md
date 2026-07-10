@@ -1,6 +1,51 @@
 # 다음 세션 kickoff — 통합 후 단계
 
-작성: 2026-05-15, GEMM ↔ RMW ↔ SRAM 통합 완료 직후.
+작성: 2026-05-15, GEMM ↔ RMW ↔ SRAM 통합 완료 직후. **최신 갱신: 2026-07-10 (RMW FP32→BF16 Phase 2b 랜딩).**
+
+---
+
+## 최신 상태 — RMW FP32→BF16 Phase 2b 랜딩 (2026-07-10)
+
+> 이 문서 하단(`## 지금 어디까지 왔나` 이하)은 2026-05-15 통합 직후 기록이다. 이후
+> buffer_sweep / scheduler / RMW bf16 라인이 진행됐고, 최신 세션 handoff 의 source of
+> truth 는 `CLAUDE.md` 최상단 kickoff 섹션이다. 아래는 그 요약.
+
+**활성 라인 종결**: RMW inter-tile accumulator 를 FP32→BF16 으로 (SRAM psum 저장 절반 +
+DRAM O-write 에너지(지배항) 절반). Phase 1(golden) + 2a(primitives) + **2b(RTL 하드교체+통합)
+랜딩**. spec `docs/superpowers/specs/2026-07-08-rmw-bf16-design.md` (§6.2 끝 "Phase 2b outcome"),
+plan `docs/superpowers/plans/2026-07-10-rmw-bf16-phase2b.md`. 브랜치 `feat/rmw-bf16-phase2b`
+(main ff-병합 예정, 미push).
+
+**Phase 2b 요약**:
+- **RTL 폭 32→16 하드교체**: `RMW.v` in_SRAM/out_RMW/sram_dly 16b (in_GEMM 은 INT32 유지) +
+  int_to_fp32→int_to_bf16 v2 / fp32_adder→bf16_adder; `gemm_sram_top.v`
+  Q/rmw_out_RMW/sram_D_w/WMASK `*32→*16` + `DATA_WIDTH 16` + zero-mux `16'h0000`; 양 통합
+  TB dump `%08x→%04x`; `hwio.py` `read_writememh_bf16` (16b word → `uint32(bits)<<16` fp32
+  exact upcast).
+- **int_to_bf16 v2**: 리뷰 라운드1 이 `FNFromRecFN_bf16_wrapper` 의 denorm TRUNCATE
+  (`HardFloatBundle_bf16.v:179-181`) 를 발견 — 어떤 flush 임계로도 subnormal 이 golden(RNE)
+  대비 1 ULP 낮음(143/32312 floor). v2 = `INToRecFN_i32_e8_s8`(= golden r8) → recoded fp32
+  exact widen → 지수 add → flush `new_exp10<122`(= 2^-133 절반 미만 → 정확히 ±0) →
+  `FNFromRecFN_wrapper`(fp32, 남는 subnormal 밴드 EXACT) → `fp32_to_bf16_rne`(단일 RNE).
+  `FNFromRecFN_bf16_wrapper` 미인스턴스(번들 보존).
+- **게이트 전부 GREEN**: int_to_bf16 32312 / rmw 113 / fp32_to_bf16_rne 70012 / bf16_adder
+  200005 / 통합 sweep 9-mode bit-exact / mixed sweep 3-mode bit-exact / MXP_Tools pytest 74
+  (69+5). fp32 단위 TB 무회귀.
+- **정정**: Phase 2a "D6 클리어" 는 normal 영역만 유효했음(scale∈[0,254] oracle 이 lossy
+  subnormal 미도달, 최소 도달값 2^-127). 2b 확장 oracle + v2 가 전 밴드 bit-exact 마감.
+- **D4 SNR (bf16 vs fp32-truth, 128³ seed 0, 게이트 아님)**: A8_B8 38.21 / A4_B4 14.57 /
+  A2_B2 2.21 dB; mixed_A8 10.22 / mixed_A4 9.45 / mixed_A2 4.21 dB. 전부 양수.
+- **caveat**: 통합 sweep 워크로드는 `comb_s<0`/subnormal 을 안 만듦 → 확장 단위 oracle(32312)
+  이 subnormal/flush 의 유일한 영구 게이트. red 면 RTL 을 고칠 것(벡터 약화 금지).
+
+**다음 후보**: (1) SRAM 실이득 정량화(psum 32→16 절반, buffer_sweep O-buffer 유효용량 2×;
+CACTI/재-sweep). (2) Vivado timing closure(bf16 데이터패스; `.xpr` stale → GUI 미지원, bash
+`sim/run_*.sh` authoritative). (3) 필요 시 fp32 fallback(태그 `fp32-rmw-final` 복구; golden 은
+`accum_dtype={fp32,bf16}` 양쪽 지원).
+
+**복구**: 태그 `fp32-rmw-final`(local, green 검증됨). `git checkout fp32-rmw-final &&
+bash sim/run_integration_sweep.sh` → `ALL 9 MODES PASSED`. `rmw_gen.py` 는 이제 bf16-semantics
+= MXP_Tools 업스트림 동기화 시 보존할 project-only 분기.
 
 ---
 

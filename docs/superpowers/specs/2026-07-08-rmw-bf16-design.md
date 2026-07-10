@@ -247,6 +247,58 @@ Concrete sites review flagged (change list must cover all):
   `interleaved_row_major_32bank` mapping is word-width-agnostic — unchanged.
 - **Sweep**: wire `ref --accum bf16`; integration sweep = bf16-RTL vs bf16-golden → bit-exact.
 
+**Phase 2b outcome (2026-07-10) — DONE, bf16 hard-swap landed, all gates bit-exact:**
+
+(a) **`int_to_bf16` re-architected to v2 (beyond the planned clamp).** Review round 1 proved
+the carry-over MUST-FIX could not be solved by a flush-clamp alone: `FNFromRecFN_bf16_wrapper`
+**truncates** on denormalization (right-shift with no round/sticky/increment,
+`third_party/berkeley-hardfloat/HardFloatBundle_bf16.v:179-181`), so any subnormal result
+(recoded exp ∈ `[122,129]`) came out 1 ULP low vs the golden's RNE whenever RNE would round up
+— a 143/32312 mismatch floor at **every** flush threshold (two reviewers reproduced
+independently). v2 keeps the value exact until one final RNE: `INToRecFN_i32_e8_s8` (int →
+8-bit-sig RNE = golden `r8`) → exact widen to recoded fp32 `{sign, exp9, frac7, 16'b0}`
+(bf16/fp32 share expWidth=8) → exponent add (10-bit signed, range `[-127, 415]`, no wrap) →
+flush `new_exp10 < 122` (below half of bf16 min subnormal `2^-133` → exactly ±0; also blocks
+the 9-bit wrap and the deep-exponent shifter aliasing) → `FNFromRecFN_wrapper` (fp32; EXACT for
+the surviving subnormal band recExp `[122,129]` — the denorm shift 0..7 drops only the 16
+appended zero bits) → `fp32_to_bf16_rne` (the single RNE, incl. subnormals, near-exhaustively
+validated in Phase 2a). `FNFromRecFN_bf16_wrapper` is **no longer instantiated** (kept vendored).
+
+(b) **Correction to the §6.1 / §3.3 claim scope.** Phase 2a's "D6 cleared" was valid only in
+the **normal** regime: the scale ∈ `[0,254]` oracle structurally could not reach a lossy
+subnormal (smallest reachable result `2^-127` with a zero fraction), so the truncation defect
+was invisible. Phase 2b's extended oracle (negative scales + subnormal-boundary binades, 32312
+vectors) + v2 close the gap — bit-exactness now holds across the normal, subnormal, flush, and
+inf-saturation bands.
+
+(c) **Gates recorded (all green):** `int_to_bf16_tb` ALL **32312** TESTS PASSED (4012 ints × 8
+scales + 216 boundary); `rmw_tb` ALL **113** TESTS PASSED (bf16 vectors incl. underflow flush,
+subnormal round-up `(3,-8) → 0x0001`, ties, inf saturation); `fp32_to_bf16_rne` 70012;
+`bf16_adder` 200005; integration sweep **ALL 9 MODES PASSED** (bit-exact, 16384×9 vs bf16
+golden); mixed sweep **ALL 3 MIXED MODES PASSED** (bit-exact ×3); `MXP_Tools` pytest **74
+passed** (69 baseline + 5 hwio bf16 tests); fp32 unit TBs (`int_to_fp32`, `fp32_adder`) still
+green. D4 informational SNR (bf16 vs fp32-truth, 128³ seed 0): A2_B2 2.21 / A2_B4 5.08 / A2_B8
+5.36 / A4_B2 5.11 / A4_B4 14.57 / A4_B8 17.58 / A8_B2 5.41 / A8_B4 17.64 / A8_B8 38.21 dB;
+mixed_A2 4.21 / mixed_A4 9.45 / mixed_A8 10.22 dB — all positive, no catastrophic warning (not
+a gate, D4).
+
+(d) **Site-list corrections (this §6.2 was missing these):** `rmw_tb.v` / `rmw_gen.py` /
+`run_rmw.sh` (the RMW *unit* also swaps to bf16), `gemm_sram_top_mixed_tb.v`, `gen_mixed.py`,
+`runner.py` (3 sites: integration-one ref/compare, viz reader, npz selection),
+`run_integration_smoke.sh`, `run_int_to_bf16.sh`, `run_integration_parallel.sh` (printed
+guide), `docs/sweep-architecture.md`.
+
+(e) **Recovery tag** `fp32-rmw-final` (local, verified green at tag time: pytest 69, all unit
+TBs, 9-mode fp32 sweep, mixed fp32 sweep). `git checkout fp32-rmw-final` restores the full fp32
+integration state. Note: `rmw_gen.py` is now bf16-semantics — a project-only fork divergence to
+preserve on MXP_Tools upstream syncs.
+
+(f) **The integration sweep cannot gate the subnormal/flush path.** Its 128³ standard-normal
+workload never produces `comb_s < 0` or subnormal psums (per-block scales ≈ 115–130), so the
+**extended unit oracle (32312 vectors) is the sole permanent gate** for v2's subnormal, flush,
+and negative-scale behavior. Corollary: if a unit gate goes red, fix the RTL — never weaken the
+oracle vectors.
+
 ---
 
 ## 7. Risks & mitigations

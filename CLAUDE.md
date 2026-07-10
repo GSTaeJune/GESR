@@ -6,7 +6,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 2. After completing a logical chunk of work (one or several related tasks, e.g. tasks 1–3), run `/superpowers:requesting-code-review` and `/review`, iterating on their feedback until no blocking issues remain. Reviews don't need to run per-task — group related tasks into a coherent unit before reviewing. Minor or optional suggestions don't need to block convergence.
 
-## Next session kickoff (2026-07-09, **RMW FP32->BF16 새 라인: Phase 1(golden) + Phase 2a(RTL bf16 primitives) 랜딩 완료. 다음 = Phase 2b(RTL 32->16 하드교체+통합). main 로컬 ff-병합, 미push**)
+## Next session kickoff (2026-07-10, **RMW FP32->BF16 Phase 2b 랜딩 — RTL 32->16 하드교체 + 통합 재-bit-exact 완료. main 로컬 ff-병합 예정, 미push**)
+
+**활성 라인**: RMW inter-tile accumulator 를 **FP32->BF16** 으로 (SRAM psum 저장 절반 + DRAM O-write 에너지(지배항) 절반). Phase 1(golden) + 2a(primitives) + **2b(RTL 하드교체+통합) 랜딩으로 이 라인 종결**. **spec**: `docs/superpowers/specs/2026-07-08-rmw-bf16-design.md` (§6.2 끝 "Phase 2b outcome"). **plan**: `docs/superpowers/plans/2026-07-10-rmw-bf16-phase2b.md`. 브랜치 `feat/rmw-bf16-phase2b` (Task 8 문서화 시점; Task 10 에서 main ff-병합 예정, 미push).
+
+### 랜딩 완료 (feat/rmw-bf16-phase2b)
+- **RTL 폭 32->16 하드교체**: `RMW.v` in_SRAM/out_RMW/sram_dly 16b (in_GEMM 은 INT32 유지) + int_to_fp32->int_to_bf16 v2 / fp32_adder->bf16_adder 스왑; `gemm_sram_top.v` Q/rmw_out_RMW/sram_D_w/WMASK `*32->*16` + `.DATA_WIDTH(16)` + zero-mux `16'h0000`; 양 통합 TB(`gemm_sram_top_tb.v`, `gemm_sram_top_mixed_tb.v`) dump `%08x->%04x`; `hwio.py` `read_writememh_bf16` (16b word -> `uint32(bits)<<16` fp32 exact upcast, gap sentinel 은 written-mask 로 분리).
+- **int_to_bf16 v2 (계획의 clamp 를 넘어선 재설계)**: 리뷰 라운드1 이 `FNFromRecFN_bf16_wrapper` 의 denorm TRUNCATE (`HardFloatBundle_bf16.v:179-181`, round/sticky 없음)를 발견 — 어떤 flush 임계로도 subnormal 밴드가 golden(RNE) 대비 1 ULP 낮음 (143/32312 mismatch floor, 리뷰어 2인 독립 재현). v2 = `INToRecFN_i32_e8_s8`(int->8-sig RNE = golden r8) -> recoded fp32 exact widen `{sign,exp9,frac7,16'b0}` -> 지수 add(10b signed, [-127,415]) -> flush `new_exp10<122`(bf16 min subnormal 2^-133 의 절반 미만 -> 정확히 +-0) -> `FNFromRecFN_wrapper`(fp32; 남는 subnormal 밴드 recExp [122,129] 는 shift 0..7 로 padding zero 만 버려 EXACT) -> `fp32_to_bf16_rne`(단일 RNE). `FNFromRecFN_bf16_wrapper` 는 더 이상 인스턴스 안 함(번들 보존).
+- **게이트 전부 GREEN (실측)**: `int_to_bf16_tb` ALL **32312** PASSED (음수 scale + subnormal boundary 확장 oracle: 4012 ints x 8 scales + 216 boundary); `rmw_tb` ALL **113** PASSED (underflow flush, subnormal round-up `(3,-8)->0x0001`, ties, inf saturation); `fp32_to_bf16_rne` 70012 / `bf16_adder` 200005; 통합 sweep **ALL 9 MODES PASSED**(bit-exact 16384x9 vs bf16 golden); mixed sweep **ALL 3 MIXED MODES PASSED**(bit-exact x3); MXP_Tools pytest **74 passed**(69 baseline + 5 hwio bf16). fp32 단위 TB(int_to_fp32, fp32_adder) 무회귀.
+- **정정(중요)**: Phase 2a 의 "D6 클리어" 는 **normal 영역에서만** 유효했음 — scale in [0,254] oracle 은 lossy subnormal 에 구조적으로 도달 못 해(최소 도달값 2^-127, frac=0) truncation defect 이 안 보였음. Phase 2b 의 확장 oracle + v2 가 normal/subnormal/flush/inf-saturation 전 밴드에서 bit-exact 를 닫음.
+- **D4 정보성 SNR (bf16 vs fp32-truth, 128^3 seed 0, 게이트 아님)**: A2_B2 2.21 / A2_B4 5.08 / A2_B8 5.36 / A4_B2 5.11 / A4_B4 14.57 / A4_B8 17.58 / A8_B2 5.41 / A8_B4 17.64 / A8_B8 38.21 dB; mixed_A2 4.21 / mixed_A4 9.45 / mixed_A8 10.22 dB. 전부 양수 (catastrophic 경고 없음).
+- **핵심 caveat**: 통합 sweep 의 standard-normal 워크로드는 `comb_s < 0` 도 subnormal psum 도 절대 안 만듦 — **확장 단위 oracle(32312) 이 v2 의 subnormal/flush 동작을 검증하는 유일한 영구 게이트**. 단위 게이트가 red 면 RTL 을 고칠 것(oracle 벡터 약화 금지).
+
+### 다음 후보
+1. **SRAM 실이득 정량화**: psum word 32->16 = SRAM psum 저장 절반; buffer_sweep 의 O-buffer(binding constraint, best 1:1:6) 유효 용량 2x. cap 별 재-sweep 또는 CACTI 실측.
+2. **Vivado timing closure**: bf16 데이터패스(int_to_bf16 v2 = fp32 도메인 shift + FNFromRecFN + fp32_to_bf16_rne; bf16_adder 내부 fp32_adder) 합성/timing. `.xpr` 소스 목록이 Phase 2a 이전이라 stale — GUI flow 는 `.xpr` 재정비 전까지 미지원, bash `sim/run_*.sh` 가 authoritative.
+3. **필요 시 fp32 fallback 경로**: bf16 정확도가 특정 워크로드에 부족하면 태그 `fp32-rmw-final` 로 복구(전 fp32 통합 상태 검증됨). golden 은 `accum_dtype={fp32,bf16}` 로 이미 양쪽 지원.
+
+**재현/복구**: 복구 태그 `fp32-rmw-final`(local, 태그 시점 green 검증: pytest 69 + 전 단위 TB + 9-mode fp32 sweep + mixed fp32 sweep). `git checkout fp32-rmw-final && bash sim/run_integration_sweep.sh` -> `ALL 9 MODES PASSED`. bf16 재검증: `bash sim/run_int_to_bf16.sh`(32312) / rmw-gen 선행 후 `bash sim/run_rmw.sh`(113) / `bash sim/run_integration_sweep.sh`(9, --accum bf16 내장) / `python sim/runner.py mixed-sweep`(3). **주의**: `rmw_gen.py` 가 이제 bf16-semantics = MXP_Tools 업스트림 동기화 시 보존할 project-only 분기.
+
+## Next session kickoff (2026-07-09, (완료 — 2026-07-10 섹션 참조) **RMW FP32->BF16 새 라인: Phase 1(golden) + Phase 2a(RTL bf16 primitives) 랜딩 완료. 다음 = Phase 2b(RTL 32->16 하드교체+통합). main 로컬 ff-병합, 미push**)
 
 **활성 라인** (이전 "모든 라인 종료" 상태를 뒤집음): RMW inter-tile accumulator 를 **FP32->BF16** 으로. SRAM psum 저장 절반 + DRAM O-write 에너지(지배항) 절반. 자세한 배경/결정/발견은 메모리 `project_rmw_bf16_phase1_landed` 참조. **spec**: `docs/superpowers/specs/2026-07-08-rmw-bf16-design.md` (D1~D6 결정 + §6.1 Phase 2a 결과·이월).
 
@@ -251,9 +270,9 @@ Top module is `gemm_sram_top` (set in `gemm_sram.xpr`; sim target is `gemm_sram_
 Datapath:
 
 ```
-GEMM (INT psum + 9-bit scale) ──► RMW (INT→FP32, FP32 add) ──► sram_1rw_banked (FP32)
+GEMM (INT psum + 9-bit scale) ──► RMW (INT→BF16, BF16 add) ──► sram_1rw_banked (BF16, 16-bit words)
                                        ▲                              │
-                                       └────── FP32 prior psum ◄──────┘
+                                       └────── BF16 prior psum ◄──────┘
 ```
 
 Verified end-to-end via `bash sim/run_integration_sweep.sh` (9/9 modes bit-exact PASS vs MXP_Tools golden, 128×128 = 16384 elements per mode).
@@ -263,24 +282,24 @@ Verified end-to-end via `bash sim/run_integration_sweep.sh` (9/9 modes bit-exact
 ```verilog
 module RMW (
     input  wire        clk, rst,
-    input  wire [31:0] in_SRAM,   // FP32 prior partial sum read from SRAM
+    input  wire [15:0] in_SRAM,   // BF16 prior partial sum read from SRAM
     input  wire [31:0] in_GEMM,   // INT32 from GEMM accumulator (one lane's worth)
     input  wire [8:0]  scale,     // combined 9-bit scale (matches one sub-word
                                   // of Accumulator_Col `out_scale`, = scale_len+1)
-    output reg  [31:0] out_RMW    // FP32 sum to write back to SRAM
+    output wire [15:0] out_RMW    // BF16 sum to write back to SRAM
 );
 ```
 
 This pins down **two** of the previously-open questions:
 
-1. **Bit-width reconciliation**: dequantize INT→**FP32 at the RMW boundary**. Both SRAM storage and the FP32 add live in IEEE-754 single precision — 32-bit words, no `DATA_WIDTH` widening, no INT-domain accumulation in SRAM. This also lines up with `MXP_Tools/hwio.py::read_writememh_fp32` which already assumes FP32 bit patterns in the `$writememh` dump.
-2. **Scale handling**: the 9-bit `scale` is the per-sub-word combined `(act_scale + weight_scale − 127)` that `Accumulator_Col` produces (note: 9-bit signed, `{1'b0, act_scale} + {1'b0, weight_scale} - 9'sd127`). RMW consumes it during the INT→FP32 conversion; it is **not** stored alongside the psum.
+1. **Bit-width reconciliation**: dequantize INT→**BF16 at the RMW boundary** (Phase 2b, 2026-07-10). Both SRAM storage and the accumulator live in bfloat16 — **16-bit words** (`DATA_WIDTH=16`), no INT-domain accumulation in SRAM. The bf16 add itself is computed in the FP32 domain then RNE-narrowed to bf16 (`bf16_adder` wraps `fp32_adder` + `fp32_to_bf16_rne`; spec §6.1). This lines up with `MXP_Tools/hwio.py::read_writememh_bf16`, which reads 16-bit bf16 words from the `$writememh` dump and upcasts exactly (`fp32 = uint32(bf16_bits) << 16`).
+2. **Scale handling**: the 9-bit `scale` is the per-sub-word combined `(act_scale + weight_scale − 127)` that `Accumulator_Col` produces (note: 9-bit signed, `{1'b0, act_scale} + {1'b0, weight_scale} - 9'sd127`). RMW consumes it during the INT→BF16 conversion; it is **not** stored alongside the psum.
 
 The RMW controller (whether inside RMW or wrapping it) must still:
 1. On `out_fire[col]` rising, latch the lane's INT32 psum and the corresponding 9-bit scale sub-word.
-2. Issue a READ to the SRAM address holding that lane's prior FP32 psum.
+2. Issue a READ to the SRAM address holding that lane's prior BF16 psum.
 3. Wait for the read return (1 cycle if leaf `PIPELINE=0`, 2 cycles if `PIPELINE=1`).
-4. Convert INT→FP32 (using `scale`), add to `in_SRAM`, write back.
+4. Convert INT→BF16 (using `scale`), add to `in_SRAM`, write back.
 
 ### Resolved (during integration) — committed values
 
@@ -343,6 +362,7 @@ The banked wrapper additionally has a 1-cycle `bank_sel_d1` register inside, so 
 Three ways to run sim:
 
 1. **Vivado GUI** — open `gemm_sram.xpr`. Synth top = `gemm_sram_top`; sim top = `gemm_sram_top_tb`. Run Behavioral Simulation.
+   **Caveat (2026-07-10)**: the `.xpr` source list is stale — it pre-dates Phase 2a (lists `RMW.v` but not `fp32_adder.v`/`int_to_fp32.v`/`int_to_bf16.v`/`bf16_adder.v`/`fp32_to_bf16_rne.v`/the HardFloat bundles), so **GUI synth/sim is unsupported until the `.xpr` is refreshed**. The bash `sim/run_*.sh` flow (way #3) is authoritative.
 2. **Python orchestrator (recommended for VSCode users)** — `sim/runner.py`:
 
    ```bash
@@ -361,14 +381,17 @@ Three ways to run sim:
    ```bash
    # Unit-level
    bash sim/run_rmw_smoke.sh         # HardFloat round-trip smoke (no DUT logic)
-   bash sim/run_int_to_fp32.sh       # int_to_fp32 unit TB (6 directed cases)
-   bash sim/run_fp32_adder.sh        # fp32_adder unit TB (4 directed cases)
-   bash sim/run_rmw.sh               # full RMW vector TB (71 cases)
+   bash sim/run_int_to_fp32.sh       # int_to_fp32 unit TB (fp32, preserved at HEAD)
+   bash sim/run_fp32_adder.sh        # fp32_adder unit TB (fp32, preserved at HEAD)
+   bash sim/run_fp32_to_bf16_rne.sh  # fp32->bf16 RNE narrow (70012 vectors vs ml_dtypes)
+   bash sim/run_int_to_bf16.sh       # int_to_bf16 v2 (32312 vectors: neg scales + subnormal boundary)
+   bash sim/run_bf16_adder.sh        # bf16 adder (200005 vectors vs ml_dtypes)
+   bash sim/run_rmw.sh               # full RMW vector TB (113 cases, bf16)
    bash sim/run_top_elab.sh          # gemm_sram_top elab-only smoke
    bash sim/run_integration_smoke.sh # TB zero-prime + dump (no GEMM driving)
 
    # MXP_Tools Python 단위 검증 (compare / hwio / quant / gemm)
-   cd MXP_Tools && python -m pytest tests/ -q   # 45 cases, ~0.3 s
+   cd MXP_Tools && python -m pytest tests/ -q   # 74 cases, ~0.3 s
 
    # Integration (end-to-end vs MXP_Tools golden)
    bash sim/run_integration_one.sh <LABEL> <A_PREC> <B_PREC>   # 1 mode (e.g. "A8_B8" 8 8)
@@ -380,7 +403,7 @@ Three ways to run sim:
 
    ```bash
    cd MXP_Tools && python -m mxp_tools rmw-gen --out work/rmw --n 64 --seed 0 && cd ..
-   bash sim/run_rmw.sh             # expect: rmw_tb: ALL 71 TESTS PASSED
+   bash sim/run_rmw.sh             # expect: rmw_tb: ALL 113 TESTS PASSED
    ```
 
    **Integration sweep** is self-contained — invokes `gen / emit / ref` internally then `run_integration_one.sh` + `compare`. Last line on success: `ALL 9 MODES PASSED`. Runtime **633s ≈ 10.5 min** for the full 9-mode sweep (32-RMW col-parallel; 이전 1-RMW sweep ~20–25 min 대비 약 2× 단축).
@@ -398,9 +421,9 @@ When parameter overrides are needed at sim time, **do not use `xelab -generic_to
 
 ## Verification helper: `MXP_Tools/` (Python, local subdir)
 
-**Provenance**: fork of upstream `~/Desktop/Desktop/MXP_Tools`. 사용자가 업스트림에서 버그 픽스를 하면 프로젝트 사본으로 옮겨야 함 (절차는 메모리 `reference_mxp_tools_upstream.md` 참고). 프로젝트 전용 추가분 — `mxp_tools/rmw_gen.py`, cli 의 `rmw-gen` 서브커맨드, hwio 의 `interleaved_row_major_16bank` + `interleaved_row_major_32bank` mapping, `tests/test_hwio_interleaved.py` — 는 머지 시 반드시 보존.
+**Provenance**: fork of upstream `~/Desktop/Desktop/MXP_Tools`. 사용자가 업스트림에서 버그 픽스를 하면 프로젝트 사본으로 옮겨야 함 (절차는 메모리 `reference_mxp_tools_upstream.md` 참고). 프로젝트 전용 추가분 — `mxp_tools/rmw_gen.py` (**bf16-semantics rewrite**, Phase 2b), cli 의 `rmw-gen` 서브커맨드, hwio 의 `interleaved_row_major_16bank` + `interleaved_row_major_32bank` mapping + `read_writememh_bf16` (16b word → fp32 exact upcast), `tests/test_hwio_interleaved.py` + `tests/test_hwio_bf16.py` — 는 머지 시 반드시 보존.
 
-**pytest 슈트** (`tests/`, 45 cases) 는 단위 동작 (NaN/Inf 처리, `@addr` 파싱, gather_banks duplicate detection, emit shape validation, MX quant edge cases) 을 0.3 초 만에 검증. RTL sim 전에 Python tool 변경 검증용으로 우선 돌릴 것.
+**pytest 슈트** (`tests/`, 74 cases) 는 단위 동작 (NaN/Inf 처리, `@addr` 파싱, gather_banks duplicate detection, emit shape validation, MX quant edge cases, bf16 reader) 을 0.3 초 만에 검증. RTL sim 전에 Python tool 변경 검증용으로 우선 돌릴 것.
 
 Generates HW inputs and SW golden GEMM. Typical invocation (the sweep script already wraps these):
 
@@ -408,17 +431,17 @@ Generates HW inputs and SW golden GEMM. Typical invocation (the sweep script alr
 cd MXP_Tools
 python -m mxp_tools gen   --out ../work/A8_B8 -M 128 -K 128 -N 128 --seed 0
 python -m mxp_tools emit  --out ../work/A8_B8                        # emits all 3 precs
-python -m mxp_tools ref   --out ../work/A8_B8 --prec-a 8 --prec-b 8   # SW golden
+python -m mxp_tools ref   --out ../work/A8_B8 --prec-a 8 --prec-b 8 --accum bf16   # SW golden (bf16)
 # run HW → produces work/A8_B8/hw_out/bank{0..31}.mem ($writememh)
 BANKS=$(printf "../work/A8_B8/hw_out/bank%d.mem " {0..31})
-python -m mxp_tools compare --ref ../work/A8_B8/sw_ref/C_sw_mxint8_mxint8.npz \
+python -m mxp_tools compare --ref ../work/A8_B8/sw_ref/C_sw_mxint8_mxint8_bf16.npz \
                             --hw-banks ${BANKS} \
                             --layout interleaved_row_major_32bank
 ```
 
 **Naming gotcha (was a Task 8 silent-bug source)**: MXP_Tools' `--prec-a` = WEIGHT precision = our plusarg `B_PREC` (weight is the bit-serial first operand in `mxint_gemm_golden(A, ..., prec_A=weight)`). `--prec-b` = ACTIVATION precision = our `A_PREC`. The resulting `.npz` filename slot order is `C_sw_mxint{prec_a}_mxint{prec_b}.npz` = `C_sw_mxint{B_PREC}_mxint{A_PREC}.npz`. Symmetric modes (A2_B2, A4_B4, A8_B8) hide the bug; asymmetric modes catch it as all-zero HW dumps. The sweep + per-mode scripts already use the corrected convention.
 
-HW dump = one `$writememh` file per SRAM bank (32 files). Mapping callable: `MXP_Tools/mxp_tools/hwio.py::interleaved_row_major_32bank`. Numerical contract: HW output words are interpreted as IEEE-754 FP32 bit patterns (RMW dequantizes INT→FP32 before storing).
+HW dump = one `$writememh` file per SRAM bank (32 files). Mapping callable: `MXP_Tools/mxp_tools/hwio.py::interleaved_row_major_32bank`. Numerical contract: HW output words are interpreted as **16-bit bf16** bit patterns (RMW dequantizes INT→BF16 before storing); `read_writememh_bf16` upcasts each exactly to fp32 via `uint32(bf16_bits) << 16`.
 
 ## Settled — with re-visit triggers
 
@@ -447,17 +470,21 @@ gemm_sram.srcs/sources_1/
     new/
         gemm_sram_top.v                # Integration wrapper (GEMM + RMW + SRAM, pure structural)
         GEMM.v                         # MXP TOP wrapper (instantiated inside gemm_sram_top)
-        RMW.v                          # FP32 RMW unit (int_to_fp32 + delay + fp32_adder)
-        int_to_fp32.v                  # INT32 + 9-bit signed scale -> IEEE-754 FP32
-                                       # (Task 7 fix: zero-passthrough for in_int=0 + scale≠127)
-        fp32_adder.v                   # IEEE-754 FP32 adder (HardFloat-based)
+        RMW.v                          # bf16 RMW unit (int_to_bf16 + delay + bf16_adder), 16-bit psum
+        int_to_bf16.v                  # INT32 + 9-bit scale -> bf16 (v2: fp32-domain exp shift
+                                       #   + single RNE narrow + deep-underflow flush; spec 6.1/6.2)
+        bf16_adder.v                   # bf16 add = fp32-domain add (fp32_adder) + fp32_to_bf16_rne
+        fp32_to_bf16_rne.v             # IEEE fp32 -> bf16 round-half-to-even narrow
+        int_to_fp32.v                  # fp32 unit RTL, preserved at HEAD (not instantiated by bf16 top)
+        fp32_adder.v                   # IEEE-754 FP32 adder (HardFloat-based); still instantiated by bf16_adder
     imports/Desktop/MXP/...            # MXP compute RTL (Accumulator_Col.v has IMPLICIT_total patch)
     imports/Desktop/sram/rtl/...       # SRAM RTL (sram_1rw + sram_1rw_banked)
 tb/
     gemm_sram_top_tb.v                 # Integration TB (9-mode plusarg-driven)
-    rmw_tb.v, int_to_fp32_tb.v,
-    fp32_adder_tb.v, rmw_smoke_tb.v,
-    accumulator_col_elab.v             # Unit testbenches
+    rmw_tb.v (bf16), int_to_bf16_tb.v,
+    bf16_adder_tb.v, fp32_to_bf16_rne_tb.v,   # bf16 unit testbenches
+    int_to_fp32_tb.v, fp32_adder_tb.v,        # fp32 unit testbenches (preserved)
+    rmw_smoke_tb.v, accumulator_col_elab.v    # Unit testbenches
 sim/
     runner.py                          # Python orchestrator (VSCode "Run" 호환); auto viz → work/<LABEL>/result.png
     gen_mixed.py                       # mixed-prec 입력/golden 생성 + inputs_mixed.npz (for viz Row 1)
@@ -467,17 +494,21 @@ sim/
     run_integration_sweep.sh           # 9-mode serial sweep + compare gate
     run_integration_parallel.sh        # 9-mode parallel dispatch guide (print template)
     run_mixed_one.sh                   # mixed-prec 단발 (random / uniform / K-tile via env vars)
-    run_rmw*.sh, run_int_to_fp32.sh, run_fp32_adder.sh, clean.sh
-third_party/berkeley-hardfloat/        # Vendored HardFloat (HardFloatBundle.v + VENDORING.md)
+    run_rmw*.sh, run_int_to_bf16.sh, run_bf16_adder.sh, run_fp32_to_bf16_rne.sh,
+    run_int_to_fp32.sh, run_fp32_adder.sh, clean.sh
+    bf16_vectors.py                    # oracle for the bf16 unit TBs (ml_dtypes cross-check)
+third_party/berkeley-hardfloat/        # Vendored HardFloat (HardFloatBundle.v [fp32] +
+                                       #   HardFloatBundle_bf16.v [INToRecFN_i32_e8_s8] + VENDORING.md)
 MXP_Tools/                             # Python verification toolkit (fork of ~/Desktop/Desktop/MXP_Tools)
     pyproject.toml                     # mxp-tools entry point + pytest config
     mxp_tools/                         # gen / emit / ref / compare / viz / rmw-gen subcommands
-    tests/                             # 45 pytest cases (compare/gemm/hwio/quant + interleaved 16/32)
+    tests/                             # 74 pytest cases (compare/gemm/hwio/quant + interleaved 16/32 + bf16)
         test_compare.py                # NaN/Inf-aware diff_3way (upstream)
         test_gemm.py                   # mxint_gemm_golden (upstream)
         test_hwio.py                   # @addr writememh, dup-write, emit shape, LF-only (upstream)
         test_quant.py                  # MX quant edge cases + NaN/Inf rejection (upstream)
         test_hwio_interleaved.py       # interleaved_row_major_{16,32}bank round-trip (project-only)
+        test_hwio_bf16.py              # read_writememh_bf16 16b->fp32 upcast (project-only, Phase 2b)
 docs/
     next-session-kickoff.md            # Phase-handoff doc (updated each major phase end)
     hardfloat-setup.md                 # HardFloat re-vendoring guide (sbt + Chisel)

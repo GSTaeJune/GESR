@@ -60,17 +60,18 @@
 cd MXP_Tools
 python -m mxp_tools gen   --out ../work/A8_B8 -M 128 -K 128 -N 128 --seed 0
 python -m mxp_tools emit  --out ../work/A8_B8                              # 9 hex 파일
-python -m mxp_tools ref   --out ../work/A8_B8 --prec-a 8 --prec-b 8        # 1 npz
+python -m mxp_tools ref   --out ../work/A8_B8 --prec-a 8 --prec-b 8 --accum bf16   # 1 npz
 ```
 
 산출:
 - `work/A8_B8/hw_input/a_input_BS_mxint{2,4,8}.hex` — weight bit-serial
 - `work/A8_B8/hw_input/b_input_BP_mxint{2,4,8}.hex` — activation byte-parallel
 - `work/A8_B8/hw_input/a_scale.hex`, `b_scale.hex` — E8M0 scale
-- `work/A8_B8/sw_ref/C_sw_mxint{B}_mxint{A}.npz` — golden FP32 행렬
+- `work/A8_B8/sw_ref/C_sw_mxint{B}_mxint{A}_bf16.npz` — golden bf16-accum 행렬 (fp32 컨테이너로 저장, bf16→fp32 upcast 는 정확)
 
 **Naming gotcha**: MXP_Tools 의 `--prec-a` = WEIGHT 정밀도 = 우리의 B_PREC.
-`--prec-b` = ACTIVATION = A_PREC. npz 파일명 slot 순서는 `C_sw_mxint{B}_mxint{A}.npz`.
+`--prec-b` = ACTIVATION = A_PREC. npz 파일명 slot 순서는 `C_sw_mxint{B}_mxint{A}_bf16.npz`
+(`--accum bf16` 이므로 `_bf16` 접미사; fp32 golden 은 접미사 없이 별도 공존).
 
 ### 2.2 Sim invocation
 
@@ -114,7 +115,7 @@ init_zero_prime;             // 32 bank parallel zero-write × 1024 word = 1024 
 - 32 bank 가 독립 port 라서 동시 write — 직렬이면 32×1024 cycle 걸릴 일을 1024 cycle 에 끝냄
 
 **왜 zero-prime 필요**: 첫 K-tile fire 시 RMW 가 prior partial sum 으로 SRAM read.
-초기값이 X 면 `addRecFN(NaN, anything) = NaN` 으로 영구 오염. 0 (FP32 `0x00000000`) 으로
+초기값이 X 면 `bf16_add(NaN, anything) = NaN` 으로 영구 오염. 0 (bf16 `16'h0000` = +0.0) 으로
 초기화하면 `0.0 + GEMM_dequant = GEMM_dequant` 로 첫 누적이 깔끔.
 
 **검증**: 별도 in-sim 가드 없음. 후속 phase 의 dump 결과가 bit-exact 회귀 통과하면
@@ -342,8 +343,8 @@ task dump_banks;
             sram_CEB[bi] <= 0; sram_WEB[bi] <= 1; sram_A[bi*AW +: AW] <= w;
             @(posedge clk); sram_CEB[bi] <= 1;
             @(posedge clk);
-            q_word = sram_Q[bi*32 +: 32];
-            $fwrite(fd, "%08x\n", q_word);
+            q_word = sram_Q[bi*16 +: 16];
+            $fwrite(fd, "%04x\n", q_word);
         end
         $fclose(fd);
     end
@@ -353,8 +354,9 @@ endtask
 512 word/bank — 128×128 workload 의 사용 범위 (flat = m*128 + n, 16384 / 32 = 512).
 나머지 512..1023 은 zero-prime 그대로 0 으로 남음.
 
-**검증**: $fopen 실패 시 즉시 FATAL. dump 형식은 `%08x\n` (FP32 비트 패턴 hex, 한 줄에
-한 word) — MXP_Tools 의 `read_writememh_fp32` 가 같은 형식 기대.
+**검증**: $fopen 실패 시 즉시 FATAL. dump 형식은 `%04x\n` (bf16 16비트 word 의 비트 패턴 hex,
+한 줄에 한 word) — MXP_Tools 의 `read_writememh_bf16` 가 같은 형식 기대 (16비트 word 를
+`fp32 = uint32(bf16_bits) << 16` 로 무손실 upcast).
 
 ---
 
@@ -413,8 +415,10 @@ def interleaved_row_major_32bank(bank_idx, word_offset, M, N):
     return divmod(flat, N)                  # (m, n)
 ```
 
-`gather_banks` 가 32 .mem 을 읽어서 `(M, N)` FP32 행렬 재구성. 모든 (m, n) position
-이 정확히 한 번 커버되는지 (duplicate / missing) 같이 확인.
+`gather_banks` 가 32 .mem 을 읽어서 `(M, N)` 행렬 재구성 (각 bf16 16비트 word 를
+`fp32 = uint32(bf16_bits) << 16` 로 upcast). 모든 (m, n) position 이 정확히 한 번
+커버되는지 (duplicate / missing) 같이 확인. compare 는 ref npz 의 `accum` 필드로 16비트
+bf16 dump reader 를 자동 선택.
 
 이후 `diff_3way(C_hw, C_sw, C_fp32)` 가 세 쌍의 diff 통계:
 
@@ -465,17 +469,17 @@ n_diff > 0 이 정상 (16384 = M*N 모든 element 가 양자화로 변함). 우�
                 │  │   RMW[c]:                                                  │  │
                 │  │     in_GEMM  ◄── rmw_in_GEMM[c*32 +: 32]   (TB drives)    │  │
                 │  │     scale    ◄── rmw_scale  [c*9  +: 9 ]   (TB drives)    │  │
-                │  │     in_SRAM  ◄── Q[c*32 +: 32]             (bank[c] 출력) │  │
+                │  │     in_SRAM  ◄── Q[c*16 +: 16]             (bank[c] 출력) │  │
                 │  │     out_RMW  ──► rmw_out_c                                 │  │
                 │  │                       │                                    │  │
-                │  │     sram_D_w[c*32 +: 32] = sram_D_use_zero ? 0 : rmw_out_c │  │
+                │  │     sram_D_w[c*16 +: 16] = sram_D_use_zero ? 0 : rmw_out_c │  │
                 │  │                       │                                    │  │
                 │  │   sram_1rw_banked_mp.bank[c]:                              │  │
-                │  │     D     ◄── sram_D_w[c*32 +: 32]                        │  │
+                │  │     D     ◄── sram_D_w[c*16 +: 16]                        │  │
                 │  │     A     ◄── A[c*10 +: 10]                (TB drives)    │  │
                 │  │     CEB   ◄── CEB[c]                       (TB drives)    │  │
                 │  │     WEB   ◄── WEB[c]                       (TB drives)    │  │
-                │  │     WMASK ◄── WMASK[c*32 +: 32]            (TB drives)    │  │
+                │  │     WMASK ◄── WMASK[c*16 +: 16]            (TB drives)    │  │
                 │  │     Q     ──► RMW[c].in_SRAM                              │  │
                 │  │                                                            │  │
                 │  └────────────────────────────────────────────────────────────┘  │
@@ -521,7 +525,7 @@ for A_P in 2 4 8; do
     bash sim/run_integration_one.sh "${LABEL}" "${A_P}" "${B_P}"
     # (3) compare gate
     (cd MXP_Tools && python -m mxp_tools compare \
-        --ref ../work/${LABEL}/sw_ref/C_sw_mxint${B_P}_mxint${A_P}.npz \
+        --ref ../work/${LABEL}/sw_ref/C_sw_mxint${B_P}_mxint${A_P}_bf16.npz \
         --hw-banks bank{0..31}.mem \
         --layout interleaved_row_major_32bank)
   done
@@ -579,7 +583,7 @@ template 출력).
    cd MXP_Tools
    BANKS=$(printf "../work/A8_B8/hw_out/bank%d.mem " {0..31})
    python -m mxp_tools compare \
-       --ref ../work/A8_B8/sw_ref/C_sw_mxint8_mxint8.npz \
+       --ref ../work/A8_B8/sw_ref/C_sw_mxint8_mxint8_bf16.npz \
        --hw-banks ${BANKS} --layout interleaved_row_major_32bank
    ```
    `hw_sw n_diff = 0` 이면 비트 정확도 OK.
@@ -598,7 +602,7 @@ Vivado GUI 의 장점: waveform viewer 로 fire timing / drain FSM 의 cycle-by-
 cd MXP_Tools
 python -m mxp_tools gen   --out ../work/A8_B8 -M 128 -K 128 -N 128 --seed 0
 python -m mxp_tools emit  --out ../work/A8_B8
-python -m mxp_tools ref   --out ../work/A8_B8 --prec-a 8 --prec-b 8
+python -m mxp_tools ref   --out ../work/A8_B8 --prec-a 8 --prec-b 8 --accum bf16
 cd ..
 
 # HW sim — TB 의 in-sim 검증 (PASS/FAIL 배너)
@@ -608,7 +612,7 @@ bash sim/run_integration_one.sh A8_B8 8 8
 cd MXP_Tools
 BANKS=$(printf "../work/A8_B8/hw_out/bank%d.mem " {0..31})
 python -m mxp_tools compare \
-    --ref ../work/A8_B8/sw_ref/C_sw_mxint8_mxint8.npz \
+    --ref ../work/A8_B8/sw_ref/C_sw_mxint8_mxint8_bf16.npz \
     --hw-banks ${BANKS} \
     --layout interleaved_row_major_32bank
 ```
@@ -636,8 +640,9 @@ TB 의 plusarg 진입점과 mode-aware 디스패치 구조 자체는 그대로 �
 ### RTL
 - `gemm_sram.srcs/sources_1/new/gemm_sram_top.v` — 32-RMW + 32-bank wrapper top.
 - `gemm_sram.srcs/sources_1/new/sram_1rw_banked_mp.v` — per-bank port SRAM wrapper.
-- `gemm_sram.srcs/sources_1/new/RMW.v` — INT→FP32 + FP32 add (5 cy pipeline).
-- `gemm_sram.srcs/sources_1/new/int_to_fp32.v`, `fp32_adder.v` — RMW 의 구성요소.
+- `gemm_sram.srcs/sources_1/new/RMW.v` — INT→bf16 + bf16 add (5 cy pipeline).
+- `gemm_sram.srcs/sources_1/new/int_to_bf16.v`, `bf16_adder.v` (내부 `fp32_adder` + `fp32_to_bf16_rne`) — RMW 의 구성요소.
+- `gemm_sram.srcs/sources_1/new/int_to_fp32.v`, `fp32_adder.v` — fp32 단위 RTL, HEAD 보존 (`fp32_adder` 는 `bf16_adder` 가 계속 인스턴스).
 - `gemm_sram.srcs/sources_1/new/GEMM.v` — MXP TOP wrapper.
 - `gemm_sram.srcs/sources_1/imports/Desktop/sram/rtl/sram_1rw.v` — leaf bank.
 - `gemm_sram.srcs/sources_1/imports/Desktop/MXP/...` — MXP 컴퓨트 IP.
@@ -645,7 +650,8 @@ TB 의 plusarg 진입점과 mode-aware 디스패치 구조 자체는 그대로 �
 ### TB
 - `tb/gemm_sram_top_tb.v` — 통합 TB (본 doc 의 주된 대상).
 - `tb/sram_1rw_banked_mp_tb.v` — 새 wrapper 단위 TB.
-- `tb/rmw_tb.v`, `int_to_fp32_tb.v`, `fp32_adder_tb.v`, `rmw_smoke_tb.v` — 단위 TB.
+- `tb/rmw_tb.v`, `int_to_bf16_tb.v`, `bf16_adder_tb.v`, `fp32_to_bf16_rne_tb.v` — bf16 단위 TB.
+- `tb/int_to_fp32_tb.v`, `fp32_adder_tb.v`, `rmw_smoke_tb.v` — fp32 단위 TB (보존).
 
 ### Sim
 - `sim/run_integration_one.sh` — 단일 mode (xvlog/xelab/xsim).
@@ -653,7 +659,8 @@ TB 의 plusarg 진입점과 mode-aware 디스패치 구조 자체는 그대로 �
 - `sim/run_integration_parallel.sh` — 9-way 병렬 dispatch 가이드.
 - `sim/run_top_elab.sh` — top elab smoke.
 - `sim/run_sram_mp.sh` — 새 wrapper 단위 회귀.
-- `sim/run_rmw*.sh`, `run_int_to_fp32.sh`, `run_fp32_adder.sh` — 산술기 단위.
+- `sim/run_rmw*.sh`, `run_int_to_bf16.sh`, `run_bf16_adder.sh`, `run_fp32_to_bf16_rne.sh` — bf16 산술기 단위.
+- `sim/run_int_to_fp32.sh`, `run_fp32_adder.sh` — fp32 산술기 단위 (보존).
 
 ### MXP_Tools
 - `MXP_Tools/mxp_tools/cli.py` — `gen / emit / ref / compare / viz / rmw-gen` 서브커맨드.
