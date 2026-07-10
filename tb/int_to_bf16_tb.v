@@ -4,7 +4,8 @@
 //
 // 검증 목적:
 //   gemm_sram.srcs/sources_1/new/int_to_bf16.v 의 INT32 + 9비트 스케일 -> bf16
-//   변환 (INToRecFN_i32_e8_s8 + 지수-더하기 + FNFromRecFN_bf16_wrapper) 이
+//   변환 (INToRecFN_i32_e8_s8 + fp32 도메인 지수-더하기 + FNFromRecFN_wrapper
+//   + fp32_to_bf16_rne, v2) 이
 //   ml_dtypes 기반 오라클과 bit-exact 로 일치하는지 확인.
 //   오라클 모델: bf16(int -> bf16) * 2^(scale-127) = int->bf16 후 지수 shift
 //   (INToRecFN 이 8-sig 로 먼저 라운딩 = golden r8; 이후 fp32 도메인 exact shift 후
