@@ -9,7 +9,7 @@
 #      (--accum bf16 -> C_sw_*_bf16.npz; compare auto-selects the 16-bit dump
 #       reader from the npz accum field)
 #   4) sim/run_integration_one.sh <LABEL> <A_P> <B_P>
-#   5) MXP_Tools compare against C_sw_mxint${B_P}_mxint${A_P}.npz
+#   5) MXP_Tools compare against C_sw_mxint${B_P}_mxint${A_P}_bf16.npz
 #      (npz filename slot 1 = WEIGHT prec = B_P, slot 2 = ACT prec = A_P)
 #
 # Exits 1 on any mismatch. Final success line: "ALL 9 MODES PASSED".
