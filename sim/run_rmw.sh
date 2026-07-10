@@ -9,8 +9,11 @@ SRC=../gemm_sram.srcs/sources_1/new
 
 xvlog -nolog \
     "$HF"/HardFloatBundle.v \
-    "$SRC"/int_to_fp32.v \
+    "$HF"/HardFloatBundle_bf16.v \
     "$SRC"/fp32_adder.v \
+    "$SRC"/fp32_to_bf16_rne.v \
+    "$SRC"/int_to_bf16.v \
+    "$SRC"/bf16_adder.v \
     "$SRC"/RMW.v \
     ../tb/rmw_tb.v
 

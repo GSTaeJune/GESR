@@ -1,17 +1,17 @@
 `timescale 1ns/1ps
 //////////////////////////////////////////////////////////////////////////////////
-// rmw_tb — RMW 본체 (int_to_fp32 + delay + fp32_adder) 의 벡터 기반 TB.
+// rmw_tb — RMW 본체 (int_to_bf16 + delay + bf16_adder) 의 벡터 기반 TB.
 //
 // 검증 목적:
 //   gemm_sram.srcs/sources_1/new/RMW.v 가 다음 동작을 L_TOTAL = L_CONV + L_ADD
 //   사이클 파이프라인을 거친 후 정확히 수행하는지 확인:
 //
-//       out_RMW = float(in_GEMM * 2^(scale - 127)) + in_SRAM   (IEEE-754 FP32)
+//       out_RMW = bf16( bf16(in_GEMM * 2^(scale-127)) + in_SRAM )   (IEEE bfloat16, RNE)
 //
 //   특히 다음을 동시에 자극:
-//     1) INT→FP32 변환 + 지수 보정 (in_int=0 zero passthrough 포함)
+//     1) INT→bf16 변환 + 지수 보정 (zero passthrough + 깊은 언더플로 ±0 flush + subnormal RNE 포함)
 //     2) sram_dly 체인이 in_SRAM 을 L_CONV 만큼 지연시켜 가산기 입력에서 정렬
-//     3) FP32 가산기의 정상값/특수값 동작
+//     3) bf16 가산기 (fp32 도메인 가산 + RNE narrow) 의 정상값/특수값 동작
 //   ⇒ Python 측 (MXP_Tools/mxp_tools/rmw_gen.py) 이 생성한 N개의 무작위
 //      벡터를 back-to-back 으로 흘려보내고, 캡처된 out_RMW 가 Python 기대값
 //      (expected_out.hex) 과 비트 단위로 일치하는지 본다.
@@ -22,8 +22,8 @@
 //       N.txt           : 한 줄 정수 N
 //       in_GEMM.hex     : INT32 32 비트 × N
 //       scale.hex       : 9 비트 scale × N (gen 측에서 0x1FF 마스킹)
-//       in_SRAM.hex     : FP32 32 비트 × N
-//       expected_out.hex: FP32 32 비트 × N (numpy.float32 계산 결과)
+//       in_SRAM.hex     : bf16 16비트 × N
+//       expected_out.hex: bf16 16비트 × N (ml_dtypes 계산 결과)
 //
 //   - 자극 패턴: negedge 마다 새 입력 하나씩, posedge 직후 #1 에 out_RMW 캡처.
 //     out_idx 가 -(L_TOTAL-1) 에서 시작해 매 사이클 +1, 0..N-1 구간만 저장.
@@ -48,10 +48,10 @@ module rmw_tb;
 
     reg              clk;
     reg              rst;
-    reg  [31:0]      in_SRAM;
+    reg  [15:0]      in_SRAM;
     reg  [31:0]      in_GEMM;
     reg  [8:0]       scale;
-    wire [31:0]      out_RMW;
+    wire [15:0]      out_RMW;
 
     RMW #(.L_CONV(L_CONV), .L_ADD(L_ADD)) dut (
         .clk     (clk),
@@ -68,9 +68,9 @@ module rmw_tb;
     // 벡터 저장소.
     reg [31:0] mem_int   [0:MAX_N-1];   // in_GEMM 자극
     reg [8:0]  mem_scale [0:MAX_N-1];   // scale 자극
-    reg [31:0] mem_sram  [0:MAX_N-1];   // in_SRAM 자극
-    reg [31:0] mem_exp   [0:MAX_N-1];   // 기대 출력 (Python 계산)
-    reg [31:0] captured_out [0:MAX_N-1];
+    reg [15:0] mem_sram  [0:MAX_N-1];   // in_SRAM 자극
+    reg [15:0] mem_exp   [0:MAX_N-1];   // 기대 출력 (Python 계산)
+    reg [15:0] captured_out [0:MAX_N-1];
 
     integer N;
     integer fh;
@@ -110,7 +110,7 @@ module rmw_tb;
 
         // ─── 리셋 ────────────────────────────────────────────────────
         rst     = 1;
-        in_SRAM = 32'h0;
+        in_SRAM = 16'h0;
         in_GEMM = 32'h0;
         scale   = 9'd0;
         out_idx = -(L_TOTAL - 1);
@@ -131,7 +131,7 @@ module rmw_tb;
             end else begin
                 in_GEMM = 32'h0;
                 scale   = 9'd0;
-                in_SRAM = 32'h0;
+                in_SRAM = 16'h0;
             end
 
             @(posedge clk);
