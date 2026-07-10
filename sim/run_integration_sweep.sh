@@ -6,6 +6,8 @@
 #   2) MXP_Tools emit -> ../work/<LABEL>   (emits all 3 precs; no --prec flag)
 #   3) MXP_Tools ref  -> ../work/<LABEL>   (NOTE arg swap: --prec-a = WEIGHT = B_P,
 #                                                          --prec-b = ACT    = A_P)
+#      (--accum bf16 -> C_sw_*_bf16.npz; compare auto-selects the 16-bit dump
+#       reader from the npz accum field)
 #   4) sim/run_integration_one.sh <LABEL> <A_P> <B_P>
 #   5) MXP_Tools compare against C_sw_mxint${B_P}_mxint${A_P}.npz
 #      (npz filename slot 1 = WEIGHT prec = B_P, slot 2 = ACT prec = A_P)
@@ -33,7 +35,7 @@ for A_P in 2 4 8; do
     (cd MXP_Tools && \
       python -m mxp_tools gen   --out ../work/${LABEL} -M 128 -K 128 -N 128 --seed 0 && \
       python -m mxp_tools emit  --out ../work/${LABEL} && \
-      python -m mxp_tools ref   --out ../work/${LABEL} --prec-a ${B_P} --prec-b ${A_P}) || {
+      python -m mxp_tools ref   --out ../work/${LABEL} --prec-a ${B_P} --prec-b ${A_P} --accum bf16) || {
         echo "${LABEL}: gen/emit/ref FAILED"
         FAILED+=("${LABEL}")
         continue
@@ -50,7 +52,7 @@ for A_P in 2 4 8; do
     BANKS=$(printf "../work/${LABEL}/hw_out/bank%d.mem " {0..31})
     if (cd MXP_Tools && \
         python -m mxp_tools compare \
-            --ref ../work/${LABEL}/sw_ref/C_sw_mxint${B_P}_mxint${A_P}.npz \
+            --ref ../work/${LABEL}/sw_ref/C_sw_mxint${B_P}_mxint${A_P}_bf16.npz \
             --hw-banks ${BANKS} \
             --layout interleaved_row_major_32bank); then
       PASSED+=("${LABEL}")

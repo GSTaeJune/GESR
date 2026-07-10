@@ -25,7 +25,7 @@ Per-subagent steps:
   2. python -m mxp_tools emit --out ../work/A${A_PREC}_B${B_PREC}
      (no --prec flag emits all 3 precisions; the same input dir serves any mode)
   3. python -m mxp_tools ref --out ../work/A${A_PREC}_B${B_PREC} \
-       --prec-a ${B_PREC} --prec-b ${A_PREC}
+       --prec-a ${B_PREC} --prec-b ${A_PREC} --accum bf16
      (NOTE arg swap: MXP_Tools --prec-a = WEIGHT precision = our B_PREC;
                      MXP_Tools --prec-b = ACTIVATION  precision = our A_PREC)
   4. cd .. && bash sim/run_integration_one.sh \
@@ -33,7 +33,7 @@ Per-subagent steps:
   5. cd MXP_Tools && \
        BANKS=$(printf "../work/A${A_PREC}_B${B_PREC}/hw_out/bank%d.mem " {0..31}) && \
        python -m mxp_tools compare \
-         --ref ../work/A${A_PREC}_B${B_PREC}/sw_ref/C_sw_mxint${B_PREC}_mxint${A_PREC}.npz \
+         --ref ../work/A${A_PREC}_B${B_PREC}/sw_ref/C_sw_mxint${B_PREC}_mxint${A_PREC}_bf16.npz \
          --hw-banks ${BANKS} \
          --layout interleaved_row_major_32bank
      (compare exit code 0 = PASS; non-zero = FAIL.

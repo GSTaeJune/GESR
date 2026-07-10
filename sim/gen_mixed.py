@@ -2,7 +2,7 @@
 
 검증 목적:
   weight 의 (M-row, K-block) 단위 random W_PREC ∈ {2,4,8} mix 가 RTL 변경
-  없이 bit-exact 동작함을 검증하기 위해 TB 입력 hex + FP32 골든 + precision
+  없이 bit-exact 동작함을 검증하기 위해 TB 입력 hex + bf16-accum 골든 (+ fp32 truth) + precision
   map visualize 까지 한 파일에서 산출.
 
 사용:
@@ -24,6 +24,7 @@ if str(_MXP_TOOLS) not in sys.path:
 from mxp_tools.quant import quantize_block_mx, quantize_matrix_mx  # noqa: E402
 from mxp_tools.gemm import mxint_gemm_golden  # noqa: E402
 from mxp_tools.const import BLOCK_SIZE  # noqa: E402
+from mxp_tools import compare as cmp_mod  # noqa: E402
 
 
 def build_w_prec_map(seed: int = 0, M: int = 128, K_T: int = 4) -> np.ndarray:
@@ -291,9 +292,10 @@ def compute_golden_mixed(
     A_scale: np.ndarray,
     prec_map: np.ndarray,
     prec_b: int,
+    accum_dtype: str = "fp32",
 ) -> np.ndarray:
-    """Thin wrapper around mxint_gemm_golden with prec_A=prec_map (ndarray)."""
-    return mxint_gemm_golden(W_int, W_scale, prec_map, A_int, A_scale, prec_b)
+    """Thin wrapper around mxint_gemm_golden (prec_A=prec_map ndarray); accum_dtype in {fp32,bf16} selects the inter-tile accumulator dtype."""
+    return mxint_gemm_golden(W_int, W_scale, prec_map, A_int, A_scale, prec_b, accum_dtype=accum_dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -324,19 +326,27 @@ def main():
     # mxint_gemm_golden 의 prec_A=ndarray 분기로 위임. prec_B=args.A 가 필수 —
     # default 8 이 들어가면 A=2/A=4 에서 activation implicit_scale 계산이
     # IMPLICIT_SCALE_EXP[8]=6 로 잘못 고정돼 RTL 결과와 2^6 = 64 배 차이.
-    C_golden = mxint_gemm_golden(W_int, W_scale, prec_map, A_int, A_scale, args.A)
+    C_golden = mxint_gemm_golden(W_int, W_scale, prec_map, A_int, A_scale, args.A,
+                                 accum_dtype="bf16")
 
     # FP32 reference matmul — unquantized truth for compare's 3-way diff.
     # Use single-precision matmul to match the dtype convention used by
     # mxp_tools.cli.cmd_gen (which also stores C_fp32 as float32).
     C_fp32_truth = (W_fp.astype(np.float32) @ A_fp.astype(np.float32)).astype(np.float32)
 
+    # D4 informational SNR: bf16-accum golden vs fp32 truth (not a gate).
+    s = cmp_mod.bf16_accuracy_stats(C_golden, C_fp32_truth)
+    print(f"[gen_mixed] bf16 vs fp32-truth: SNR={s['snr_db']:.2f} dB  rmse={s['rmse']:.3e}")
+    if s["catastrophic"]:
+        print("[gen_mixed] WARNING: bf16 SNR < 0 dB - accumulation may be unusable; "
+              "consider the fp32 fallback (spec D4).")
+
     emit_hex(W_int, W_scale, A_int, A_scale, prec_map, A_PREC=args.A, out_dir=out / "hw_input")
     visualize_prec_map(prec_map, A_PREC=args.A, out_dir=out)
 
     sw_ref = out / "sw_ref"
     sw_ref.mkdir(exist_ok=True)
-    np.savez(sw_ref / "C_sw_mixed.npz", C_sw=C_golden, C_fp32=C_fp32_truth)
+    np.savez(sw_ref / "C_sw_mixed.npz", C_sw=C_golden, C_fp32=C_fp32_truth, accum="bf16")
     # Save inputs (W/A fp32 + int + scale + prec_map) so downstream viz can show
     # the input side of the pipeline without re-parsing hex files.
     np.savez(sw_ref / "inputs_mixed.npz",

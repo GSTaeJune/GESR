@@ -116,7 +116,8 @@ def _viz_one(work_dir: Path, title: str) -> None:
     dump_dir = work_dir / "hw_out"
 
     # Load golden (C_sw, C_fp32).
-    npzs = list(sw_ref_dir.glob("C_sw*.npz"))
+    npzs = sorted(sw_ref_dir.glob("C_sw*.npz"),
+                  key=lambda p: (0 if p.stem.endswith("_bf16") or p.stem == "C_sw_mixed" else 1))
     if not npzs:
         print(f"[viz] no npz under {sw_ref_dir} - skipping", flush=True)
         return
@@ -130,7 +131,11 @@ def _viz_one(work_dir: Path, title: str) -> None:
     if not all(Path(b).exists() for b in banks):
         print(f"[viz] missing bank files under {dump_dir} - skipping", flush=True)
         return
-    C_hw = hwio.gather_banks(banks, M, N, hwio.interleaved_row_major_32bank)
+    accum = str(ref["accum"]) if "accum" in ref.files else "fp32"
+    reader = (hwio.read_writememh_bf16 if accum == "bf16"
+              else hwio.read_writememh_fp32)
+    C_hw = hwio.gather_banks(banks, M, N, hwio.interleaved_row_major_32bank,
+                             reader=reader)
     result = cmp_mod.diff_3way(C_hw, C_sw, C_fp32)
 
     # Load inputs. Try inputs_mixed.npz (gen_mixed.py), else ab_fp32.npz
@@ -266,11 +271,11 @@ def _viz_sweep(passed_labels: list[str]) -> None:
 
     per_mode = {}
     for label in passed_labels:
-        # label format A{a}_B{b}; npz format C_sw_mxint{b}_mxint{a}.npz
+        # label format A{a}_B{b}; npz format C_sw_mxint{b}_mxint{a}_bf16.npz
         a_p = int(label.split("_")[0][1:])
         b_p = int(label.split("_")[1][1:])
         work = REPO_ROOT / "work" / label
-        npz = work / "sw_ref" / f"C_sw_mxint{b_p}_mxint{a_p}.npz"
+        npz = work / "sw_ref" / f"C_sw_mxint{b_p}_mxint{a_p}_bf16.npz"
         if not npz.exists():
             continue
         ref = np.load(npz)
@@ -280,7 +285,11 @@ def _viz_sweep(passed_labels: list[str]) -> None:
         banks = [str(work / "hw_out" / f"bank{i}.mem") for i in range(32)]
         if not all(Path(b).exists() for b in banks):
             continue
-        C_hw = hwio.gather_banks(banks, M, N, hwio.interleaved_row_major_32bank)
+        accum = str(ref["accum"]) if "accum" in ref.files else "fp32"
+        reader = (hwio.read_writememh_bf16 if accum == "bf16"
+                  else hwio.read_writememh_fp32)
+        C_hw = hwio.gather_banks(banks, M, N, hwio.interleaved_row_major_32bank,
+                                 reader=reader)
         per_mode[f"mxint{a_p}_mxint{b_p}"] = cmp_mod.diff_3way(C_hw, C_sw, C_fp32)
 
     if not per_mode:
@@ -333,7 +342,7 @@ set -e
 cd MXP_Tools
 python -m mxp_tools gen   --out ../work/{label} -M 128 -K 128 -N 128 --seed 0
 python -m mxp_tools emit  --out ../work/{label}
-python -m mxp_tools ref   --out ../work/{label} --prec-a {args.B} --prec-b {args.A}
+python -m mxp_tools ref   --out ../work/{label} --prec-a {args.B} --prec-b {args.A} --accum bf16
 """
         bash = _require_bash()
         rc = subprocess.run([bash, "-c", prep], cwd=str(REPO_ROOT)).returncode
@@ -353,7 +362,7 @@ python -m mxp_tools ref   --out ../work/{label} --prec-a {args.B} --prec-b {args
         compare_script = f"""
 cd MXP_Tools
 python -m mxp_tools compare \
-    --ref ../work/{label}/sw_ref/C_sw_mxint{args.B}_mxint{args.A}.npz \
+    --ref ../work/{label}/sw_ref/C_sw_mxint{args.B}_mxint{args.A}_bf16.npz \
     --hw-banks {banks} \
     --layout interleaved_row_major_32bank
 """
