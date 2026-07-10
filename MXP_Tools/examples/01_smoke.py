@@ -27,17 +27,28 @@ from mxp_tools import gemm, hwio, quant, viz
 from mxp_tools.cli import main as cli_main
 
 
+def run_cli(argv):
+    """cli.main() exits via sys.exit even on success (exit-code gate for
+    scripts). Swallow SystemExit(0) so this in-process step chain continues;
+    re-raise on nonzero so a real failure still kills the smoke."""
+    try:
+        cli_main(argv)
+    except SystemExit as e:
+        if (e.code or 0) != 0:
+            raise
+
+
 def run(work):
     os.makedirs(work, exist_ok=True)
 
     print("== step 1/7 gen ==")
-    cli_main(["gen", "--out", work, "-M", "64", "-K", "64", "-N", "64", "--seed", "0"])
+    run_cli(["gen", "--out", work, "-M", "64", "-K", "64", "-N", "64", "--seed", "0"])
 
     print("\n== step 2/7 emit (MXINT8 only) ==")
-    cli_main(["emit", "--out", work, "--prec", "8"])
+    run_cli(["emit", "--out", work, "--prec", "8"])
 
     print("\n== step 3/7 ref (8x8 only) ==")
-    cli_main(["ref", "--out", work, "--prec-a", "8", "--prec-b", "8"])
+    run_cli(["ref", "--out", work, "--prec-a", "8", "--prec-b", "8"])
 
     print("\n== step 4/7 fake HW = C_sw written as $writememh ==")
     ref = np.load(os.path.join(work, "sw_ref", "C_sw_mxint8_mxint8.npz"))
@@ -49,7 +60,7 @@ def run(work):
     print(f"   wrote {bank0}  ({C_sw.size} words)")
 
     print("\n== step 5/7 compare (HW vs SW vs FP32) ==")
-    cli_main([
+    run_cli([
         "compare",
         "--ref", os.path.join(work, "sw_ref", "C_sw_mxint8_mxint8.npz"),
         "--hw-banks", bank0,
@@ -64,7 +75,7 @@ def run(work):
     assert max_hw_sw == 0.0, f"round-trip should be exact, got {max_hw_sw}"
 
     print("\n== step 7a/7 viz heatmap ==")
-    cli_main([
+    run_cli([
         "viz",
         "--npz", os.path.join(work, "compare_8x8.npz"),
         "--save", os.path.join(work, "heatmap_8x8.png"),
