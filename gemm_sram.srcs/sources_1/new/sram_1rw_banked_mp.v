@@ -7,6 +7,13 @@
 // (wrapper 레벨에서 BANK_STRATEGY 없음).
 //
 // gemm_sram_top 의 col j → bank j 매핑 (col-parallel RMW 32×) 에 사용.
+// Phase 2b: DATA_WIDTH=16 (bf16 psum). 128×128 워크로드 = 16384/32 = 512 word/bank.
+//
+// 포트 (active-low CEB/WEB, active-high WMASK, leaf PIPELINE 관습 그대로):
+//   CEB/WEB/A/D/WMASK/Q 모두 NUM_BANKS 개를 flat bus 로 병렬 노출.
+// 인스턴스: sram_1rw (leaf, imports/Desktop/sram/rtl/) × NUM_BANKS.
+//   인스턴스되는 곳: gemm_sram_top. (mux 형 sram_1rw_banked.v 는 다른 caller 용 별도.)
+// 상태: ACTIVE (psum 백엔드). 검증은 통합 sweep (run_integration_sweep.sh) 로 수행.
 //
 // Spec : docs/superpowers/specs/2026-05-15-rmw-32x-design.md
 // Style: Pure Verilog-2001 (sram repo 컨벤션 — packed array 안 씀).

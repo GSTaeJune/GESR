@@ -19,6 +19,17 @@
 // 파이프라인: L_CONV단 (>=1). 레지스터는 지수 보정까지 끝난 recoded 신호 위에
 // 위치 → 입력 변환과 출력 환원은 모두 조합 회로.
 //
+// 포트: in_int(INT32) + scale(s9) → out_fp32(fp32 32b). rst 미사용.
+// 인스턴스: INToRecFN_i32_e8_s24 + FNFromRecFN_wrapper (둘 다 fp32 번들).
+//
+// 상태: PRESERVED — 어디에도 인스턴스되지 않음. Phase 2b 에서 RMW 변환단이
+//   int_to_bf16 으로 교체되며 데이터패스에서 빠졌다. HEAD 에 남겨둔 이유는
+//   (i) fp32 복구 태그 `fp32-rmw-final` 의 앵커, (ii) 단위 TB 회귀 유지.
+//   깊은 언더플로 clamp 가 없다 (음수 new_exp10 9비트 wrap) — bf16 라인은
+//   int_to_bf16 의 underflow_z flush 로 이 잠복 버그를 해소했다. 무변경 보존.
+//
+// 검증: `bash sim/run_int_to_fp32.sh` → 단위 TB PASS (directed 케이스).
+//
 // Spec: docs/superpowers/specs/2026-05-14-rmw-design.md
 //////////////////////////////////////////////////////////////////////////////////
 

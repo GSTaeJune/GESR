@@ -1,13 +1,26 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////
 // gemm_sram_top — GEMM + RMW[32] + sram_1rw_banked_mp 묶음 (pure structural).
-// 모든 control 신호는 TB 가 driving (controller 없음).
+// 모든 control 신호는 TB 가 driving (controller 없음). 글루 배선 2줄뿐:
+//   (i) SRAM 읽기 Q[j] → RMW[j].in_SRAM 직결,
+//   (ii) sram_D_use_zero 로 0(초기화) vs RMW[j].out_RMW 를 mux 해서 D 로.
 //
-// col j 의 RMW[j] 가 자기 bank[j] 만 건드림 (col-parallel). 매 cycle 최대
+// col j 의 RMW[j] 가 자기 bank[j] 만 건드림 (col-parallel, 충돌 0). 매 cycle 최대
 // 32 개의 독립 R/W 가능. 매핑 책임은 호출자 (TB).
 //
-// Spec: docs/superpowers/specs/2026-05-15-rmw-32x-design.md
-// Phase 2b: psum/SRAM 데이터폭 16b (bf16). in_GEMM(INT32) 은 32b 유지.
+// 데이터폭 (Phase 2b): psum/SRAM = 16b (bf16). rmw_in_GEMM 만 INT32(32b) 유지.
+//   Q / WMASK / rmw_out_RMW / sram_D_w 전부 16b. DATA_WIDTH=16.
+//
+// 인스턴스: GEMM(1) + RMW(NUM_BANKS) + sram_1rw_banked_mp(1). FSM 없음.
+// 상태: ACTIVE (통합 최상위). 합성 top = 이 모듈, sim top = gemm_sram_top_tb.
+//
+// 검증:
+//   `bash sim/run_top_elab.sh`          → elaborate-only 스모크.
+//   `bash sim/run_integration_sweep.sh` → 종단 9-mode, 기대 "ALL 9 MODES PASSED"
+//                                          (MXP_Tools bf16 golden 과 bit-exact).
+//
+// Spec: docs/superpowers/specs/2026-07-08-rmw-bf16-design.md (bf16 라인),
+//       docs/superpowers/specs/2026-05-15-rmw-32x-design.md (32× col-parallel).
 //////////////////////////////////////////////////////////////////////////////
 
 module gemm_sram_top #(
@@ -78,7 +91,8 @@ module gemm_sram_top #(
                 .scale  (rmw_scale  [c*9  +: 9 ]),
                 .out_RMW(rmw_out_c)
             );
-            assign rmw_out_RMW[c*16 +: 16] = rmw_out_c;
+            assign rmw_out_RMW[c*16 +: 16] = rmw_out_c;   // probe tap
+            // D-mux (글루 ii): 첫 K-tile zero-prime 시 0x0000, 그 외엔 RMW 결과.
             assign sram_D_w  [c*16 +: 16] = sram_D_use_zero ? 16'h0000 : rmw_out_c;
         end
     endgenerate

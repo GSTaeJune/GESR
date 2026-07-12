@@ -18,6 +18,15 @@
 //   레지스터단(L_ADD개)을 33비트 recoded 신호 위에 둔다. 그래서 입출력 경계의
 //   recode/un-recode는 모두 조합 회로다. 입력값 → 출력은 L_ADD 사이클 지연.
 //
+// 포트: a,b(fp32 32b) → sum(fp32 32b, RNE). rst 미사용.
+// 인스턴스: RecFNFromFN_wrapper(x2) + AddRecFN + FNFromRecFN_wrapper (fp32 번들).
+//   인스턴스되는 곳: bf16_adder (bf16 덧셈의 fp32 도메인 코어).
+//
+// 상태: ACTIVE — bf16_adder 안에서 여전히 데이터패스에 살아 있다. (RMW 최상위
+//   에서 직접 인스턴스하던 fp32 시절과 달리, 지금은 bf16_adder 를 경유.)
+//
+// 검증: `bash sim/run_fp32_adder.sh` → 단위 TB PASS (directed 케이스).
+//
 // Spec: docs/superpowers/specs/2026-05-14-rmw-design.md
 //////////////////////////////////////////////////////////////////////////////////
 

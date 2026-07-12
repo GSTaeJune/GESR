@@ -30,6 +30,14 @@
 // 파이프라인: L_CONV단 (>=1). 레지스터는 스케일 보정 끝난 recoded fp32 (33b)
 // 위에 위치 — 입력 변환과 출력 환원(4,5)은 모두 조합 회로.
 //
+// 포트: in_int(INT32) + scale(s9) → out_bf16(bf16 16b). rst 미사용.
+// 인스턴스: INToRecFN_i32_e8_s8 (bf16 번들) + FNFromRecFN_wrapper (fp32 번들)
+//   + fp32_to_bf16_rne (로컬). 인스턴스되는 곳: RMW.
+// 상태: ACTIVE (v2 — RMW 변환단 본선). v1(FNFromRecFN_bf16_wrapper 직결)은 폐기.
+//
+// 검증: `bash sim/run_int_to_bf16.sh` → 기대 "ALL 32312 TESTS PASSED"
+//   (oracle sim/bf16_vectors.py 와 bit-exact; 음수 9비트 scale 언더플로 포함).
+//
 // Spec: docs/superpowers/specs/2026-07-08-rmw-bf16-design.md (§6.1 carry-over #1)
 //////////////////////////////////////////////////////////////////////////////////
 

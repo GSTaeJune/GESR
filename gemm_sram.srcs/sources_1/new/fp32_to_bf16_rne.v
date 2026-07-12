@@ -7,6 +7,13 @@
 //   round_up = round & (sticky | lsb) 이면 top16 += 1 (carry가 exp/inf로 전파 = 정상).
 // NaN -> canonical quiet NaN (sign|0x7FC0), inf -> top16 그대로.
 // ml_dtypes 의 fp32->bf16 및 Phase-1 f32_to_bf16_bits_rne 레퍼런스와 bit 일치.
+//
+// 포트: in(fp32 32b) → out(bf16 16b). clk 없음 (순수 조합).
+// 인스턴스: 없음 (leaf). 인스턴스되는 곳: int_to_bf16, bf16_adder.
+// 상태: ACTIVE (두 bf16 primitive 의 공용 narrow 단).
+//
+// 검증: `bash sim/run_fp32_to_bf16_rne.sh` → 기대 "ALL 70012 TESTS PASSED"
+//   (subnormal 포함 단일 RNE 를 ml_dtypes 로 전수/근사 크로스체크).
 //////////////////////////////////////////////////////////////////////////////////
 module fp32_to_bf16_rne (
     input  wire [31:0] in,

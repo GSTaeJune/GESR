@@ -1,12 +1,33 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////////
-// TOP — wraps SystolicArray + 32 station instances + 32 Accumulator_Col instances.
+// GEMM — MXP 비트-시리얼 시스톨릭 어레이의 얇은 TOP 래퍼.
+//
+// 하는 일: SystolicArray(32×32) + station 32개 + Accumulator_Col 32개를 묶어
+// 하나의 GEMM 엔진으로 만든다. gemm_sram_top 안에서 이 GEMM 한 인스턴스가
+// INT32 부분합(out_accumulate) + 9비트 결합 스케일(out_scale) + per-column
+// 완료 펄스(out_fire)를 뽑아 downstream RMW[32]로 넘긴다. 자체 FSM 없음 —
+// 모든 chain 입력은 상위(TB)가 정확한 cadence로 driving.
+//
+// [자주 헷갈리는 것 1] in_a = weight, in_b = activation.
+//   MXP 네이밍 관습상 in_a(1비트)가 weight bit, in_b(8비트)가 activation.
+//   "a=activation"으로 단정하면 dead lane 이 된다.
+//
+// [자주 헷갈리는 것 2] SA 축 매핑 = row=K, col=N, cycle=M.
+//   row(in_a[r]/in_b[r]) = K축, col(Accumulator_Col[c]) = N축, cycle 진행 = M축.
+//   한 cycle 의 in_a 32비트 = 같은 K-block 32개 K-element 의 같은 bit-position →
+//   K-block 단위 mixed-precision 이 dataflow 변경 없이 가능. row=M 으로 단정 금지
+//   (CLAUDE.md "MXP control surface" 참고).
+//
+// 두 종류의 chain (방향이 다름 — 틀리면 조용히 lane 이 죽는다):
 //
 // station chain: col 31 entry, single-direction left propagation (matches in_b
 // wave). Each station broadcasts out_local_Lane_ctrl (4-bit pre-decoded) to
 // SystolicArray's per-column lane-ctrl bus → PE adder_lane.ctrl direct. Each
 // station also broadcasts out_local_Mode_oh (3-bit one-hot) to its
 // Accumulator_Col in_Mode_oh and out_local_Scale_Activation to in_scale_act.
+//   (단, selector chain = in_control 은 아래 Accumulator_Col chain 과 같은
+//    symmetric 토폴로지 — col num_col/2 entry, fan outward — 라서 toggle wave 가
+//    각 col 의 fire window 와 정렬된다.)
 //
 // Accumulator_Col chain: middle entry at col num_col/2, fanning outward
 // (left half: i+1→i, right half: i→i+1) — mirrors reference BitSerial_Systolic
@@ -14,6 +35,15 @@
 //
 // Weight scale chain: same topology as Accumulator_Col chain (entry at num_col/2,
 // fanning outward). in_scale_weight propagates alongside start_accumulate.
+//
+// out_fire 는 per-column (전역 아님) — chain 지연만큼 col 별 fire 타이밍이 어긋난다.
+//   downstream 는 이를 존중해야 함 (gemm_sram_top 은 col j → RMW[j] 로 병렬 처리).
+//
+// 인스턴스: SystolicArray + station(32) + Accumulator_Col(32).
+//   상위 모듈: imports/Desktop/MXP/... 에서 임포트된 compute RTL. GEMM.v 자체는
+//   프로젝트-로컬 (편집 가능) 이지만 순수 structural 배선만 담당.
+// 인스턴스되는 곳: gemm_sram_top.
+// 상태: ACTIVE (compute 프론트엔드). 검증은 통합 sweep (아래 README) 로만 수행.
 //////////////////////////////////////////////////////////////////////////////////
 
 module GEMM#(

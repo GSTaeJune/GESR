@@ -29,6 +29,21 @@
 //   * 첫 K-tile 초기화: 해당 SRAM 주소를 처음 쓸 때는 in_SRAM에 16'h0000을
 //     강제로 넣어줘야 한다 (SRAM 초기값이 NaN 등 쓰레기일 수 있음).
 //
+// 포트:
+//   in_SRAM  (bf16 16b)  : SRAM에서 읽어온 이전 부분합.
+//   in_GEMM  (INT32 32b) : GEMM accumulator 한 lane 분의 원시 부분합.
+//   scale    (s9)        : 9비트 signed 결합 스케일 (act+weight-127). 저장 안 함.
+//   out_RMW  (bf16 16b)  : SRAM에 다시 쓸 합산 결과.
+//
+// 인스턴스: int_to_bf16 (변환) + bf16_adder (덧셈). sram_dly 는 로컬 시프트레지스터.
+// 인스턴스되는 곳: gemm_sram_top (col j → RMW[j] → bank[j], 32×).
+//
+// 상태: ACTIVE (Phase 2b — bf16 데이터패스 본선). fp32 시절 int_to_fp32/fp32_adder
+//   조합은 태그 `fp32-rmw-final` 로 보존 (README 참고).
+//
+// 검증: `bash sim/run_rmw.sh` → 기대 "rmw_tb: ALL 113 TESTS PASSED".
+//   (벡터 생성 선행: cd MXP_Tools && python -m mxp_tools rmw-gen ...)
+//
 // Spec: docs/superpowers/specs/2026-07-08-rmw-bf16-design.md
 //////////////////////////////////////////////////////////////////////////////////
 
