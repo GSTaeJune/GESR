@@ -20,15 +20,15 @@ mkdir -p rtl/1_top rtl/2_rmw_bf16 rtl/3_fp32_units rtl/4_sram rtl/5_gemm_core
 cp "$NEW"/gemm_sram_top.v        rtl/1_top/
 cp "$NEW"/GEMM.v                 rtl/1_top/
 
-# 2) RMW bf16 데이터패스 (active)
+# 2) RMW bf16 데이터패스 (active — 2026-07-13 native 재작성, HardFloat-free)
 cp "$NEW"/RMW.v                  rtl/2_rmw_bf16/
 cp "$NEW"/int_to_bf16.v          rtl/2_rmw_bf16/
 cp "$NEW"/bf16_adder.v           rtl/2_rmw_bf16/
-cp "$NEW"/fp32_to_bf16_rne.v     rtl/2_rmw_bf16/
 
-# 3) fp32 유닛 (fp32_adder = active(bf16_adder 내부) / int_to_fp32 = preserved)
+# 3) fp32 유닛 (전부 preserved — 데이터패스 미사용, fp32 복구 라인 + 단위 TB 용)
 cp "$NEW"/fp32_adder.v           rtl/3_fp32_units/
 cp "$NEW"/int_to_fp32.v          rtl/3_fp32_units/
+cp "$NEW"/fp32_to_bf16_rne.v     rtl/3_fp32_units/
 
 # 4) SRAM (per-bank 포트 래퍼는 프로젝트 로컬, leaf/16-bank 래퍼는 import)
 cp "$NEW"/sram_1rw_banked_mp.v   rtl/4_sram/

@@ -7,16 +7,11 @@ mkdir -p "$BUILD"
 cd "$BUILD"
 
 SRC_ROOT="../../../gemm_sram.srcs/sources_1"
-HF_ROOT="../../../third_party/berkeley-hardfloat"
 
-# HardFloat (RMW 가 import) + MXP + SRAM + 통합 top
+# MXP + SRAM + native bf16 RMW + 통합 top (HardFloat-free, 2026-07-13)
 xvlog -sv \
-    $HF_ROOT/HardFloatBundle.v \
-    $HF_ROOT/HardFloatBundle_bf16.v \
     $SRC_ROOT/imports/Desktop/MXP/MXP.srcs/sources_1/new/*.v \
     $SRC_ROOT/imports/Desktop/sram/rtl/*.v \
-    $SRC_ROOT/new/fp32_adder.v \
-    $SRC_ROOT/new/fp32_to_bf16_rne.v \
     $SRC_ROOT/new/int_to_bf16.v \
     $SRC_ROOT/new/bf16_adder.v \
     $SRC_ROOT/new/RMW.v \

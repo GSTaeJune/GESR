@@ -22,12 +22,11 @@
   GEMM (32×32 bit-serial SA)  │  RMW[j]                                      │
   ─────────────────────────  │                                              │
    in_GEMM  ─ INT32 (32b) ───┼─► int_to_bf16 ─ bf16 ─┐                       │
-   scale    ─ s9 (9b)    ────┤   (S1, 1reg)          ├─► bf16_adder ─ bf16 ─┐│
-                              │                       │   ┌──────────────┐  ││
-   Q[j] (SRAM read) ─ bf16 ──┼─► sram_dly[0:0] ───────┘   │ fp32_adder + │  ││
-                    (16b)     │   (in_SRAM 정렬)           │ fp32→bf16 RNE│  ││
-                              │                            └──────────────┘  ││
-                              │                            (S2..S5)          ││
+   scale    ─ s9 (9b)    ────┤   (S1·S2, 1reg)       ├─► bf16_adder ─ bf16 ─┐│
+                              │                       │   (native 3-블록:    ││
+   Q[j] (SRAM read) ─ bf16 ──┼─► sram_dly[0:0] ───────┘    정렬/가감산 →     ││
+                    (16b)     │   (in_SRAM 정렬)            정규화 → RNE)    ││
+                              │                            (S3..S5)          ││
                               └───────────────────────────────────────────┬─┘│
                                                                            │  │
    out_RMW ─ bf16 (16b) ───────────────────────────────────────────────┐  │  │
@@ -37,10 +36,12 @@
 
   폭 표기:  in_GEMM = INT32 32b  ·  scale = 9b signed  ·  나머지 psum 경로 = bf16 16b
   지연:     RMW 전체 = L_CONV(2) + L_ADD(3) = 5 cycle — 외부 계약 불변 (Phase 2c 재배치)
-  단 배치:  S1 INToRecFN+exp-add / S2 FNFromRecFN+narrow / S3 RecFNFromFN(widen)
-            / S4 AddRecFN / S5 FNFromRecFN+narrow → out_RMW 는 레지스터 출력
-            (내부 분배: int_to_bf16 1단 + bf16_adder 4단(L_IN/피연산자/L_SUM/L_OUT);
-             주요 FP 블록당 정확히 1단 — SRAM D 까지의 조합 꼬리 제거)
+  단 배치:  S1 i2b[F] |int|→LZC32→8b RNE / S2 i2b[B] scale·denorm·인코딩 /
+            S3 가산기[A] 정렬·가감산 / S4 가산기[B] 정규화 / S5 가산기[C] RNE·패킹
+            → out_RMW 는 레지스터 출력 (SRAM D 까지의 조합 꼬리 제거)
+            (내부 분배: int_to_bf16 1단 + bf16_adder 4단(L_IN/L_ADD/L_SUM/L_OUT);
+             2026-07-13 native 재작성 — 두 유닛 모두 손코딩 bf16 폭, HardFloat-free.
+             내부 데이터패스 11~12b 그리드, 알고리즘 설명은 각 파일 헤더 참조)
 ```
 
 첫 K-tile 은 `sram_D_use_zero=1` 로 SRAM 을 0x0000 으로 zero-prime 한 뒤,
@@ -53,16 +54,17 @@
 | `gemm_sram_top.v` | GEMM+RMW[32]+SRAM 통합 최상위 (pure structural, FSM 없음) | GEMM, RMW×32, sram_1rw_banked_mp | `run_top_elab.sh` → elab OK · `run_integration_sweep.sh` → `ALL 9 MODES PASSED` | active |
 | `GEMM.v` | MXP 비트-시리얼 SA 의 얇은 TOP 래퍼 | SystolicArray, station×32, Accumulator_Col×32 | (통합 sweep 로만) | active |
 | `RMW.v` | Read-Modify-Write 단위 (변환→덧셈), bf16 | int_to_bf16, bf16_adder | `run_rmw.sh` → `ALL 113 TESTS PASSED` | active |
-| `int_to_bf16.v` | INT32 + s9 scale → bf16 (v2) | INToRecFN_i32_e8_s8, FNFromRecFN_wrapper, fp32_to_bf16_rne | `run_int_to_bf16.sh` → `ALL 32312 TESTS PASSED` | active |
-| `bf16_adder.v` | bf16 덧셈 (fp32 도메인 계산 후 RNE narrow) | fp32_adder, fp32_to_bf16_rne | `run_bf16_adder.sh` → `ALL 200005 TESTS PASSED` | active |
-| `fp32_to_bf16_rne.v` | fp32 → bf16 RNE (순수 조합, subnormal 포함) | — (leaf) | `run_fp32_to_bf16_rne.sh` → `ALL 70012 TESTS PASSED` | active |
-| `fp32_adder.v` | IEEE-754 fp32 덧셈 (HardFloat AddRecFN) | RecFNFromFN_wrapper×2, AddRecFN, FNFromRecFN_wrapper | `run_fp32_adder.sh` → 단위 TB PASS | active (bf16_adder 경유) |
+| `int_to_bf16.v` | INT32 + s9 scale → bf16 (v3 native: LZC32 + 8b RNE ×2) | — (leaf) | `run_int_to_bf16.sh` → `ALL 32360 TESTS PASSED` | active |
+| `bf16_adder.v` | bf16 덧셈 (v3 native: 정렬→가감산→정규화→RNE, 11~12b) | — (leaf) | `run_bf16_adder.sh` → `ALL 200021 TESTS PASSED` | active |
+| `fp32_to_bf16_rne.v` | fp32 → bf16 RNE (순수 조합, subnormal 포함) | — (leaf) | `run_fp32_to_bf16_rne.sh` → `ALL 70012 TESTS PASSED` | **preserved** |
+| `fp32_adder.v` | IEEE-754 fp32 덧셈 (HardFloat AddRecFN) | RecFNFromFN_wrapper×2, AddRecFN, FNFromRecFN_wrapper | `run_fp32_adder.sh` → 단위 TB PASS | **preserved** |
 | `int_to_fp32.v` | INT32 + s9 scale → fp32 (fp32 시절 변환단) | INToRecFN_i32_e8_s24, FNFromRecFN_wrapper | `run_int_to_fp32.sh` → 단위 TB PASS | **preserved** |
 | `sram_1rw_banked_mp.v` | per-bank 포트 노출 1RW SRAM (32 bank, bf16 16b) | sram_1rw (leaf) ×NUM_BANKS | (통합 sweep 로만) | active |
 
-`int_to_fp32.v` 는 어디에도 인스턴스되지 않는다 — Phase 2b 에서 RMW 변환단이
-`int_to_bf16` 로 교체되며 데이터패스에서 빠졌다. HEAD 에 남겨둔 이유는 fp32 복구
-태그 `fp32-rmw-final` 의 앵커 + 단위 TB 회귀 유지. **무변경 보존.**
+`int_to_fp32.v`/`fp32_adder.v`/`fp32_to_bf16_rne.v` 는 어디에도 인스턴스되지 않는다 —
+2026-07-13 native 재작성으로 bf16 데이터패스가 HardFloat/fp32 유닛 없이 자립하면서
+데이터패스에서 빠졌다. HEAD 에 남겨둔 이유는 fp32 복구 태그 `fp32-rmw-final` 의
+앵커 + 각자의 단위 TB 회귀 유지. **무변경 보존.**
 
 ## HardFloat 번들
 
@@ -73,11 +75,13 @@ Berkeley HardFloat 를 두 파일로 vendored (`third_party/berkeley-hardfloat/`
 - `HardFloatBundle_bf16.v` — bf16 계열: `INToRecFN_i32_e8_s8`,
   `FNFromRecFN_bf16_wrapper`.
 
-두 번들은 모듈명이 서로소(name-disjoint)라 함께 컴파일된다. **`AddRecFN(8,8)`
-(bf16 폭 가산기) 는 elaborate 되지 않아** bf16 덧셈은 fp32 도메인 우회를 쓴다
-(`bf16_adder` 참고). `FNFromRecFN_bf16_wrapper` 는 v1 의 int→bf16 환원용이었으나,
-그 denormalization 이 RNE 없이 TRUNCATE 라 subnormal 이 1 ULP 낮게 나오는 문제로
-**현재 미사용** (번들에는 보존, `int_to_bf16.v` 헤더에 폐기 사유 상술).
+두 번들은 모듈명이 서로소(name-disjoint)라 함께 컴파일된다. **2026-07-13 native
+재작성 이후 bf16 데이터패스는 HardFloat 를 전혀 쓰지 않는다** — 번들이 남아 있는
+이유는 preserved fp32 유닛(`fp32_adder`/`int_to_fp32`)의 단위 TB 와 fp32 복구 라인.
+히스토리 참고: `AddRecFN(8,8)` (bf16 폭 가산기) 가 elaborate 되지 않아 Phase 2a~2c
+의 bf16 덧셈은 fp32 도메인 우회를 썼고, v1 의 `FNFromRecFN_bf16_wrapper` 는
+denormalization 이 RNE 없이 TRUNCATE 라 subnormal 1 ULP 결함으로 폐기됐다
+(스펙 §6.1~6.2). native v3 는 두 문제 모두 원천적으로 벗어난다.
 
 ## fp32 데이터패스 복구
 

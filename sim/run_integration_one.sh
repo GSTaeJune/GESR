@@ -26,19 +26,14 @@ BUILD="sim/build/${LABEL}"
 mkdir -p "$DUMP" "$BUILD"
 
 SRC_ROOT="gemm_sram.srcs/sources_1"
-HF_ROOT="third_party/berkeley-hardfloat"
 
 # Note: GEMM.v MUST appear before gemm_sram_top.v in xvlog list (task-7 plan fix).
 # Note: snapshot name is bare, not work.<snap>.
 # Note: -testplusarg "K=V" requires cmd //c wrap on Windows Git Bash (= is stripped otherwise).
 (cd "$BUILD" && \
     xvlog -sv \
-        ../../../$HF_ROOT/HardFloatBundle.v \
-        ../../../$HF_ROOT/HardFloatBundle_bf16.v \
         ../../../$SRC_ROOT/imports/Desktop/MXP/MXP.srcs/sources_1/new/*.v \
         ../../../$SRC_ROOT/imports/Desktop/sram/rtl/*.v \
-        ../../../$SRC_ROOT/new/fp32_adder.v \
-        ../../../$SRC_ROOT/new/fp32_to_bf16_rne.v \
         ../../../$SRC_ROOT/new/int_to_bf16.v \
         ../../../$SRC_ROOT/new/bf16_adder.v \
         ../../../$SRC_ROOT/new/RMW.v \

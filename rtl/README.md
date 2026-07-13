@@ -17,11 +17,11 @@
 1_top/         gemm_sram_top.v   ── 전체 묶음 (pure structural, FSM 없음 — TB 가 컨트롤러)
                GEMM.v            ── MXP TOP 래퍼 (32x32 bit-serial systolic; in_a=weight!)
 2_rmw_bf16/    RMW.v             ── psum 누산 유닛 (x32 col-parallel), L_CONV+L_ADD=5cy
-               int_to_bf16.v     ── INT32+scale -> bf16 (v2: fp32 도메인 shift + 단일 RNE + flush)
-               bf16_adder.v      ── bf16+bf16 (fp32 도메인 가산 -> RNE narrow)
-               fp32_to_bf16_rne.v── fp32 -> bf16 RNE narrower (조합, subnormal 포함)
-3_fp32_units/  fp32_adder.v      ── ACTIVE (bf16_adder 내부에서 사용)
+               int_to_bf16.v     ── INT32+scale -> bf16 (v3 native: LZC32 + 8b RNE x2, leaf)
+               bf16_adder.v      ── bf16+bf16 (v3 native: 정렬->가감산->정규화->RNE, 11~12b, leaf)
+3_fp32_units/  fp32_adder.v      ── PRESERVED (native 전환으로 데이터패스 미사용)
                int_to_fp32.v     ── PRESERVED (데이터패스 미사용; fp32 복구 태그 + 단위 TB 용)
+               fp32_to_bf16_rne.v── PRESERVED (v2 시절 공용 narrow 단; 자체 TB 70012 보존)
 4_sram/        sram_1rw_banked_mp.v ── 32-bank per-bank 포트 래퍼 (현 사용, DATA_WIDTH=16)
                sram_1rw.v           ── leaf 1RW (CEB/WEB active-low, WMASK active-high)
                sram_1rw_banked.v    ── 16-bank mux 형 래퍼 (다른 caller 용, 본 top 미사용)
@@ -39,9 +39,10 @@ GEMM ──INT32 psum──► RMW ──┬─ int_to_bf16 ──fp_a(bf16)─�
                                     └────── sram_1rw_banked_mp (1024 x 16b/bank) ◄──
 ```
 
-- HardFloat 번들 2개 co-compile: `third_party/berkeley-hardfloat/HardFloatBundle.v`(fp32) +
-  `HardFloatBundle_bf16.v`(INToRecFN_i32_e8_s8). 생성물이라 읽기 비권장 — 여기 복사 안 함.
-  `FNFromRecFN_bf16_wrapper` 는 denorm TRUNCATE 결함으로 미사용(번들에만 보존).
+- **bf16 데이터패스는 HardFloat-free** (2026-07-13 native 재작성): RMW/int_to_bf16/
+  bf16_adder 는 leaf 손코딩 Verilog 만으로 자립. HardFloat 번들 2개
+  (`third_party/berkeley-hardfloat/HardFloatBundle*.v`)는 preserved fp32 유닛의
+  단위 TB 와 fp32 복구 라인용으로만 남아 있다 (생성물이라 읽기 비권장 — 여기 복사 안 함).
 - fp32 시절 전체 복구: `git checkout fp32-rmw-final`
 
 ## 검증 게이트 (원본 기준 실행)
@@ -50,8 +51,8 @@ GEMM ──INT32 psum──► RMW ──┬─ int_to_bf16 ──fp_a(bf16)─�
 |---|---|---|
 | 전체 (end-to-end) | `bash sim/run_integration_sweep.sh` | `ALL 9 MODES PASSED` (bf16 golden bit-exact) |
 | RMW 유닛 | `bash sim/run_rmw.sh` | `ALL 113 TESTS PASSED` |
-| int_to_bf16 | `bash sim/run_int_to_bf16.sh` | `ALL 32312 TESTS PASSED` |
-| bf16_adder / narrower | `run_bf16_adder.sh` / `run_fp32_to_bf16_rne.sh` | 200005 / 70012 |
+| int_to_bf16 | `bash sim/run_int_to_bf16.sh` | `ALL 32360 TESTS PASSED` |
+| bf16_adder / narrower | `run_bf16_adder.sh` / `run_fp32_to_bf16_rne.sh` | 200021 / 70012 |
 | top elab | `bash sim/run_top_elab.sh` | elab clean |
 
 ## 합성 실측 (OOC, Kintex-7 160T-1, 250MHz 제약 — V7 라이선스 부재로 대체 측정)

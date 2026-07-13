@@ -9,8 +9,9 @@
 // ml_dtypes 의 fp32->bf16 및 Phase-1 f32_to_bf16_bits_rne 레퍼런스와 bit 일치.
 //
 // 포트: in(fp32 32b) → out(bf16 16b). clk 없음 (순수 조합).
-// 인스턴스: 없음 (leaf). 인스턴스되는 곳: int_to_bf16, bf16_adder.
-// 상태: ACTIVE (두 bf16 primitive 의 공용 narrow 단).
+// 인스턴스: 없음 (leaf). 인스턴스되는 곳: 없음 — 2026-07-13 native 재작성으로
+//   int_to_bf16 v3 / bf16_adder v3 가 자체 라운더를 내장하며 데이터패스에서 빠짐.
+// 상태: PRESERVED (자체 TB 게이트 70012 로 보존; fp32 복구 라인 참고용).
 //
 // 검증: `bash sim/run_fp32_to_bf16_rne.sh` → 기대 "ALL 70012 TESTS PASSED"
 //   (subnormal 포함 단일 RNE 를 ml_dtypes 로 전수/근사 크로스체크).

@@ -1,112 +1,163 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////////
-// int_to_bf16 (v2) — INT32 + 9비트 signed 스케일 → IEEE bfloat16 변환기.
+// int_to_bf16 (v3, native) — INT32 + 9비트 signed 스케일 → IEEE bfloat16 변환기.
 //
-// 동작: out_bf16 = bf16_RNE( bf16(in_int) * 2^(scale - 127) )
-//   1) INToRecFN_i32_e8_s8 : in_int 을 8-bit significand 로 RNE 라운딩
-//      (= golden 의 r8 = bf16(block_int) 와 동일한 첫 라운딩).
-//   2) recoded bf16 -> recoded fp32 EXACT widen: {sign, exp9, frac7, 16'b0}.
-//      bf16/fp32 는 expWidth=8 공유 -> 9비트 recoded 지수 인코딩이 동일,
-//      가수만 0-패딩 (int 입력이라 zero/normal 만 나옴 -> 무손실).
-//   3) 지수 필드에 (scale-127) 더하기 = 곱하기 2^(scale-127) (int_to_fp32 트릭).
-//   4) FNFromRecFN_wrapper (fp32) : recoded -> IEEE fp32.
-//      subnormal 밴드 (new_exp10 in [122,129]) 의 denorm shift 는 0..7 로
-//      0-패딩 16비트만 떨어뜨리므로 EXACT (r8*2^E 의 정확한 fp32 표현).
-//   5) fp32_to_bf16_rne : 단 한 번의 RNE (subnormal 포함, 2a 근사-전수 검증 블록).
+// 하는 일: out_bf16 = bf16_RNE( bf16(in_int) * 2^(scale - 127) )
+//   즉 (1) 정수를 8비트 유효숫자로 RNE 라운딩해 r8 을 만들고 (= golden 의
+//   bf16(block_int)), (2) 거기에 2의 거듭제곱 스케일을 곱한 값을 bf16 으로
+//   다시 RNE 인코딩한다. 두 번의 라운딩이 golden(ml_dtypes) 모델의 의미
+//   그대로다 — 스케일 곱 자체는 정확하고, 결과가 subnormal 밴드에 떨어질
+//   때만 두 번째 라운딩(denormalization RNE)이 실제로 값을 바꾼다.
 //
-// 깊은 언더플로 flush: new_exp10 < 122 (즉 |값| < 2^-134 = bf16 최소 subnormal
-//   의 절반) 이면 recoded ±0 으로 직접 flush — RNE 상 정확히 ±0 인 영역.
-//   이 flush 가 (i) 음수 new_exp10 의 9비트 절단 wrap (inf/NaN 발산, int_to_fp32
-//   에서 물려받은 잠복 버그) 과 (ii) fp32 denorm shifter 의 깊은-지수 aliasing
-//   위험을 함께 차단한다. 비교는 10-bit signed 전체값으로 하므로 wrap 없음.
+// 왜 native 인가 (2026-07-13, A6):
+//   v2 는 HardFloat 조합 (INToRecFN_i32_e8_s8 → recoded 지수 add → FNFromRecFN
+//   → fp32_to_bf16_rne) 이었다 — 정확했지만 기계 생성 netlist 라 읽을 수 없고
+//   recoded 포맷 우회가 불필요하게 크다. v3 는 같은 수치 계약을 손으로 다시
+//   쓴 것: LZC + 시프트 + 8비트 RNE 두 번이 전부다. (v2 는 git history 에;
+//   v2 가 고친 v1 의 "denorm TRUNCATE" 결함 이력은 spec §6.2 참조 — v3 의
+//   subnormal 라운더가 그 결함 클래스의 witness 벡터들로 게이트된다.)
 //
-// v1 (INToRecFN_s8 -> exp-add -> FNFromRecFN_bf16_wrapper) 폐기 이유:
-//   FNFromRecFN 의 denormalization 은 TRUNCATE (round/sticky 없음,
-//   HardFloatBundle_bf16.v:179-181) -> subnormal 결과가 golden(RNE) 대비
-//   1 ULP 낮게 나옴 (리뷰 라운드1 Critical, 어떤 flush 임계로도 교정 불가).
-//   FNFromRecFN_bf16_wrapper 는 이 파일에서 더 이상 인스턴스하지 않음
-//   (번들에는 보존).
+// ── 알고리즘 (두 개의 조합 절반) ──────────────────────────────────────────
 //
-// 파이프라인: L_CONV단 (>=1). 레지스터는 스케일 보정 끝난 recoded fp32 (33b)
-// 위에 위치 — 입력 변환과 출력 환원(4,5)은 모두 조합 회로.
+//   [F] 앞절반 — INT32 → r8 (첫 번째 RNE):
+//     1. 절댓값: mag = |in_int| 를 u32 로 (-2^31 → 0x80000000 그대로 = exact).
+//     2. LZC32 → lz. norm = mag << lz 로 MSB 를 bit31 에 정렬.
+//     3. sig8 = norm[31:24] (hidden 포함 8b), G = norm[23], 나머지는 sticky.
+//        RNE: up = G & (LSB | sticky). 캐리(0xFF+1) 는 sig=0x80 에 지수+1 로
+//        재정규화. 비편향 지수 E = (31 - lz) + carry, r8 = ±sig8 · 2^(E-7).
+//     * in_int == 0 은 플래그로 따로 흘린다 — 0 은 지수/스케일 조작 없이
+//       +0 그대로 통과해야 한다 (일반 경로에 태우면 스케일이 큰 경우
+//       sig8=0 인 채 inf 인코딩으로 새는 함정이 있다).
+//
+//   [B] 뒷절반 — 스케일 반영 + bf16 인코딩 (필요시 두 번째 RNE):
+//     1. 결과 biased 지수 e_tot = E + signed(scale). 10비트 signed 로 전 구간
+//        wrap 없음: E ∈ [0,32], scale ∈ [-256,255] → e_tot ∈ [-256,287].
+//        (v2 가 flush 로 막았던 "9비트 지수 wrap" 잠복 버그가 폭 자체로 소멸.)
+//     2. e_tot >= 255 → ±inf 포화 (golden 의 fp32 overflow → inf 와 동일).
+//        e_tot ∈ [1,254] → normal {sign, e_tot, sig8[6:0]} — 스케일 곱은
+//        2의 거듭제곱이라 이 구간에선 재라운딩이 없다 (exact).
+//     3. e_tot <= 0 → subnormal 밴드: s = 1 - e_tot 만큼 sig8 을 우측 시프트
+//        하며 GRS 로 RNE (bf16_adder 와 동일한 11b 그리드/22b funnel 재사용
+//        패턴). 여기가 두 번째 라운딩이며:
+//          - f8 = 0x80 으로 올라서면 min normal 로 자연 승격,
+//          - f8 = 0 이면 부호 있는 0 — 깊은 언더플로 flush 가 별도 임계값
+//            비교 없이 라운더에서 저절로 나온다 (s >= 9 면 G=0 → 항상 0;
+//            정확히 2^-134 는 tie → +0(짝수), 1.5·2^-134 는 min subnormal 로
+//            올림 — oracle 의 boundary 벡터들이 이 밴드를 조밀하게 고정).
+//
+// ── 파이프라인 (전체 지연 = L_CONV 단, >= 1) ──────────────────────────────
+//   중간 절단점([F] 끝, 25b 페이로드 {sign, zero, sig8, E, scale}) 에 1단,
+//   나머지 L_CONV-1 단은 출력 bf16 뒤에 체인. scale 을 페이로드에 함께 태워
+//   [B] 가 항상 같은 벡터의 스케일을 보게 한다 (skew 방지 — 외부에서 scale 이
+//   in_int 와 같은 사이클에 도착한다는 RMW 계약과 맞물림).
+//   RMW 는 L_CONV=1 로 인스턴스 → [F] 가 S1, [B] 가 S2 스테이지가 된다
+//   (Phase 2c 재배치 계약 유지; 남은 1단은 bf16_adder 의 L_IN 이 담당).
 //
 // 포트: in_int(INT32) + scale(s9) → out_bf16(bf16 16b). rst 미사용.
-// 인스턴스: INToRecFN_i32_e8_s8 (bf16 번들) + FNFromRecFN_wrapper (fp32 번들)
-//   + fp32_to_bf16_rne (로컬). 인스턴스되는 곳: RMW.
-// 상태: ACTIVE (v2 — RMW 변환단 본선). v1(FNFromRecFN_bf16_wrapper 직결)은 폐기.
+// 인스턴스: 없음 (leaf, HardFloat 미사용). 인스턴스되는 곳: RMW.
+// 상태: ACTIVE (v3 native — RMW 변환단 본선). v1/v2 는 git history.
 //
-// 검증: `bash sim/run_int_to_bf16.sh` → 기대 "ALL 32312 TESTS PASSED"
-//   (oracle sim/bf16_vectors.py 와 bit-exact; 음수 9비트 scale 언더플로 포함).
+// 검증: `bash sim/run_int_to_bf16.sh` → 기대 "ALL 32360 TESTS PASSED"
+//   (oracle sim/bf16_vectors.py 와 bit-exact; 음수 scale 언더플로 + subnormal
+//    boundary 조밀 벡터 + full-range INT32 directed 포함. 듀얼 DUT 로
+//    L_CONV=2/1 동시 검증.)
 //
-// Spec: docs/superpowers/specs/2026-07-08-rmw-bf16-design.md (§6.1 carry-over #1)
+// Spec: docs/superpowers/plans/2026-07-13-bf16-native-datapath.md (§3)
 //////////////////////////////////////////////////////////////////////////////////
 
 module int_to_bf16 #(
     parameter L_CONV = 2          // 파이프라인 단수 (>=1)
 )(
     input  wire        clk,
-    input  wire        rst,        // 미사용 — FPGA 파워업 시 reg가 0으로 초기화됨
+    input  wire        rst,        // 미사용 (인터페이스 호환용)
     input  wire [31:0] in_int,     // 부호 있는 INT32 입력
     input  wire [8:0]  scale,      // 9비트 signed 스케일
     output wire [15:0] out_bf16    // IEEE bfloat16 결과
 );
-    localparam REC_W = 33;          // recoded fp32 폭 (IEEE 32 + 1)
 
-    // 1) INT32 -> recoded bf16 변환 (조합). 8-bit significand RNE = golden r8.
-    wire [16:0] recFN_bf16;
-    INToRecFN_i32_e8_s8 u_i2f (
-        .io_signedIn       (1'b1),
-        .io_in             (in_int),
-        .io_roundingMode   (3'd0),         // RNE
-        .io_detectTininess (1'b0),
-        .io_out            (recFN_bf16),
-        .io_exceptionFlags ()
-    );
+    // 32비트 벡터의 leading-zero count (0..31). 상행 루프의 "마지막 대입 승리"
+    // 가 최상위 set 비트를 찾는 priority encoder 로 합성된다. x==0 은 호출측
+    // 에서 zero 플래그로 우회하므로 반환값이 쓰이지 않는다.
+    function [4:0] lzc32;
+        input [31:0] x;
+        integer k;
+        begin
+            lzc32 = 5'd31;
+            for (k = 0; k <= 31; k = k + 1)
+                if (x[k]) lzc32 = 5'd31 - k;
+        end
+    endfunction
 
-    // 2) recoded bf16 -> recoded fp32 widen (exact).
-    wire        sign_bit  = recFN_bf16[16];
-    wire [8:0]  exp_field = recFN_bf16[15:7];
-    wire [22:0] sig_field = {recFN_bf16[6:0], 16'b0};
+    // ── [F] 앞절반: INT32 → r8 = ±sig8 · 2^(E-7)  (조합) ──────────────────
+    wire        sign    = in_int[31];
+    wire [31:0] mag     = sign ? (~in_int + 32'd1) : in_int;  // |int|, -2^31 안전
+    wire        is_zero = (in_int == 32'd0);
 
-    // 3) 지수 더하기. 10비트 signed 는 전 도메인에서 wrap 없음: 0 아닌 int32 의
-    //    recoded 지수는 [256, 287], scale 은 [-256, 255] -> new_exp10 in
-    //    [-127, 415]. 위쪽 clamp 불필요 — 최대 415 는 inf 인코딩 밴드 [384, 447]
-    //    안 (정상 saturate, golden 도 inf), NaN 밴드 (>=448) 도달 불가.
-    wire signed [9:0] exp_ext   = $signed({1'b0, exp_field});
-    wire signed [9:0] scale_ext = $signed(scale);
-    wire signed [9:0] new_exp10 = exp_ext + scale_ext - 10'sd127;
-    wire [8:0]        new_exp   = new_exp10[8:0];
+    wire [4:0]  lz   = lzc32(mag);
+    wire [31:0] norm = mag << lz;              // MSB 를 bit31 로 (mag != 0 전제)
 
-    // 깊은 언더플로 flush (헤더 설명 참조): recoded 지수 123 = bf16 최소
-    // subnormal 2^-133, 122 밴드 [2^-134, 2^-133) 는 RNE 반올림 대상이라 통과,
-    // 그 아래 (<122) 는 정확히 ±0.
-    wire underflow_z = (new_exp10 < 10'sd122);
+    // 8비트 유효숫자 RNE: L = sig8_t[0], G = norm[23], sticky = 그 아래 전부.
+    wire [7:0]  sig8_t = norm[31:24];
+    wire        g_bit  = norm[23];
+    wire        stky   = |norm[22:0];
+    wire        up_f   = g_bit & (sig8_t[0] | stky);
+    wire [8:0]  sig9_f = {1'b0, sig8_t} + {8'd0, up_f};
+    wire        rc_f   = sig9_f[8];                    // 0xFF+1 → 재정규화
+    wire [7:0]  sig8_f = rc_f ? 8'h80 : sig9_f[7:0];
+    wire [5:0]  e_unb  = {1'b0, 5'd31 - lz} + {5'd0, rc_f};   // E ∈ [0, 32]
 
-    // Zero passthrough: in_int=0 이면 recoded zero 인코딩을 그대로 widen 해서
-    // 통과 (지수 조작 금지 — 조작하면 zero 인코딩이 깨짐).
-    wire int_is_zero = (in_int == 32'h00000000);
-    wire [REC_W-1:0] recFN_scaled =
-          int_is_zero ? {sign_bit, exp_field, sig_field}
-        : underflow_z ? {sign_bit, 9'd0, 23'd0}
-                      : {sign_bit, new_exp, sig_field};
+    // ── 중간 절단점: 1단 레지스터 (페이로드 25b — scale 도 같이 지연) ──────
+    localparam PW = 25;
+    wire [PW-1:0] f_w = {sign, is_zero, sig8_f, e_unb, scale};
+    reg  [PW-1:0] f_q;
+    always @(posedge clk)
+        f_q <= f_w;
 
-    // 4) L_CONV단 파이프라인 레지스터 체인 (스케일 보정 끝난 recoded fp32 위에)
-    reg [REC_W-1:0] recFN_dly [0:L_CONV-1];
-    integer di;
-    always @(posedge clk) begin
-        recFN_dly[0] <= recFN_scaled;
-        for (di = 1; di < L_CONV; di = di + 1)
-            recFN_dly[di] <= recFN_dly[di-1];
-    end
+    wire        q_sign  = f_q[24];
+    wire        q_zero  = f_q[23];
+    wire [7:0]  q_sig8  = f_q[22:15];
+    wire [5:0]  q_e     = f_q[14:9];
+    wire [8:0]  q_scale = f_q[8:0];
 
-    // 5) recoded fp32 -> IEEE fp32 (exact) -> 6) bf16 RNE narrow (조합, 출력단)
-    wire [31:0] fp32_exact;
-    FNFromRecFN_wrapper u_out (
-        .in  (recFN_dly[L_CONV-1]),
-        .out (fp32_exact)
-    );
-    fp32_to_bf16_rne u_narrow (
-        .in  (fp32_exact),
-        .out (out_bf16)
-    );
+    // ── [B] 뒷절반: 스케일 반영 + 인코딩  (조합) ───────────────────────────
+
+    // 결과 biased 지수. biased(r8) = E + 127 에 (scale - 127) 을 더하면
+    // 127 이 상쇄되어 e_tot = E + scale. 10b signed 로 전 구간 표현.
+    wire signed [9:0] e_tot = $signed({4'd0, q_e}) + $signed(q_scale);
+
+    // subnormal 라운더: s = 1 - e_tot 만큼 {sig8, G,R,S} 그리드에서 우측
+    // 시프트 (bf16_adder 와 동일한 22b funnel 패턴 — 떨어진 비트 전부 S 로
+    // OR). f7 필드의 정수 그리드에서 RNE. s > 11 은 11 로 클램프해도 안전
+    // (그때 sig8 전체가 sticky → up=0 → ±0 = 깊은 언더플로 flush).
+    wire signed [9:0] s_amt = 10'sd1 - e_tot;                 // e_tot<=0 에서 >= 1
+    wire [3:0]  sc4   = (s_amt > 10'sd11) ? 4'd11 : s_amt[3:0];
+    wire [10:0] body  = {q_sig8, 3'b000};
+    wire [21:0] wide  = {body, 11'b0} >> sc4;
+    wire [10:0] den   = {wide[21:12], wide[11] | (|wide[10:0])};
+    wire        up_b  = den[2] & (den[3] | den[1] | den[0]);  // RNE
+    wire [7:0]  f8    = den[10:3] + {7'd0, up_b};   // <= 0x80 (min-normal 승격)
+
+    // 인코딩. zero 플래그가 최우선 (헤더 [F] 의 함정 참조).
+    wire [15:0] bf16_w =
+          q_zero               ? 16'h0000
+        : (e_tot >= 10'sd255)  ? {q_sign, 8'hFF, 7'd0}          // inf 포화
+        : (e_tot >= 10'sd1)    ? {q_sign, e_tot[7:0], q_sig8[6:0]}  // normal, exact
+        : (f8[7])              ? {q_sign, 8'd1, 7'd0}           // 올림 → min normal
+        :                        {q_sign, 8'd0, f8[6:0]};       // subnormal / ±0 flush
+
+    // ── 출력단: 나머지 L_CONV-1 단 레지스터 체인 ───────────────────────────
+    generate
+        if (L_CONV > 1) begin : g_out_reg
+            reg [15:0] o_q [0:L_CONV-2];
+            integer oi;
+            always @(posedge clk) begin
+                o_q[0] <= bf16_w;
+                for (oi = 1; oi < L_CONV-1; oi = oi + 1)
+                    o_q[oi] <= o_q[oi-1];
+            end
+            assign out_bf16 = o_q[L_CONV-2];
+        end else begin : g_out_comb
+            assign out_bf16 = bf16_w;
+        end
+    endgenerate
 endmodule

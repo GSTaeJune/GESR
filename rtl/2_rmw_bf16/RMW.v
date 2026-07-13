@@ -5,13 +5,14 @@
 // 하는 일: GEMM이 뱉은 INT32 부분합을 bf16으로 변환한 뒤, SRAM에 저장돼 있던
 // 이전 부분합(bf16)과 더해서 다시 SRAM에 쓸 값을 만든다.
 //
-// 데이터 패스 (Phase 2c 재배치 — 5개 FP 블록마다 레지스터 1단, out_RMW 는 레지스터 출력):
+// 데이터 패스 (Phase 2c 재배치 유지 + 2026-07-13 native 재작성 — 블록당 레지스터
+// 1단, out_RMW 는 레지스터 출력. 두 하위 유닛 모두 손코딩 bf16 폭, HardFloat-free):
 //
-//   S1: INToRecFN + 지수-add/flush     -> #1  (int_to_bf16 내부, L_CONV-1 = 1단)
-//   S2: FNFromRecFN + narrow (i2b 꼬리) -> #2  (bf16_adder L_IN 레지스터, a/b 공통 16b)
-//   S3: widen(wire) + RecFNFromFN x2    -> #3  (fp32_adder 피연산자단, L_ADD-2 = 1)
-//   S4: AddRecFN                        -> #4  (fp32_adder L_SUM 레지스터, recoded 합 33b)
-//   S5: FNFromRecFN + narrow (adder 꼬리)-> #5  (bf16_adder L_OUT 레지스터, 16b)
+//   S1: i2b [F] |int|→LZC32→8b RNE      -> #1  (int_to_bf16 중간 절단, L_CONV-1 = 1단)
+//   S2: i2b [B] scale/denorm/인코딩      -> #2  (bf16_adder L_IN 레지스터, a/b 공통 16b)
+//   S3: 가산기 [A] 정렬/가감산 (11~12b)  -> #3  (bf16_adder 내부, L_ADD-2 = 1단)
+//   S4: 가산기 [B] 정규화 (LZC+클램프)   -> #4  (bf16_adder L_SUM 레지스터, 25b)
+//   S5: 가산기 [C] RNE 라운드/패킹       -> #5  (bf16_adder L_OUT 레지스터, 16b)
 //   out_RMW = #5 출력 (레지스터) -> D-mux -> SRAM D
 //
 //   in_GEMM (INT32) ─┐

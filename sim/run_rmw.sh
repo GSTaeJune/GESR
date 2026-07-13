@@ -4,14 +4,10 @@ set -e
 cd "$(dirname "$0")"
 bash clean.sh
 
-HF=../third_party/berkeley-hardfloat
 SRC=../gemm_sram.srcs/sources_1/new
 
+# native bf16 데이터패스 (2026-07-13) — HardFloat/fp32 유닛 불필요
 xvlog -nolog \
-    "$HF"/HardFloatBundle.v \
-    "$HF"/HardFloatBundle_bf16.v \
-    "$SRC"/fp32_adder.v \
-    "$SRC"/fp32_to_bf16_rne.v \
     "$SRC"/int_to_bf16.v \
     "$SRC"/bf16_adder.v \
     "$SRC"/RMW.v \
