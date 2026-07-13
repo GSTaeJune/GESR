@@ -491,3 +491,15 @@ git commit -m "docs(rmw-rebalance): stage map, synth delta, reading-copy refresh
 - [ ] **Step 8.1:** Dispatch code review per project rule: comprehensive reviewer + adversarial reviewer (>=1, standing user rule) on the full branch diff (`main..HEAD`). Adversarial focus: (a) any stage where a register move could change sampling of a signal that is NOT purely feedforward; (b) TB dual-DUT wait-bound correctness (held inputs, settled outputs); (c) generate-block legality under XSim Verilog-2001; (d) false-green risks in the pass sentinels.
 - [ ] **Step 8.2:** Fix findings, re-run affected gates, iterate until no blocking issues.
 - [ ] **Step 8.3:** Use superpowers:finishing-a-development-branch — expected outcome per project convention: local ff-merge to `main`, delete branch, NO push (push only on explicit request).
+
+---
+
+## Outcome (2026-07-13, recorded at Task 6/7)
+
+**All gates green, zero deviations from plan code blocks:** fp32_adder PASS / bf16_adder 200005 (both configs via dual-DUT) / int_to_bf16 32312 (L_CONV 2 and 1) / rmw 113 / top elab / fp32_to_bf16_rne 70012 / int_to_fp32 PASS / integration ALL 9 MODES PASSED (bit-exact) / mixed ALL 3 PASSED. Commits 655682b, dc65f25, e633150, 8e877d0.
+
+**Synth (OOC K7-160T, 4ns) — the honest-measurement finding:**
+- Rebalanced: `SYNTH_SUMMARY mode=bf16 WNS=-8.793 LUT_CELLS=866 FF_CELLS=148`; util 744 Slice LUTs (SRL 0) / 148 FF. Critical path = S4 stage alone (`recFN_a_dly[0] -> AddRecFN -> g_sum_reg.sum_dly[0]`), est. 12.36ns = logic 4.09 (29 levels) + route 8.27 (pre-place estimate).
+- Baseline `-2.547 (~153MHz)` was a HALF-MEASUREMENT: out_RMW was combinational-to-port, so the whole AddRecFN(+FNFromRecFN+narrow) path sat in the `no_output_delay` (untimed) group — the script sets only `create_clock`, no input/output delays (57 no_input_delay / 16 no_output_delay ports confirmed in timing.rpt). Baseline WNS timed only Span B. The two WNS numbers must NOT be compared directly.
+- Step 6.2's "expect WNS improves substantially" premise was therefore flawed — the plan's hedge branch applies: RTL is correct (all gates green), the rebalance made timing measurement honest and removed the SRAM-D combinational tail (registered out_RMW), and the true bottleneck is now proven to be the single-stage AddRecFN. **250MHz requires the T3 AddRecFN internal split — next decision belongs to the human.**
+- Ops gotcha recorded: `-nojournal -nolog` must precede `-tclargs`, else they are consumed as the script's part argument (`synth_design -part -nojournal` error; first post-change run failed this way and left stale baseline reports in place — detected via identical-to-baseline numbers + commented-out SYNTH_SUMMARY grep hit).

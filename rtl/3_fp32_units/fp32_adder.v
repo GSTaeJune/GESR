@@ -15,8 +15,10 @@
 //   입력에서 한 번 변환(RecFN←FN), 출력에서 한 번 환원(FN←RecFN)한다.
 //
 // 파이프라인 구조:
-//   레지스터단(L_ADD개)을 33비트 recoded 신호 위에 둔다. 그래서 입출력 경계의
-//   recode/un-recode는 모두 조합 회로다. 입력값 → 출력은 L_ADD 사이클 지연.
+//   L_ADD단 레지스터는 recoded 피연산자 위에 둔다 (AddRecFN 앞). L_SUM단
+//   레지스터는 recoded 합 위에 둔다 (AddRecFN 뒤, FNFromRecFN 앞). 그래서
+//   입출력 경계의 recode/un-recode는 모두 조합 회로다. 전체 지연 = L_ADD + L_SUM
+//   사이클. 기본값 (3,0) 은 종전 고정 동작(전량 피연산자단)을 그대로 재현한다.
 //
 // 포트: a,b(fp32 32b) → sum(fp32 32b, RNE). rst 미사용.
 // 인스턴스: RecFNFromFN_wrapper(x2) + AddRecFN + FNFromRecFN_wrapper (fp32 번들).
@@ -31,7 +33,8 @@
 //////////////////////////////////////////////////////////////////////////////////
 
 module fp32_adder #(
-    parameter L_ADD = 3            // 파이프라인 단수 (>=1)
+    parameter L_ADD = 3,           // 피연산자단(recoded) 파이프라인 단수 (>=1)
+    parameter L_SUM = 0            // 합(recoded)단 파이프라인 단수 (>=0, AddRecFN 뒤)
 )(
     input  wire        clk,
     input  wire        rst,        // 미사용 — FPGA 파워업 시 reg가 0으로 초기화됨
@@ -84,9 +87,26 @@ module fp32_adder #(
         .io_exceptionFlags ()           // 사용 안 함 (overflow/inexact 등 5비트 플래그)
     );
 
+    // 3.5) L_SUM단 결과 레지스터 (recoded 합 위에; L_SUM=0 이면 조합 통과)
+    wire [REC_W-1:0] recFN_sum_dly;
+    generate
+        if (L_SUM > 0) begin : g_sum_reg
+            reg [REC_W-1:0] sum_dly [0:L_SUM-1];
+            integer si;
+            always @(posedge clk) begin
+                sum_dly[0] <= recFN_sum;
+                for (si = 1; si < L_SUM; si = si + 1)
+                    sum_dly[si] <= sum_dly[si-1];
+            end
+            assign recFN_sum_dly = sum_dly[L_SUM-1];
+        end else begin : g_sum_comb
+            assign recFN_sum_dly = recFN_sum;
+        end
+    endgenerate
+
     // 4) recoded -> IEEE-754 FP32 환원 (조합 회로, 출력단에서)
     FNFromRecFN_wrapper u_out (
-        .in  (recFN_sum),
+        .in  (recFN_sum_dly),
         .out (sum)
     );
 endmodule

@@ -22,12 +22,12 @@
   GEMM (32×32 bit-serial SA)  │  RMW[j]                                      │
   ─────────────────────────  │                                              │
    in_GEMM  ─ INT32 (32b) ───┼─► int_to_bf16 ─ bf16 ─┐                       │
-   scale    ─ s9 (9b)    ────┤   (L_CONV=2)          ├─► bf16_adder ─ bf16 ─┐│
+   scale    ─ s9 (9b)    ────┤   (S1, 1reg)          ├─► bf16_adder ─ bf16 ─┐│
                               │                       │   ┌──────────────┐  ││
-   Q[j] (SRAM read) ─ bf16 ──┼─► sram_dly[L_CONV] ────┘   │ fp32_adder + │  ││
+   Q[j] (SRAM read) ─ bf16 ──┼─► sram_dly[1] ─────────┘   │ fp32_adder + │  ││
                     (16b)     │   (in_SRAM 정렬)           │ fp32→bf16 RNE│  ││
                               │                            └──────────────┘  ││
-                              │                            (L_ADD=3)         ││
+                              │                            (S2..S5)          ││
                               └───────────────────────────────────────────┬─┘│
                                                                            │  │
    out_RMW ─ bf16 (16b) ───────────────────────────────────────────────┐  │  │
@@ -36,7 +36,11 @@
                                  col j ─► bank j  (충돌 0)
 
   폭 표기:  in_GEMM = INT32 32b  ·  scale = 9b signed  ·  나머지 psum 경로 = bf16 16b
-  지연:     RMW 전체 = L_CONV(2) + L_ADD(3) = 5 cycle
+  지연:     RMW 전체 = L_CONV(2) + L_ADD(3) = 5 cycle — 외부 계약 불변 (Phase 2c 재배치)
+  단 배치:  S1 INToRecFN+exp-add / S2 FNFromRecFN+narrow / S3 RecFNFromFN(widen)
+            / S4 AddRecFN / S5 FNFromRecFN+narrow → out_RMW 는 레지스터 출력
+            (내부 분배: int_to_bf16 1단 + bf16_adder 4단(L_IN/피연산자/L_SUM/L_OUT);
+             주요 FP 블록당 정확히 1단 — SRAM D 까지의 조합 꼬리 제거)
 ```
 
 첫 K-tile 은 `sram_D_use_zero=1` 로 SRAM 을 0x0000 으로 zero-prime 한 뒤,

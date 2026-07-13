@@ -56,12 +56,17 @@ GEMM ──INT32 psum──► RMW ──┬─ int_to_bf16 ──fp_a(bf16)─�
 
 ## 합성 실측 (OOC, Kintex-7 160T-1, 250MHz 제약 — V7 라이선스 부재로 대체 측정)
 
-| 유닛 | LUT | FF | Fmax(추정) |
+| 유닛 | LUT | FF | 타이밍 (4ns 제약, pre-place 추정) |
 |---|---|---|---|
-| RMW (bf16) | 768 | 99 | ~153 MHz |
-| RMW (fp32 시절) | 1183 | 193 | ~157 MHz |
-| psum SRAM bank 16b | 293 (LUTRAM) | 16 | 250MHz 여유 |
+| RMW (bf16, **Phase 2c 재배치**) | 744 (SRL 0) | 148 | WNS **-8.79** — S4(AddRecFN 단독 스테이지) est. 12.4ns (logic 4.1 + route 8.3) |
+| RMW (bf16, 재배치 전) | 768 (SRL 34) | 99 | "-2.55 (~153MHz)" 는 **반쪽 측정** — out_RMW 가 조합→포트라 AddRecFN 경로가 no_output_delay 로 untimed. 재배치 후 수치와 직접 비교 금지 |
+| RMW (fp32 시절) | 1183 | 193 | ~157 MHz (동일하게 반쪽 측정) |
+| psum SRAM bank 16b | 293 (LUTRAM) | 16 | 250MHz 여유 (참고: SRAM RTL 은 sim 전용, 실물은 CACTI/파운드리 매크로) |
 | psum SRAM bank 32b 시절 | 581 | 32 | 동일 |
 
-x32 합계 RMW+SRAM 기준 **-40% LUT**. 두 RMW 모두 250MHz 는 미달 — timing closure 는 향후 과제.
-스크립트: `work/synth_rmw/synth.tcl`
+Phase 2c 재배치(2026-07-13)로 전 경로가 reg-to-reg 가 되어 타이밍이 **정직하게** 측정된다.
+진짜 병목 = AddRecFN 한 스테이지 (est. 12.4ns; placement 후 개선되나 250MHz 는 불가) —
+250MHz 도달은 AddRecFN 내부 분할(T3, 별도 결정) 필요. 재배치 자체는 latency 5cy 불변 +
+bit-exact 게이트 전부 green + out_RMW 레지스터 출력화(SRAM D 조합 꼬리 제거, PNR 유리).
+스크립트: `work/synth_rmw/synth.tcl` (호출: `vivado -mode batch -nojournal -nolog -source
+work/synth_rmw/synth.tcl -tclargs bf16` — 플래그는 반드시 -tclargs **앞**에).

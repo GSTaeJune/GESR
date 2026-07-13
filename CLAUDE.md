@@ -6,6 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 2. After completing a logical chunk of work (one or several related tasks, e.g. tasks 1–3), run `/superpowers:requesting-code-review` and `/review`, iterating on their feedback until no blocking issues remain. Reviews don't need to run per-task — group related tasks into a coherent unit before reviewing. Minor or optional suggestions don't need to block convergence.
 
+## Next session kickoff (2026-07-13, **RMW pipeline rebalance Phase 2c 랜딩 — 5cy 유지 레지스터 재배치 + out_RMW 레지스터 출력화. 게이트 전부 green**)
+
+**무엇/왜**: 9-에이전트 RTL 분석 + fable adversarial 선별(2026-07-12)의 T2 실행. 기존 5단 파이프라인은 레지스터 5개 중 3개가 wire-shift 자리(빈 스테이지)이고 두 reg-to-reg 구간에 FP 블록이 몰려 있었음. 재배치 후 = **주요 FP 블록당 정확히 1단**: S1 INToRecFN+exp-add / S2 FNFromRecFN+narrow / S3 RecFNFromFN / S4 AddRecFN / S5 FNFromRecFN+narrow, **out_RMW 레지스터 출력**(SRAM D 조합 꼬리 제거 — PNR 매크로 D-setup 에 유리). 외부 계약 불변(L_CONV+L_ADD=5cy, rmw_tb/top TB 무수정). plan+outcome: `docs/superpowers/plans/2026-07-13-rmw-pipeline-rebalance.md`. 브랜치 `feat/rmw-pipeline-rebalance`.
+
+- **파라미터 표면**(전부 default=구동작 → 단위 TB 무변경 green): `fp32_adder #(L_ADD=3, L_SUM=0)` / `bf16_adder #(L_IN=0, L_ADD=3, L_SUM=0, L_OUT=0)`(L_ADD 의미가 "전체지연"->"피연산자단"으로 변경) / RMW 내부 분배 = i2b `L_CONV-1` + adder `L_IN1/L_ADD-2/L_SUM1/L_OUT1` (제약 L_CONV>=2, L_ADD>=3).
+- **게이트 전부 green(실측)**: bf16_adder **200005**(dual-DUT: 기본 + RMW구성 양쪽) / int_to_bf16 **32312**(L_CONV 2·1 양쪽) / rmw **113** / fp32 유닛 PASS / 70012 / top elab / 통합 **ALL 9 MODES PASSED**(bit-exact) / mixed **ALL 3 PASSED**. **커버리지 핵심**: rmw_tb 스트리밍(1 vec/cy, 파이프라인 모델 없는 per-index oracle)이 **유일한 skew 게이트** — 통합 TB 는 10cy 정적 유지 입력이라 skew 못 잡음. rmw_tb 약화 금지.
+- **합성 정직화 발견(중요)**: 종전 "RMW WNS -2.547(~153MHz)" 는 **반쪽 측정** — out_RMW 조합→포트 경로(AddRecFN 포함)가 no_output_delay 로 untimed(스크립트가 create_clock 만 설정). 재배치 후 전 경로 reg-to-reg → 정직 측정 **WNS -8.79 @4ns**, 병목 = **S4 AddRecFN 단독 est. 12.4ns**(logic 4.1/route 8.3, pre-place). LUT 768->744(SRL 34->0), FF 99->148. **250MHz 는 T3(AddRecFN 내부 3분할, [GENERATED] 사본) 없이 불가 — 다음 결정 후보**. synth 호출 gotcha: `-nojournal -nolog` 는 `-tclargs` **앞**(뒤에 두면 part 인자로 먹혀 fail + stale 리포트).
+- SRAM/BRAM 계열 제안은 사용자 지시로 제외(SRAM RTL 은 sim 전용, 실물 = CACTI/파운드리 매크로). MXP core(imports) 항목(adder_lane 등)은 [UPSTREAM] — 이번 스코프 밖.
+
 ## Next session kickoff (2026-07-10, **RMW FP32->BF16 Phase 2b 랜딩 — RTL 32->16 하드교체 + 통합 재-bit-exact 완료. main 로컬 ff-병합 예정, 미push**)
 
 **활성 라인**: RMW inter-tile accumulator 를 **FP32->BF16** 으로 (SRAM psum 저장 절반 + DRAM O-write 에너지(지배항) 절반). Phase 1(golden) + 2a(primitives) + **2b(RTL 하드교체+통합) 랜딩으로 이 라인 종결**. **spec**: `docs/superpowers/specs/2026-07-08-rmw-bf16-design.md` (§6.2 끝 "Phase 2b outcome"). **plan**: `docs/superpowers/plans/2026-07-10-rmw-bf16-phase2b.md`. 브랜치 `feat/rmw-bf16-phase2b` (Task 8 문서화 시점; Task 10 에서 main ff-병합 예정, 미push).
@@ -304,7 +313,7 @@ The RMW controller (whether inside RMW or wrapping it) must still:
 ### Resolved (during integration) — committed values
 
 - **Granularity**: **32 RMW instances** (col-parallel; each col j has its own RMW + dedicated bank j port). Lane decode (A8 = 1, A4 = 2, A2 = 4 dispatches per col fire) lives in `tb/gemm_sram_top_tb.v` per-col FIFO + drain state machine. Re-visit trigger: timing closure 시 합성 코스트 측정.
-- **Latency budget**: `L_CONV = 2`, `L_ADD = 3`, total = **5 cycles**. Hand-written via vendored HardFloat (`third_party/berkeley-hardfloat/`).
+- **Latency budget**: `L_CONV = 2`, `L_ADD = 3`, total = **5 cycles**. Hand-written via vendored HardFloat (`third_party/berkeley-hardfloat/`). **Phase 2c (2026-07-13) 주의**: L_CONV/L_ADD 는 외부 노브(합=총지연=5, TB 계약 불변)로 유지되지만 **내부 레지스터 분배가 바뀌었다** — int_to_bf16 에 1단, bf16_adder 에 4단(L_IN/피연산자/L_SUM/L_OUT), 주요 FP 블록당 1단(S1 INToRecFN / S2 FNFromRecFN+narrow / S3 RecFNFromFN / S4 AddRecFN / S5 FNFromRecFN+narrow), out_RMW 는 레지스터 출력. "int_to_bf16 안에 2단"으로 읽지 말 것.
 - **FP32 adder implementation**: **HardFloat-based** (`fp32_adder.v` wraps `addRecFN`). Not Vivado FP IP.
 - **First-tile init**: **SRAM zero-prime via TB loop** at sim start (16384 words written through the `sram_D_use_zero=1` mux), then `sram_D_use_zero=0` for the rest. No NaN risk.
 - **Bank addressing**: `NUM_BANKS = 32`, `BANK_DEPTH = 1024`, `PIPELINE = 0`. Per-bank port 노출 (`sram_1rw_banked_mp.v`); col j → bank j (충돌 0). `C[m,n] → flat=m*N+n → bank=flat%32, word=flat//32`. Mapping callable in `MXP_Tools/mxp_tools/hwio.py::interleaved_row_major_32bank`. 16384 / 32 = 512 words/bank for the 128×128 workload. (기존 `sram_1rw_banked.v` 16-bank wrapper 는 다른 caller 용으로 별도 보존.)
@@ -455,7 +464,7 @@ All design questions from the original spec § 9 are now committed with concrete
 | Bank strategy | per-bank port 노출 (col j → bank j, 충돌 0) | bank-conflict 측정; multi-port 필요성 |
 | NUM_BANKS / BANK_DEPTH | 32 / 1024 (128×128 workload) | workload 변경; 더 큰 tile |
 | SRAM PIPELINE | 0 | timing closure phase |
-| RMW (L_CONV, L_ADD) | (2, 3), total 5 cyc | timing closure phase |
+| RMW (L_CONV, L_ADD) | (2, 3), total 5 cyc — Phase 2c 재배치로 내부 분배는 S1..S5 (블록당 1단, 위 Latency budget 참조) | timing closure phase |
 | First-tile init | TB zero-prime via mux | future hardware controller |
 | Bank-to-column mapping | row-major flat → bank=flat%32, word=flat//32 | non-128² workload |
 
