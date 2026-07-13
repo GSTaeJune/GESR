@@ -13,6 +13,9 @@
 //   - random bf16 x 다양한 크기 (200k)
 //   - directed edges: inf+(-inf)->NaN, inf+inf, 1.0+(-1.0), subnormal 합,
 //     +0 + (-0) 상쇄.
+//   - 듀얼 DUT (Phase 2c 재배치): 기본단 dut (L_ADD=3) + RMW 실배치 dut_rmw
+//     (L_IN=L_ADD=L_SUM=L_OUT=1) 를 같은 벡터로 동시 검증 -> 재배치된 레지스터
+//     배열도 200005 전 벡터를 통과. nfail 은 두 DUT 공유(OR), ntot 은 벡터당 1회.
 //
 // 동작 의도:
 //   free-running clock. 벡터마다 a/b 를 negedge 에 인가하고 L_ADD+1 posedge 를
@@ -29,6 +32,11 @@
 
 module bf16_adder_tb;
     localparam L_ADD = 3;
+
+    // RMW 실배치 구성 (Phase 2c 재배치): dut_rmw 의 L_IN+L_ADD+L_SUM+L_OUT = 1+1+1+1.
+    // 주의: 아래 dut_rmw 인스턴스 파라미터를 바꾸면 이 값도 함께 갱신할 것.
+    localparam L_RMW  = 4;
+    localparam L_WAIT = (L_RMW > L_ADD) ? L_RMW : L_ADD;   // 두 DUT 모두 통과할 대기
 
     // bf16 NaN 판정: exp 전부 1 (bit14:7 == 0xFF) 이고 mantissa(bit6:0) 비영.
     function is_bf16_nan;
@@ -48,6 +56,15 @@ module bf16_adder_tb;
         .a   (a),
         .b   (b),
         .sum (sum)
+    );
+
+    wire [15:0] sum_rmw;
+    bf16_adder #(.L_IN(1), .L_ADD(1), .L_SUM(1), .L_OUT(1)) dut_rmw (
+        .clk (clk),
+        .rst (rst),
+        .a   (a),
+        .b   (b),
+        .sum (sum_rmw)
     );
 
     // free-running clock
@@ -83,15 +100,21 @@ module bf16_adder_tb;
             @(negedge clk);
             a = a_w;
             b = b_w;
-            // wait for the value to traverse the L_ADD pipeline stages
-            for (k = 0; k < L_ADD + 1; k = k + 1)
+            // wait for the value to traverse both DUTs' pipeline stages
+            for (k = 0; k < L_WAIT + 1; k = k + 1)
                 @(posedge clk);
             #1;  // let combinational narrow settle after the last posedge
             // 둘 다 NaN 이면 부호/payload 무시하고 통과, 그 외는 bit-exact.
             if (!(is_bf16_nan(sum) && is_bf16_nan(exp_w)) && (sum !== exp_w)) begin
                 if (nfail < 10)
-                    $display("MISMATCH a=%04x b=%04x got=%04x exp=%04x",
+                    $display("MISMATCH(dut)     a=%04x b=%04x got=%04x exp=%04x",
                              a_w, b_w, sum, exp_w);
+                nfail = nfail + 1;
+            end
+            if (!(is_bf16_nan(sum_rmw) && is_bf16_nan(exp_w)) && (sum_rmw !== exp_w)) begin
+                if (nfail < 10)
+                    $display("MISMATCH(dut_rmw) a=%04x b=%04x got=%04x exp=%04x",
+                             a_w, b_w, sum_rmw, exp_w);
                 nfail = nfail + 1;
             end
             ntot = ntot + 1;
