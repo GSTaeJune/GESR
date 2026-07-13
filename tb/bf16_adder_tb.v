@@ -4,18 +4,19 @@
 //
 // 검증 목적:
 //   gemm_sram.srcs/sources_1/new/bf16_adder.v 의 bf16 + bf16 -> bf16 덧셈
-//   (fp32 도메인 확장 -> 검증된 fp32_adder -> fp32_to_bf16_rne narrow) 이
-//   ml_dtypes 의 bfloat16 덧셈과 bit-exact 로 일치하는지 확인.
-//   (a)+(b) 조합: fp32 AddRecFN == IEEE fp32 RNE (기존 fp32 TB 신뢰) +
-//   fp32_to_bf16_rne == ml_dtypes fp32->bf16 (Task 2 검증) 의 합성.
+//   (native 단일-라운딩 구현: 정렬 -> 가감산 -> 정규화 -> RNE, 내부 11~12b
+//   그리드, HardFloat 미사용 — 2026-07-13 A6 재작성) 이 ml_dtypes 의
+//   bfloat16 덧셈과 bit-exact 로 일치하는지 확인.
 //
 // 검증 내용 (sim/bf16_vectors.py 생성 work/bf16_vec/bf16_add.mem):
 //   - random bf16 x 다양한 크기 (200k)
 //   - directed edges: inf+(-inf)->NaN, inf+inf, 1.0+(-1.0), subnormal 합,
-//     +0 + (-0) 상쇄.
+//     +0 + (-0) 상쇄 + native 재작성 witness 16종 (유한 overflow->inf,
+//     min-normal - min-subnormal 경계 상쇄, d=24 sticky 붕괴 ± (round-carry),
+//     x+(-x) 정확 0 부호, -0+-0, RNE tie 짝수/홀수).
 //   - 듀얼 DUT (Phase 2c 재배치): 기본단 dut (L_ADD=3) + RMW 실배치 dut_rmw
 //     (L_IN=L_ADD=L_SUM=L_OUT=1) 를 같은 벡터로 동시 검증 -> 재배치된 레지스터
-//     배열도 200005 전 벡터를 통과. nfail 은 두 DUT 공유(OR), ntot 은 벡터당 1회.
+//     배열도 200021 전 벡터를 통과. nfail 은 두 DUT 공유(OR), ntot 은 벡터당 1회.
 //     주의: 대기는 settle-tolerant (입력 유지 후 샘플) — 이 TB 는 dut_rmw 의
 //     "기능"을 검증하며 latency 는 고정하지 않는다. RMW 구성의 latency(총 5cy)
 //     는 rmw_tb 의 스트리밍 캡처가 고정한다.

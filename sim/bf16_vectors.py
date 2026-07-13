@@ -92,24 +92,51 @@ def gen_bf16_add(path, seed=2):
     rng = np.random.default_rng(seed)
     def rbf16(n):
         return (rng.standard_normal(n).astype(np.float32) * rng.uniform(1e-2, 1e2, n).astype(np.float32)).astype(bfloat16)
+    def bp(bits):
+        # bf16 scalar from a raw bit pattern
+        return np.array([bits], dtype=np.uint16).view(bfloat16)[0]
     A = list(rbf16(200000))
     B = list(rbf16(200000))
     # directed edges appended
     inf = np.float32(np.inf).astype(bfloat16)
     edges = [(inf, -inf), (inf, inf), (bfloat16(1.0), bfloat16(-1.0)),
              (bfloat16(2.0**-133), bfloat16(2.0**-133)), (bfloat16(0.0), bfloat16(-0.0))]
+    # Native-adder directed edges (2026-07-13 A6 rewrite). Witnesses for the
+    # hand-written paths: finite overflow -> inf, subnormal/normal boundary
+    # crossings, d>11 sticky collapse (incl. sub + renorm + round-carry chain),
+    # exact-zero signs, RNE ties. Expected values still come from numpy below.
+    mx = bp(0x7F7F)                      # max finite bf16
+    edges += [
+        (mx, mx),                        # finite overflow -> +inf
+        (bp(0xFF7F), bp(0xFF7F)),        # -> -inf
+        (mx, bp(0x7F00)),                # near-overflow rounding
+        (bp(0x7F00), mx),                # commuted (swap path)
+        (bp(0x0080), bp(0x8001)),        # min normal - min subnormal -> 0x007F
+        (bp(0x0080), bp(0x0001)),        # min normal + min subnormal -> 0x0081 (exact)
+        (bp(0x3F80), bp(0x3380)),        # 1.0 + 2^-24: d=24 pure-sticky -> 1.0
+        (bp(0x3F80), bp(0xB380)),        # 1.0 - 2^-24: sub + shift + round-carry -> 1.0
+        (bp(0x0001), bp(0x8001)),        # x + (-x), subnormal -> +0
+        (bp(0x4321), bp(0xC321)),        # x + (-x), normal -> +0
+        (bp(0x8000), bp(0x8000)),        # -0 + -0 -> -0
+        (bp(0x3F80), bp(0x3B80)),        # 1.0 + 2^-8: tie -> 1.0 (ties-to-even)
+        (bp(0x3F81), bp(0x3B80)),        # (1+2^-7) + 2^-8: tie, odd lsb -> round up
+        (bp(0x0003), bp(0x0005)),        # subnormal + subnormal (exact grid)
+        (bp(0x00FF), bp(0x0001)),        # max subnormal + min subnormal -> min normal
+        (bp(0x0100), bp(0x8080)),        # 2^-125 - 2^-126 -> 2^-126 (d=1 borrow)
+    ]
     for a, b in edges:
         A.append(a); B.append(b)
     with open(path, "w") as f:
-        for a, b in zip(A, B):
-            s = (np.float32(a) + np.float32(b)).astype(bfloat16)  # ml_dtypes-equivalent bf16 add
-            a16 = int(np.float32(a).astype(bfloat16).view(np.uint16))
-            b16 = int(np.float32(b).astype(bfloat16).view(np.uint16))
-            s16 = int(s.view(np.uint16))
-            # NaN policy: any NaN result canonicalized to 0x7FC0 for comparison
-            if (s16 & 0x7F80) == 0x7F80 and (s16 & 0x7F):
-                s16 = (s16 & 0x8000) | 0x7FC0
-            f.write(f"{a16:04x} {b16:04x} {s16:04x}\n")
+        with np.errstate(over="ignore"):  # (max+max) legitimately overflows fp32 -> inf
+            for a, b in zip(A, B):
+                s = (np.float32(a) + np.float32(b)).astype(bfloat16)  # ml_dtypes-equivalent bf16 add
+                a16 = int(np.float32(a).astype(bfloat16).view(np.uint16))
+                b16 = int(np.float32(b).astype(bfloat16).view(np.uint16))
+                s16 = int(s.view(np.uint16))
+                # NaN policy: any NaN result canonicalized to 0x7FC0 for comparison
+                if (s16 & 0x7F80) == 0x7F80 and (s16 & 0x7F):
+                    s16 = (s16 & 0x8000) | 0x7FC0
+                f.write(f"{a16:04x} {b16:04x} {s16:04x}\n")
     return len(A)
 
 

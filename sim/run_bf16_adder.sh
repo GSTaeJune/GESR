@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # sim/run_bf16_adder.sh — bf16_adder cross-check TB (vs ml_dtypes).
 #
-# 1) generate ml_dtypes vectors  2) xvlog fp32 HardFloat + fp32_adder +
-# fp32_to_bf16_rne + bf16_adder + TB  3) xelab  4) xsim  5) grep sentinel.
+# 1) generate ml_dtypes vectors  2) xvlog bf16_adder (native, leaf — HardFloat
+# 미사용) + TB  3) xelab  4) xsim  5) grep sentinel.
 # Runs from sim/ so all XSim scratch (xsim.dir/, *.log, sim/work/) stays
 # gitignored; vectors land in sim/work/bf16_vec/, which the TB opens as
 # work/bf16_vec/... (CWD=sim/).
@@ -11,16 +11,12 @@ cd "$(dirname "$0")"
 bash clean.sh
 
 SRC=../gemm_sram.srcs/sources_1/new
-HF=../third_party/berkeley-hardfloat
 
 # 1) ml_dtypes oracle -> sim/work/bf16_vec/bf16_add.mem (and the other two)
 python bf16_vectors.py --out work/bf16_vec
 
-# 2) compile fp32 HardFloat bundle (needed by fp32_adder) + DUTs + TB
+# 2) compile DUT + TB (native bf16 adder is self-contained)
 xvlog -nolog \
-    "$HF"/HardFloatBundle.v \
-    "$SRC"/fp32_adder.v \
-    "$SRC"/fp32_to_bf16_rne.v \
     "$SRC"/bf16_adder.v \
     ../tb/bf16_adder_tb.v
 
