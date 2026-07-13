@@ -82,6 +82,16 @@ def gen_int_to_bf16(path, seed=1):
             if -256 <= sc <= 255:
                 rows.append((int(iv) & 0xFFFFFFFF, sc & 0x1FF, expect(int(iv), sc)))
 
+    # Full-int32-range directed (2026-07-13 native rewrite witness): the RMW
+    # contract is a full INT32 port even though realizable block sums stay
+    # under 2^20 -- exercise the 32-bit LZC / round-carry at maximum magnitude
+    # (incl. -2^31, whose |.| must survive as u32 0x80000000).
+    big = [2**31 - 1, -(2**31), 2**31 - 65, -(2**31 - 65), 0x40000001, -0x40000001]
+    for iv in big:
+        for sc in rng.choice(scales, size=8, replace=False):
+            iv = int(iv); sc = int(sc)
+            rows.append((iv & 0xFFFFFFFF, sc & 0x1FF, expect(iv, sc)))
+
     with open(path, "w") as f:
         for a, s, o in rows:
             f.write(f"{a:08x} {s:03x} {o:04x}\n")

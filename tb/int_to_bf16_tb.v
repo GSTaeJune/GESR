@@ -4,20 +4,22 @@
 //
 // 검증 목적:
 //   gemm_sram.srcs/sources_1/new/int_to_bf16.v 의 INT32 + 9비트 스케일 -> bf16
-//   변환 (INToRecFN_i32_e8_s8 + fp32 도메인 지수-더하기 + FNFromRecFN_wrapper
-//   + fp32_to_bf16_rne, v2) 이
-//   ml_dtypes 기반 오라클과 bit-exact 로 일치하는지 확인.
+//   변환 (v3 native: LZC32 + 8비트 RNE 로 r8 생성 -> 지수+scale -> normal 은
+//   exact 인코딩 / subnormal 밴드는 GRS 라운더로 두 번째 RNE — HardFloat
+//   미사용, 2026-07-13 A6 재작성) 이 ml_dtypes 기반 오라클과 bit-exact 로
+//   일치하는지 확인.
 //   오라클 모델: bf16(int -> bf16) * 2^(scale-127) = int->bf16 후 지수 shift
-//   (INToRecFN 이 8-sig 로 먼저 라운딩 = golden r8; 이후 fp32 도메인 exact shift 후
-//    fp32_to_bf16_rne 가 단일 RNE — subnormal 포함).
+//   (8-sig 첫 라운딩 = golden r8; 스케일 곱은 exact, subnormal 밴드에서만
+//    두 번째 RNE — flush/tie/min-subnormal 경계 포함).
 //
 // 검증 내용 (sim/bf16_vectors.py 생성 work/bf16_vec/int_to_bf16.mem):
 //   - realizable block_int 크기 (|.| < 2^20) x 다양한 결합 스케일
 //   - directed int (0, +-1, 127, -128, 2^19-1, -(2^19), 255/256/257, 2^15 등)
+//     + full-range INT32 (2^31-1, -2^31 등 — 32b LZC/round-carry witness)
 //   - subnormal 유발 스케일 밴드 포함.
 //   - 듀얼 DUT (Phase 2c 재배치): 기본단 dut (L_CONV=2) + RMW 실배치 dut_l1
 //     (L_CONV=1) 를 같은 벡터로 동시 검증 -> RMW 에서 쓰는 L_CONV-1 깊이도
-//     32312 전 벡터를 통과. nfail 은 두 DUT 공유(OR), ntot 은 벡터당 1회.
+//     32360 전 벡터를 통과. nfail 은 두 DUT 공유(OR), ntot 은 벡터당 1회.
 //     주의: 대기는 settle-tolerant (입력 유지 후 샘플) — "기능" 검증이며
 //     latency 는 고정하지 않는다 (RMW 총 5cy latency 는 rmw_tb 가 고정).
 //
