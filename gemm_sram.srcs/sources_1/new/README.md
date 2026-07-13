@@ -98,9 +98,9 @@ git checkout fp32-rmw-final -- gemm_sram.srcs/sources_1/new/
 
 Kintex-7 160T-1, 250MHz(4ns) 제약, 2026-07-13 native v3 측정 (상세 표는 `rtl/README.md`):
 
-| 유닛 | LUT | FF | WNS (pre-place) | 비고 |
+| 유닛 | LUT cell (동일 metric 시리즈) | FF | WNS (pre-place) | 비고 |
 |---|---|---|---|---|
-| RMW (bf16 native v3) | **505** | 139 | **-1.64** | 최악 S3 = logic 2.28 + route(추정) 3.36 |
+| RMW (bf16 native v3) | **505** (Slice LUT 404) | 139 | **-1.64** | 최악 S3 = logic 2.28 + route(추정) 3.36 |
 | RMW (bf16 HardFloat, 2c) | 744 | 148 | -8.79 | 병목이던 AddRecFN logic 4.1ns — native 로 소멸 |
 | RMW (fp32 시절, 참고) | 1183 | 193 | (반쪽 측정) | — |
 | psum SRAM bank 16b | 293 | — | — | LUTRAM. 32b 시절 581. SRAM RTL 은 sim 전용 |

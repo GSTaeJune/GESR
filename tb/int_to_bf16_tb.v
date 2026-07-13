@@ -15,7 +15,9 @@
 // 검증 내용 (sim/bf16_vectors.py 생성 work/bf16_vec/int_to_bf16.mem):
 //   - realizable block_int 크기 (|.| < 2^20) x 다양한 결합 스케일
 //   - directed int (0, +-1, 127, -128, 2^19-1, -(2^19), 255/256/257, 2^15 등)
-//     + full-range INT32 (2^31-1, -2^31 등 — 32b LZC/round-carry witness)
+//     + full-range INT32 (2^31-1, -2^31 등 — 32b LZC/round-carry witness;
+//       단일-라운딩 vs golden 이중-라운딩의 일치 도메인은 DUT 헤더
+//       "라운딩 도메인 주의" 참조)
 //   - subnormal 유발 스케일 밴드 포함.
 //   - 듀얼 DUT (Phase 2c 재배치): 기본단 dut (L_CONV=2) + RMW 실배치 dut_l1
 //     (L_CONV=1) 를 같은 벡터로 동시 검증 -> RMW 에서 쓰는 L_CONV-1 깊이도

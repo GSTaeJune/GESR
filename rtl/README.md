@@ -57,14 +57,17 @@ GEMM ──INT32 psum──► RMW ──┬─ int_to_bf16 ──fp_a(bf16)─�
 
 ## 합성 실측 (OOC, Kintex-7 160T-1, 250MHz 제약 — V7 라이선스 부재로 대체 측정)
 
-| 유닛 | LUT | FF | 타이밍 (4ns 제약, pre-place 추정) |
+| 유닛 | LUT cell¹ | FF | 타이밍 (4ns 제약, pre-place 추정) |
 |---|---|---|---|
-| RMW (bf16, **native v3, 2026-07-13**) | **505** (SRL 0) | 139 | WNS **-1.64** — 최악 = S3(정렬·가감산) 5.64ns = **logic 2.28**(13 lvl) + pre-place route 3.36 |
+| RMW (bf16, **native v3, 2026-07-13**) | **505** (SRL 0; Slice LUT 404) | 139 | WNS **-1.64** — 최악 = S3(정렬·가감산) 5.64ns = **logic 2.28**(13 lvl) + pre-place route 3.36 |
 | RMW (bf16, Phase 2c 재배치, HardFloat) | 744 (SRL 0) | 148 | WNS -8.79 — S4(AddRecFN 단독) est. 12.4ns (logic 4.1 + route 8.3) |
 | RMW (bf16, 재배치 전) | 768 (SRL 34) | 99 | "-2.55 (~153MHz)" 는 **반쪽 측정** — AddRecFN 경로가 no_output_delay 로 untimed. 직접 비교 금지 |
 | RMW (fp32 시절) | 1183 | 193 | ~157 MHz (동일하게 반쪽 측정) |
 | psum SRAM bank 16b | 293 (LUTRAM) | 16 | 250MHz 여유 (참고: SRAM RTL 은 sim 전용, 실물은 CACTI/파운드리 매크로) |
 | psum SRAM bank 32b 시절 | 581 | 32 | 동일 |
+
+¹ LUT cell = SYNTH_SUMMARY 의 LUT primitive 카운트 — 표의 종전 수치(768/744/1183)와
+동일 metric 이라 상호 비교 가능. util.rpt 헤드라인 "Slice LUTs"(combining 후)는 404.
 
 native 재작성(A6)으로 구 병목(AddRecFN, logic 4.1ns)이 소멸 — 최악 스테이지 로직이
 2.28ns 로 절반 이하, 나머지는 pre-place route 추정(보수적). Vivado 수치는 ASIC PNR 의

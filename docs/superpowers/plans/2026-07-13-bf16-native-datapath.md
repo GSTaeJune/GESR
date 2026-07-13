@@ -214,10 +214,14 @@ int_to_bf16 32312 -> 32360. Sentinels are count-agnostic (`ALL .* TESTS PASSED`)
 
 **Synth proxy (OOC K7-160T-1, 4ns, pre-place; honest measurement — all reg-to-reg):**
 
-| Design | LUT | FF | WNS | Worst stage |
+| Design | LUT cells | FF | WNS | Worst stage |
 |---|---|---|---|---|
-| native v3 | **505** | 139 | **-1.642** | S3 align+add/sub: 5.635ns = logic **2.278** (13 lvl, 6 CARRY4) + est. route 3.357 |
+| native v3 | **505** (= 404 Slice LUTs after combining) | 139 | **-1.642** | S3 align+add/sub: 5.635ns = logic **2.278** (13 lvl, 6 CARRY4) + est. route 3.357 |
 | Phase 2c (HardFloat) | 744 | 148 | -8.793 | S4 AddRecFN: est. 12.358ns = logic 4.085 + route 8.273 |
+
+LUT metric note: the "LUT cells" column is the SYNTH_SUMMARY `get_cells PRIMITIVE_GROUP==LUT`
+count — the same metric as every prior number in this series (768/744/1183), so the -32% is
+apples-to-apples. `util.rpt`'s headline "Slice LUTs" (post-combining) reads 404 for native v3.
 
 Reading: the old bottleneck block no longer exists; worst-stage *logic* halved (4.09 ->
 2.28ns), remaining violation is dominated by pre-place route estimate. On the actual

@@ -86,6 +86,15 @@ def gen_int_to_bf16(path, seed=1):
     # contract is a full INT32 port even though realizable block sums stay
     # under 2^20 -- exercise the 32-bit LZC / round-carry at maximum magnitude
     # (incl. -2^31, whose |.| must survive as u32 0x80000000).
+    # NOTE(precision domain): these witness the LZC32/round-carry paths, NOT
+    # full-INT32 equality with this fp32-mediated oracle. expect() double-
+    # rounds (int -> fp32 -> bf16) and can land 1 ULP above true RNE on rare
+    # |int| >= 2^25 tie-up cases, where the RTL's single rounding (same
+    # semantics as v2's INToRecFN) is the correctly-rounded one. The two
+    # provably agree for |int| < 2^24 (fp32 lossless), which covers golden's
+    # contract band |block_int| < 2^20. Do NOT "fix" the RTL toward the
+    # oracle's double rounding, and do not add |int| >= 2^25 tie vectors here
+    # without first changing the oracle model itself.
     big = [2**31 - 1, -(2**31), 2**31 - 65, -(2**31 - 65), 0x40000001, -0x40000001]
     for iv in big:
         for sc in rng.choice(scales, size=8, replace=False):

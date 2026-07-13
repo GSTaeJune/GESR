@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **계약 전부 불변**: 포트/파라미터 표면(L_IN/L_ADD/L_SUM/L_OUT = 절단점 깊이, L_CONV), RMW 5cy(내부 분배 S1..S5 블록당 1단 — 블록명만 native 로: S1 i2b[F] LZC32+8b RNE / S2 i2b[B] scale·denorm / S3 adder[A] 정렬·가감산 / S4 adder[B] 정규화 / S5 adder[C] RNE·패킹), out_RMW 레지스터 출력, TB 로직 무수정(헤더만 갱신).
 - **게이트 전부 green(실측, 두 유닛 다 첫 실행에 통과)**: bf16_adder **200021**(oracle +16 directed: 유한 overflow→inf, min-normal−min-subnormal 경계, d=24 sticky+round-carry, x+(−x) 0 부호, tie) / int_to_bf16 **32360**(+48 full-range INT32) / rmw **113** / top elab / 통합 **ALL 9 MODES PASSED**(bit-exact) / mixed **ALL 3 PASSED** / preserved fp32 유닛 70012·PASS·PASS. 카운트 변경은 oracle 강화(약화 아님).
-- **합성 실측(OOC K7, 4ns, pre-place)**: LUT 744→**505**(-32%), FF 148→139, WNS -8.79→**-1.64**. 최악 = S3 정렬·가감산 5.64ns = **logic 2.28**(13lvl) + route 추정 3.36 — 구 병목 로직(4.09ns) 절반 이하, 잔여 위반은 pre-place route 추정이 지배. 백엔드 = ASIC PNR(Vivado 는 상대 프록시)이라 **250MHz 가시권, T3 는 대상 블록 소멸로 폐기**.
+- **합성 실측(OOC K7, 4ns, pre-place)**: LUT-cell 744→**505**(-32%; 동일 metric 시리즈, Slice LUT 는 404), FF 148→139, WNS -8.79→**-1.64**. 최악 = S3 정렬·가감산 5.64ns = **logic 2.28**(13lvl) + route 추정 3.36 — 구 병목 로직(4.09ns) 절반 이하, 잔여 위반은 pre-place route 추정이 지배. 백엔드 = ASIC PNR(Vivado 는 상대 프록시)이라 **250MHz 가시권, T3 는 대상 블록 소멸로 폐기**.
 - **HardFloat-free**: 전 bf16 컴파일 리스트(rmw/top/integration/smoke/mixed/synth)에서 번들·fp32_adder·fp32_to_bf16_rne 제거(elab 이 자립성 증명). 번들은 preserved fp32 유닛 TB + `fp32-rmw-final` 복구 전용. `fp32_to_bf16_rne.v` ACTIVE→PRESERVED(자체 70012 게이트 유지).
 - **커버리지 유의**: rmw_tb 스트리밍이 여전히 유일한 skew/latency 게이트(약화 금지). 단위 oracle 이 subnormal/tie/overflow 의 유일한 영구 게이트라는 Phase 2b 원칙 그대로 — red 면 RTL 을 고칠 것(벡터 약화 금지, 추가만 허용).
 

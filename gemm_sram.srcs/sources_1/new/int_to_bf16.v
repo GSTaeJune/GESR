@@ -4,10 +4,24 @@
 //
 // 하는 일: out_bf16 = bf16_RNE( bf16(in_int) * 2^(scale - 127) )
 //   즉 (1) 정수를 8비트 유효숫자로 RNE 라운딩해 r8 을 만들고 (= golden 의
-//   bf16(block_int)), (2) 거기에 2의 거듭제곱 스케일을 곱한 값을 bf16 으로
-//   다시 RNE 인코딩한다. 두 번의 라운딩이 golden(ml_dtypes) 모델의 의미
-//   그대로다 — 스케일 곱 자체는 정확하고, 결과가 subnormal 밴드에 떨어질
-//   때만 두 번째 라운딩(denormalization RNE)이 실제로 값을 바꾼다.
+//   bf16(block_int); 일치 도메인은 아래 "라운딩 도메인 주의" 참조), (2) 거기에
+//   2의 거듭제곱 스케일을 곱한 값을 bf16 으로 다시 RNE 인코딩한다. 두 번의
+//   라운딩이 golden(ml_dtypes) 모델의 의미 그대로다 — 스케일 곱 자체는
+//   정확하고, 결과가 subnormal 밴드에 떨어질 때만 두 번째 라운딩
+//   (denormalization RNE)이 실제로 값을 바꾼다.
+//
+// 라운딩 도메인 주의 (full-INT32 포트의 정밀 한계 — 2026-07-13 리뷰 확정):
+//   이 파일의 r8 은 int -> 8비트 유효숫자의 "단일" RNE 다 (v2 의 HardFloat
+//   INToRecFN_i32_e8_s8 도 동일한 단일 라운딩 — 의미 변화 없음). 반면
+//   golden(ml_dtypes)은 int -> fp32 -> bf16 의 "이중" 라운딩으로 r8 을 만든다.
+//   두 방식은 int->fp32 가 무손실인 |int| < 2^24 에서 증명적으로 일치하며,
+//   golden 자체가 |block_int| < 2^20 을 계약으로 둔다 (MXP_Tools gemm.py) —
+//   실현 가능한 K-블록 합(int8*int8*32 ~ 2^19)은 전부 이 안이다.
+//   |int| >= 2^25 의 극소수 tie 케이스(~1/200k)에서는 golden 의 이중 라운딩이
+//   1 ULP 위로 어긋날 수 있고, 그 경우 correctly-rounded 값은 이쪽(단일)이다.
+//   oracle 의 full-range directed 벡터는 LZC32/round-carry 경로의 witness 이지
+//   "전 INT32 에서 golden 과 일치"의 게이트가 아니다. 이 차이를 없애겠다고
+//   RTL 을 이중 라운딩으로 "고치지" 말 것 (정확도 퇴행).
 //
 // 왜 native 인가 (2026-07-13, A6):
 //   v2 는 HardFloat 조합 (INToRecFN_i32_e8_s8 → recoded 지수 add → FNFromRecFN
