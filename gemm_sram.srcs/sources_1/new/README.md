@@ -24,7 +24,7 @@
    in_GEMM  ─ INT32 (32b) ───┼─► int_to_bf16 ─ bf16 ─┐                       │
    scale    ─ s9 (9b)    ────┤   (S1, 1reg)          ├─► bf16_adder ─ bf16 ─┐│
                               │                       │   ┌──────────────┐  ││
-   Q[j] (SRAM read) ─ bf16 ──┼─► sram_dly[1] ─────────┘   │ fp32_adder + │  ││
+   Q[j] (SRAM read) ─ bf16 ──┼─► sram_dly[0:0] ───────┘   │ fp32_adder + │  ││
                     (16b)     │   (in_SRAM 정렬)           │ fp32→bf16 RNE│  ││
                               │                            └──────────────┘  ││
                               │                            (S2..S5)          ││

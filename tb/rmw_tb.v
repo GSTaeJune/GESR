@@ -10,7 +10,8 @@
 //
 //   특히 다음을 동시에 자극:
 //     1) INT→bf16 변환 + 지수 보정 (zero passthrough + 깊은 언더플로 ±0 flush + subnormal RNE 포함)
-//     2) sram_dly 체인이 in_SRAM 을 L_CONV 만큼 지연시켜 가산기 입력에서 정렬
+//     2) sram_dly 체인이 in_SRAM 을 L_CONV-1 만큼 지연시켜 bf16_adder 입력에서
+//        정렬 (이후 L_IN 레지스터가 a/b 를 공통 지연 — Phase 2c 재배치)
 //     3) bf16 가산기 (fp32 도메인 가산 + RNE narrow) 의 정상값/특수값 동작
 //   ⇒ Python 측 (MXP_Tools/mxp_tools/rmw_gen.py) 이 생성한 N개의 무작위
 //      벡터를 back-to-back 으로 흘려보내고, 캡처된 out_RMW 가 Python 기대값

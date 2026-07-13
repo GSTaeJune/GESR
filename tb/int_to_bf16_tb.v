@@ -18,6 +18,8 @@
 //   - 듀얼 DUT (Phase 2c 재배치): 기본단 dut (L_CONV=2) + RMW 실배치 dut_l1
 //     (L_CONV=1) 를 같은 벡터로 동시 검증 -> RMW 에서 쓰는 L_CONV-1 깊이도
 //     32312 전 벡터를 통과. nfail 은 두 DUT 공유(OR), ntot 은 벡터당 1회.
+//     주의: 대기는 settle-tolerant (입력 유지 후 샘플) — "기능" 검증이며
+//     latency 는 고정하지 않는다 (RMW 총 5cy latency 는 rmw_tb 가 고정).
 //
 // 동작 의도:
 //   free-running clock. 벡터마다 in_int/scale 를 negedge 에 인가하고
