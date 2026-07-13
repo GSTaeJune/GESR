@@ -15,6 +15,9 @@
 //   - realizable block_int 크기 (|.| < 2^20) x 다양한 결합 스케일
 //   - directed int (0, +-1, 127, -128, 2^19-1, -(2^19), 255/256/257, 2^15 등)
 //   - subnormal 유발 스케일 밴드 포함.
+//   - 듀얼 DUT (Phase 2c 재배치): 기본단 dut (L_CONV=2) + RMW 실배치 dut_l1
+//     (L_CONV=1) 를 같은 벡터로 동시 검증 -> RMW 에서 쓰는 L_CONV-1 깊이도
+//     32312 전 벡터를 통과. nfail 은 두 DUT 공유(OR), ntot 은 벡터당 1회.
 //
 // 동작 의도:
 //   free-running clock. 벡터마다 in_int/scale 를 negedge 에 인가하고
@@ -38,6 +41,16 @@ module int_to_bf16_tb;
         .in_int   (in_int),
         .scale    (scale),
         .out_bf16 (out_bf16)
+    );
+
+    // RMW 재배치 구성 (Phase 2c): int_to_bf16 은 L_CONV-1 = 1 단으로 인스턴스된다.
+    wire [15:0] out_bf16_l1;
+    int_to_bf16 #(.L_CONV(1)) dut_l1 (
+        .clk      (clk),
+        .rst      (rst),
+        .in_int   (in_int),
+        .scale    (scale),
+        .out_bf16 (out_bf16_l1)
     );
 
     // free-running clock
@@ -79,8 +92,14 @@ module int_to_bf16_tb;
             #1;  // let combinational output settle after the last posedge
             if (out_bf16 !== exp_w) begin
                 if (nfail < 10)
-                    $display("MISMATCH in_int=%08x scale=%03x got=%04x exp=%04x",
+                    $display("MISMATCH(L2) in_int=%08x scale=%03x got=%04x exp=%04x",
                              in_int_w, scale_w, out_bf16, exp_w);
+                nfail = nfail + 1;
+            end
+            if (out_bf16_l1 !== exp_w) begin
+                if (nfail < 10)
+                    $display("MISMATCH(L1) in_int=%08x scale=%03x got=%04x exp=%04x",
+                             in_int_w, scale_w, out_bf16_l1, exp_w);
                 nfail = nfail + 1;
             end
             ntot = ntot + 1;
