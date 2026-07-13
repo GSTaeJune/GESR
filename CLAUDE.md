@@ -6,7 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 2. After completing a logical chunk of work (one or several related tasks, e.g. tasks 1–3), run `/superpowers:requesting-code-review` and `/review`, iterating on their feedback until no blocking issues remain. Reviews don't need to run per-task — group related tasks into a coherent unit before reviewing. Minor or optional suggestions don't need to block convergence.
 
-## Next session kickoff (2026-07-13, **RMW pipeline rebalance Phase 2c 랜딩 — 5cy 유지 레지스터 재배치 + out_RMW 레지스터 출력화. 게이트 전부 green**)
+## Next session kickoff (2026-07-13 오후, **BF16 native 재작성(A6) 랜딩 — 손코딩 bf16 덧셈기/변환기, HardFloat-free 데이터패스, 전 게이트 green, LUT -32%/최악 로직 2.28ns**)
+
+**무엇/왜 (사용자 지시: "다시 BF16 계산기로 RTL 짜. 주석 잘 달아놔 — 내가 읽어볼 거니까")**: Phase 2c 정직 측정이 병목 = monolithic fp32 `AddRecFN`(24b significand 로 8b 일 하는 구조, est 12.4ns)임을 확정 → T3(생성물 내부 분할) 대신 **A6 승격**: `bf16_adder.v` + `int_to_bf16.v` 를 진짜 bf16 폭(내부 11~12b GRS 그리드)의 단일-라운딩 native 산술로 재작성. **주석이 1급 산출물** — 각 파일 헤더가 알고리즘(정렬/GRS/정규화 클램프/RNE/subnormal/0 부호 규칙)을 한글로 상술, 사용자 직독 대상. plan+outcome: `docs/superpowers/plans/2026-07-13-bf16-native-datapath.md`. 브랜치 `feat/bf16-native`.
+
+- **계약 전부 불변**: 포트/파라미터 표면(L_IN/L_ADD/L_SUM/L_OUT = 절단점 깊이, L_CONV), RMW 5cy(내부 분배 S1..S5 블록당 1단 — 블록명만 native 로: S1 i2b[F] LZC32+8b RNE / S2 i2b[B] scale·denorm / S3 adder[A] 정렬·가감산 / S4 adder[B] 정규화 / S5 adder[C] RNE·패킹), out_RMW 레지스터 출력, TB 로직 무수정(헤더만 갱신).
+- **게이트 전부 green(실측, 두 유닛 다 첫 실행에 통과)**: bf16_adder **200021**(oracle +16 directed: 유한 overflow→inf, min-normal−min-subnormal 경계, d=24 sticky+round-carry, x+(−x) 0 부호, tie) / int_to_bf16 **32360**(+48 full-range INT32) / rmw **113** / top elab / 통합 **ALL 9 MODES PASSED**(bit-exact) / mixed **ALL 3 PASSED** / preserved fp32 유닛 70012·PASS·PASS. 카운트 변경은 oracle 강화(약화 아님).
+- **합성 실측(OOC K7, 4ns, pre-place)**: LUT 744→**505**(-32%), FF 148→139, WNS -8.79→**-1.64**. 최악 = S3 정렬·가감산 5.64ns = **logic 2.28**(13lvl) + route 추정 3.36 — 구 병목 로직(4.09ns) 절반 이하, 잔여 위반은 pre-place route 추정이 지배. 백엔드 = ASIC PNR(Vivado 는 상대 프록시)이라 **250MHz 가시권, T3 는 대상 블록 소멸로 폐기**.
+- **HardFloat-free**: 전 bf16 컴파일 리스트(rmw/top/integration/smoke/mixed/synth)에서 번들·fp32_adder·fp32_to_bf16_rne 제거(elab 이 자립성 증명). 번들은 preserved fp32 유닛 TB + `fp32-rmw-final` 복구 전용. `fp32_to_bf16_rne.v` ACTIVE→PRESERVED(자체 70012 게이트 유지).
+- **커버리지 유의**: rmw_tb 스트리밍이 여전히 유일한 skew/latency 게이트(약화 금지). 단위 oracle 이 subnormal/tie/overflow 의 유일한 영구 게이트라는 Phase 2b 원칙 그대로 — red 면 RTL 을 고칠 것(벡터 약화 금지, 추가만 허용).
+
+## Next session kickoff (2026-07-13 오전, (부분 대체 — 같은 날 오후 native 재작성 섹션(맨 위) 참조: T3 는 폐기, HardFloat 스테이지명은 native 블록명으로 교체) **RMW pipeline rebalance Phase 2c 랜딩 — 5cy 유지 레지스터 재배치 + out_RMW 레지스터 출력화. 게이트 전부 green**)
 
 **무엇/왜**: 9-에이전트 RTL 분석 + fable adversarial 선별(2026-07-12)의 T2 실행. 기존 5단 파이프라인은 레지스터 5개 중 3개가 wire-shift 자리(빈 스테이지)이고 두 reg-to-reg 구간에 FP 블록이 몰려 있었음. 재배치 후 = **주요 FP 블록당 정확히 1단**: S1 INToRecFN+exp-add / S2 FNFromRecFN+narrow / S3 RecFNFromFN / S4 AddRecFN / S5 FNFromRecFN+narrow, **out_RMW 레지스터 출력**(SRAM D 조합 꼬리 제거 — PNR 매크로 D-setup 에 유리). 외부 계약 불변(L_CONV+L_ADD=5cy, rmw_tb/top TB 무수정). plan+outcome: `docs/superpowers/plans/2026-07-13-rmw-pipeline-rebalance.md`. 브랜치 `feat/rmw-pipeline-rebalance`.
 
@@ -301,7 +311,7 @@ module RMW (
 
 This pins down **two** of the previously-open questions:
 
-1. **Bit-width reconciliation**: dequantize INT→**BF16 at the RMW boundary** (Phase 2b, 2026-07-10). Both SRAM storage and the accumulator live in bfloat16 — **16-bit words** (`DATA_WIDTH=16`), no INT-domain accumulation in SRAM. The bf16 add itself is computed in the FP32 domain then RNE-narrowed to bf16 (`bf16_adder` wraps `fp32_adder` + `fp32_to_bf16_rne`; spec §6.1). This lines up with `MXP_Tools/hwio.py::read_writememh_bf16`, which reads 16-bit bf16 words from the `$writememh` dump and upcasts exactly (`fp32 = uint32(bf16_bits) << 16`).
+1. **Bit-width reconciliation**: dequantize INT→**BF16 at the RMW boundary** (Phase 2b, 2026-07-10). Both SRAM storage and the accumulator live in bfloat16 — **16-bit words** (`DATA_WIDTH=16`), no INT-domain accumulation in SRAM. The bf16 add itself is a **hand-written native single-round RNE adder** (2026-07-13 A6 rewrite: `bf16_adder.v` v3 — align/GRS → add/sub → normalize → round, 11~12b internal, HardFloat-free; the earlier fp32-domain detour is git history / tag `fp32-rmw-final`). This lines up with `MXP_Tools/hwio.py::read_writememh_bf16`, which reads 16-bit bf16 words from the `$writememh` dump and upcasts exactly (`fp32 = uint32(bf16_bits) << 16`).
 2. **Scale handling**: the 9-bit `scale` is the per-sub-word combined `(act_scale + weight_scale − 127)` that `Accumulator_Col` produces (note: 9-bit signed, `{1'b0, act_scale} + {1'b0, weight_scale} - 9'sd127`). RMW consumes it during the INT→BF16 conversion; it is **not** stored alongside the psum.
 
 The RMW controller (whether inside RMW or wrapping it) must still:
@@ -313,8 +323,8 @@ The RMW controller (whether inside RMW or wrapping it) must still:
 ### Resolved (during integration) — committed values
 
 - **Granularity**: **32 RMW instances** (col-parallel; each col j has its own RMW + dedicated bank j port). Lane decode (A8 = 1, A4 = 2, A2 = 4 dispatches per col fire) lives in `tb/gemm_sram_top_tb.v` per-col FIFO + drain state machine. Re-visit trigger: timing closure 시 합성 코스트 측정.
-- **Latency budget**: `L_CONV = 2`, `L_ADD = 3`, total = **5 cycles**. Hand-written via vendored HardFloat (`third_party/berkeley-hardfloat/`). **Phase 2c (2026-07-13) 주의**: L_CONV/L_ADD 는 외부 노브(합=총지연=5, TB 계약 불변)로 유지되지만 **내부 레지스터 분배가 바뀌었다** — int_to_bf16 에 1단, bf16_adder 에 4단(L_IN/피연산자/L_SUM/L_OUT), 주요 FP 블록당 1단(S1 INToRecFN / S2 FNFromRecFN+narrow / S3 RecFNFromFN / S4 AddRecFN / S5 FNFromRecFN+narrow), out_RMW 는 레지스터 출력. "int_to_bf16 안에 2단"으로 읽지 말 것.
-- **FP32 adder implementation**: **HardFloat-based** (`fp32_adder.v` wraps `addRecFN`). Not Vivado FP IP.
+- **Latency budget**: `L_CONV = 2`, `L_ADD = 3`, total = **5 cycles**. **2026-07-13 native 재작성(A6)**: 두 유닛 모두 손코딩 bf16 폭, HardFloat-free. 내부 분배는 Phase 2c 계약 유지 — int_to_bf16 1단 + bf16_adder 4단(L_IN/L_ADD/L_SUM/L_OUT), 블록당 1단(S1 i2b[F] LZC32+8b RNE / S2 i2b[B] scale·denorm·인코딩 / S3 adder[A] 정렬·가감산 / S4 adder[B] 정규화 / S5 adder[C] RNE·패킹), out_RMW 레지스터 출력. "int_to_bf16 안에 2단"으로 읽지 말 것.
+- **bf16 arithmetic implementation**: **native 손코딩** (`bf16_adder.v`/`int_to_bf16.v` v3 — 단일 라운딩 RNE, 내부 11~12b GRS 그리드; 알고리즘은 각 파일 헤더가 상술). Not Vivado FP IP. HardFloat 는 preserved fp32 유닛(`fp32_adder.v`/`int_to_fp32.v`) TB 와 fp32 복구 라인용으로만 vendored 유지.
 - **First-tile init**: **SRAM zero-prime via TB loop** at sim start (16384 words written through the `sram_D_use_zero=1` mux), then `sram_D_use_zero=0` for the rest. No NaN risk.
 - **Bank addressing**: `NUM_BANKS = 32`, `BANK_DEPTH = 1024`, `PIPELINE = 0`. Per-bank port 노출 (`sram_1rw_banked_mp.v`); col j → bank j (충돌 0). `C[m,n] → flat=m*N+n → bank=flat%32, word=flat//32`. Mapping callable in `MXP_Tools/mxp_tools/hwio.py::interleaved_row_major_32bank`. 16384 / 32 = 512 words/bank for the 128×128 workload. (기존 `sram_1rw_banked.v` 16-bank wrapper 는 다른 caller 용으로 별도 보존.)
 
@@ -392,9 +402,10 @@ Three ways to run sim:
    bash sim/run_rmw_smoke.sh         # HardFloat round-trip smoke (no DUT logic)
    bash sim/run_int_to_fp32.sh       # int_to_fp32 unit TB (fp32, preserved at HEAD)
    bash sim/run_fp32_adder.sh        # fp32_adder unit TB (fp32, preserved at HEAD)
-   bash sim/run_fp32_to_bf16_rne.sh  # fp32->bf16 RNE narrow (70012 vectors vs ml_dtypes)
-   bash sim/run_int_to_bf16.sh       # int_to_bf16 v2 (32312 vectors: neg scales + subnormal boundary)
-   bash sim/run_bf16_adder.sh        # bf16 adder (200005 vectors vs ml_dtypes)
+   bash sim/run_fp32_to_bf16_rne.sh  # fp32->bf16 RNE narrow (70012 vectors; preserved unit)
+   bash sim/run_int_to_bf16.sh       # int_to_bf16 v3 native (32360 vectors: neg scales +
+                                     #   subnormal boundary + full-range INT32)
+   bash sim/run_bf16_adder.sh        # bf16 adder v3 native (200021 vectors vs ml_dtypes)
    bash sim/run_rmw.sh               # full RMW vector TB (113 cases, bf16)
    bash sim/run_top_elab.sh          # gemm_sram_top elab-only smoke
    bash sim/run_integration_smoke.sh # TB zero-prime + dump (no GEMM driving)
@@ -464,7 +475,7 @@ All design questions from the original spec § 9 are now committed with concrete
 | Bank strategy | per-bank port 노출 (col j → bank j, 충돌 0) | bank-conflict 측정; multi-port 필요성 |
 | NUM_BANKS / BANK_DEPTH | 32 / 1024 (128×128 workload) | workload 변경; 더 큰 tile |
 | SRAM PIPELINE | 0 | timing closure phase |
-| RMW (L_CONV, L_ADD) | (2, 3), total 5 cyc — Phase 2c 재배치로 내부 분배는 S1..S5 (블록당 1단, 위 Latency budget 참조) | timing closure phase |
+| RMW (L_CONV, L_ADD) | (2, 3), total 5 cyc — 내부 분배 S1..S5 (블록당 1단, 위 Latency budget 참조; 2026-07-13 부터 블록 = native 손코딩) | timing closure phase |
 | First-tile init | TB zero-prime via mux | future hardware controller |
 | Bank-to-column mapping | row-major flat → bank=flat%32, word=flat//32 | non-128² workload |
 
@@ -480,12 +491,13 @@ gemm_sram.srcs/sources_1/
         gemm_sram_top.v                # Integration wrapper (GEMM + RMW + SRAM, pure structural)
         GEMM.v                         # MXP TOP wrapper (instantiated inside gemm_sram_top)
         RMW.v                          # bf16 RMW unit (int_to_bf16 + delay + bf16_adder), 16-bit psum
-        int_to_bf16.v                  # INT32 + 9-bit scale -> bf16 (v2: fp32-domain exp shift
-                                       #   + single RNE narrow + deep-underflow flush; spec 6.1/6.2)
-        bf16_adder.v                   # bf16 add = fp32-domain add (fp32_adder) + fp32_to_bf16_rne
-        fp32_to_bf16_rne.v             # IEEE fp32 -> bf16 round-half-to-even narrow
+        int_to_bf16.v                  # INT32 + 9-bit scale -> bf16 (v3 native: LZC32 + 8b RNE r8
+                                       #   -> exp+scale -> subnormal GRS rounder; HardFloat-free)
+        bf16_adder.v                   # bf16 add (v3 native: align/GRS -> add/sub -> normalize -> RNE,
+                                       #   11~12b internal; HardFloat-free)
+        fp32_to_bf16_rne.v             # IEEE fp32 -> bf16 RNE narrow -- PRESERVED (v2-era, own 70012 TB)
         int_to_fp32.v                  # fp32 unit RTL, preserved at HEAD (not instantiated by bf16 top)
-        fp32_adder.v                   # IEEE-754 FP32 adder (HardFloat-based); still instantiated by bf16_adder
+        fp32_adder.v                   # IEEE-754 FP32 adder (HardFloat) -- PRESERVED (own TB + fp32 recovery)
     imports/Desktop/MXP/...            # MXP compute RTL (Accumulator_Col.v has IMPLICIT_total patch)
     imports/Desktop/sram/rtl/...       # SRAM RTL (sram_1rw + sram_1rw_banked)
 tb/
@@ -507,7 +519,8 @@ sim/
     run_int_to_fp32.sh, run_fp32_adder.sh, clean.sh
     bf16_vectors.py                    # oracle for the bf16 unit TBs (ml_dtypes cross-check)
 third_party/berkeley-hardfloat/        # Vendored HardFloat (HardFloatBundle.v [fp32] +
-                                       #   HardFloatBundle_bf16.v [INToRecFN_i32_e8_s8] + VENDORING.md)
+                                       #   HardFloatBundle_bf16.v + VENDORING.md). 2026-07-13 native
+                                       #   재작성 이후 bf16 데이터패스 미사용 — preserved fp32 유닛 TB 전용
 MXP_Tools/                             # Python verification toolkit (fork of ~/Desktop/Desktop/MXP_Tools)
     pyproject.toml                     # mxp-tools entry point + pytest config
     mxp_tools/                         # gen / emit / ref / compare / viz / rmw-gen subcommands

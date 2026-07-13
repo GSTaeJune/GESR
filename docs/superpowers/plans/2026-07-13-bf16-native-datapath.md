@@ -188,10 +188,48 @@ int_to_bf16 32312 -> 32360. Sentinels are count-agnostic (`ALL .* TESTS PASSED`)
 
 ## 8. Task checklist
 
-- [ ] T1: plan committed
-- [ ] T2: native `bf16_adder.v` + adder directed vectors + `run_bf16_adder.sh` trim + TB header; gate 1 green
-- [ ] T3: native `int_to_bf16.v` + converter directed vectors + `run_int_to_bf16.sh` trim + TB header; gate 2 green
-- [ ] T4: `run_rmw.sh`/integration/synth script trims + `RMW.v`/`fp32_to_bf16_rne.v` headers + `rmw_tb.v` header; gates 3-7 green
-- [ ] T5: synth measurement (gate 8) + README/rtl-copy refresh + docs
+- [x] T1: plan committed
+- [x] T2: native `bf16_adder.v` + adder directed vectors + `run_bf16_adder.sh` trim + TB header; gate 1 green
+- [x] T3: native `int_to_bf16.v` + converter directed vectors + `run_int_to_bf16.sh` trim + TB header; gate 2 green
+- [x] T4: `run_rmw.sh`/integration/synth script trims + `RMW.v`/`fp32_to_bf16_rne.v` headers + `rmw_tb.v` header; gates 3-7 green
+- [x] T5: synth measurement (gate 8) + README/rtl-copy refresh + docs
 - [ ] T6: reviews (comprehensive + adversarial) -> fixes -> converge
 - [ ] T7: merge to main (ff), branch delete, no push; CLAUDE.md kickoff + memory update
+
+---
+
+## Outcome (2026-07-13, filled as gates landed)
+
+**All gates green, measured this session:**
+
+| Gate | Result |
+|---|---|
+| bf16_adder (dual-DUT: default 3-stage + RMW 1/1/1/1) | **ALL 200021 TESTS PASSED** (first run) |
+| int_to_bf16 (dual-DUT: L_CONV=2 and 1) | **ALL 32360 TESTS PASSED** (first run) |
+| rmw_tb streaming (sole skew/latency gate) | **ALL 113 TESTS PASSED** |
+| gemm_sram_top elab (HardFloat-free hierarchy) | PASS |
+| Integration sweep (bit-exact vs bf16 golden) | ALL 9 MODES PASSED |
+| Mixed sweep | ALL 3 MIXED MODES PASSED |
+| Preserved fp32 units (fp32_to_bf16_rne / fp32_adder / int_to_fp32) | 70012 / PASS / PASS |
+
+**Synth proxy (OOC K7-160T-1, 4ns, pre-place; honest measurement — all reg-to-reg):**
+
+| Design | LUT | FF | WNS | Worst stage |
+|---|---|---|---|---|
+| native v3 | **505** | 139 | **-1.642** | S3 align+add/sub: 5.635ns = logic **2.278** (13 lvl, 6 CARRY4) + est. route 3.357 |
+| Phase 2c (HardFloat) | 744 | 148 | -8.793 | S4 AddRecFN: est. 12.358ns = logic 4.085 + route 8.273 |
+
+Reading: the old bottleneck block no longer exists; worst-stage *logic* halved (4.09 ->
+2.28ns), remaining violation is dominated by pre-place route estimate. On the actual
+ASIC PNR backend (Vivado numbers are a relative proxy), 250 MHz is now considered
+reachable without further pipeline surgery. The former T3 candidate (splitting
+AddRecFN's generated netlist) is **obsolete — its target block was deleted**.
+
+**Notes for future sessions:**
+- Gate counts changed (oracle strengthened, never weakened): bf16_adder 200005 ->
+  200021, int_to_bf16 32312 -> 32360. All sentinels count-agnostic.
+- `fp32_to_bf16_rne.v` demoted ACTIVE -> PRESERVED (3rd preserved fp32 unit).
+- Every bf16-datapath compile list is HardFloat-free; the bundles remain vendored
+  solely for the preserved fp32 unit TBs + `fp32-rmw-final` recovery line.
+- `work/synth_rmw/synth.tcl` is untracked (work/ gitignored) — bf16 mode file list
+  was trimmed on disk to the 3 native files.

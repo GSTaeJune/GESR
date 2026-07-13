@@ -96,17 +96,18 @@ git checkout fp32-rmw-final -- gemm_sram.srcs/sources_1/new/
 
 ## 합성 실측 (per-unit OOC)
 
-Kintex-7 160T-1, 250MHz 제약, 2026-07-12 측정:
+Kintex-7 160T-1, 250MHz(4ns) 제약, 2026-07-13 native v3 측정 (상세 표는 `rtl/README.md`):
 
-| 유닛 | LUT | FF | Fmax | 비고 |
+| 유닛 | LUT | FF | WNS (pre-place) | 비고 |
 |---|---|---|---|---|
-| RMW (bf16) | 768 | 99 | ~153 MHz | fp32 시절 1183 / 193 |
-| RMW (fp32, 참고) | 1183 | 193 | ~157 MHz | — |
-| psum SRAM bank 16b | 293 | — | — | LUTRAM. 32b 시절 581 |
+| RMW (bf16 native v3) | **505** | 139 | **-1.64** | 최악 S3 = logic 2.28 + route(추정) 3.36 |
+| RMW (bf16 HardFloat, 2c) | 744 | 148 | -8.79 | 병목이던 AddRecFN logic 4.1ns — native 로 소멸 |
+| RMW (fp32 시절, 참고) | 1183 | 193 | (반쪽 측정) | — |
+| psum SRAM bank 16b | 293 | — | — | LUTRAM. 32b 시절 581. SRAM RTL 은 sim 전용 |
 
-**주의:** 위 수치는 Kintex-7 160T-1 기준 per-unit OOC 합성값이다. bf16/fp32 RMW 둘 다
-250MHz 제약에 못 미친다 (~153 / ~157 MHz) — **timing closure 는 알려진 향후 과제**.
-프로젝트 타겟 디바이스(`xc7vx485`)나 배치·배선 후 값과는 다를 수 있다.
+**주의:** 위 수치는 Kintex-7 160T-1 기준 per-unit OOC **pre-place** 합성값 — 백엔드는
+ASIC PNR 이고 Vivado 수치는 상대 프록시다. native v3 의 남은 위반은 route 추정분이
+지배해 (logic 2.28ns < 4ns) 배치 후 250MHz 는 가시권으로 판단.
 
 ## 검증 전체 게이트
 
