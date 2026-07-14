@@ -22,10 +22,11 @@
 //
 // 포트: a,b(fp32 32b) → sum(fp32 32b, RNE). rst 미사용.
 // 인스턴스: RecFNFromFN_wrapper(x2) + AddRecFN + FNFromRecFN_wrapper (fp32 번들).
-//   인스턴스되는 곳: bf16_adder (bf16 덧셈의 fp32 도메인 코어).
+//   인스턴스되는 곳: 없음 — 2026-07-13 native 재작성으로 bf16_adder 가 자체
+//   bf16 산술을 내장하며 fp32_adder 를 더 이상 인스턴스하지 않는다.
 //
-// 상태: ACTIVE — bf16_adder 안에서 여전히 데이터패스에 살아 있다. (RMW 최상위
-//   에서 직접 인스턴스하던 fp32 시절과 달리, 지금은 bf16_adder 를 경유.)
+// 상태: PRESERVED — 데이터패스 미사용. fp32 복구 라인(태그 fp32-rmw-final)의
+//   앵커 + 자체 단위 TB 회귀 유지용으로 HEAD 에 보존 (int_to_fp32.v 와 동일 정책).
 //
 // 검증: `bash sim/run_fp32_adder.sh` → 단위 TB PASS (directed 케이스).
 //

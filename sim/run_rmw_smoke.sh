@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # sim/run_rmw_smoke.sh — HardFloat round-trip smoke test (INT→recFN→FP32).
+#
+# 주의 (2026-07-13 native 재작성 이후): 이 스모크가 검증하는 HardFloat 경로는
+# 더 이상 RMW 데이터패스에 없다. 지금 역할 = third_party/berkeley-hardfloat
+# 번들의 vendoring 무결성 체크 (preserved fp32 유닛 TB 들의 전제) — 이 green 을
+# "RMW 데이터패스 검증"으로 읽지 말 것.
 set -e
 cd "$(dirname "$0")"
 bash clean.sh

@@ -55,7 +55,7 @@
 | `GEMM.v` | MXP 비트-시리얼 SA 의 얇은 TOP 래퍼 | SystolicArray, station×32, Accumulator_Col×32 | (통합 sweep 로만) | active |
 | `RMW.v` | Read-Modify-Write 단위 (변환→덧셈), bf16 | int_to_bf16, bf16_adder | `run_rmw.sh` → `ALL 113 TESTS PASSED` | active |
 | `int_to_bf16.v` | INT32 + s9 scale → bf16 (v3 native: LZC32 + 8b RNE ×2) | — (leaf) | `run_int_to_bf16.sh` → `ALL 32360 TESTS PASSED` | active |
-| `bf16_adder.v` | bf16 덧셈 (v3 native: 정렬→가감산→정규화→RNE, 11~12b) | — (leaf) | `run_bf16_adder.sh` → `ALL 200021 TESTS PASSED` | active |
+| `bf16_adder.v` | bf16 덧셈 (v3 native: 정렬→가감산→정규화→RNE, 11~12b) | — (leaf) | `run_bf16_adder.sh` → `ALL 200025 TESTS PASSED` | active |
 | `fp32_to_bf16_rne.v` | fp32 → bf16 RNE (순수 조합, subnormal 포함) | — (leaf) | `run_fp32_to_bf16_rne.sh` → `ALL 70012 TESTS PASSED` | **preserved** |
 | `fp32_adder.v` | IEEE-754 fp32 덧셈 (HardFloat AddRecFN) | RecFNFromFN_wrapper×2, AddRecFN, FNFromRecFN_wrapper | `run_fp32_adder.sh` → 단위 TB PASS | **preserved** |
 | `int_to_fp32.v` | INT32 + s9 scale → fp32 (fp32 시절 변환단) | INToRecFN_i32_e8_s24, FNFromRecFN_wrapper | `run_int_to_fp32.sh` → 단위 TB PASS | **preserved** |

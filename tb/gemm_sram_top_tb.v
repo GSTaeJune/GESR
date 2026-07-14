@@ -105,7 +105,9 @@ module gemm_sram_top_tb;
     integer total_drained;
 
     // X-prime: drain 시작 전 파이프라인 X 채움 cycle. 가장 깊은 파이프라인
-    // (RMW.sram_dly + bf16_adder(내부 fp32_adder).recFN_b_dly) 보다 길어야 함.
+    // (RMW 전체 = int_to_bf16 1단 + sram_dly 1단 병렬 + bf16_adder 4단
+    //  (L_IN/L_ADD/L_SUM/L_OUT) = 총 5cy, 2026-07-13 native 재작성 후에도 동일)
+    // 보다 길어야 함. 16 >> 5 로 여유.
     localparam integer PRIME_CYC    = 16;
     // Stage 5 tail 길이: in-flight fire 들을 모두 캡처할 때까지 W_INTn 유지.
     // 최악 = symmetric chain delay (col 0/31 에서 15 cy 최대) +

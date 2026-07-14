@@ -141,8 +141,10 @@ front half / back half land in adjacent stages (S1/S2), matching Phase 2c's stag
   `{2^31-1, -2^31, 2^31-65, -(2^31-65), 0x40000001, -(0x40000001)}` x 8 scales
   (front-half LZC/round at maximum magnitude; realizable-band vectors unchanged).
 
-Counts change (docs updated accordingly): bf16_add 200005 -> 200021,
-int_to_bf16 32312 -> 32360. Sentinels are count-agnostic (`ALL .* TESTS PASSED`).
+Counts change (docs updated accordingly): bf16_add 200005 -> 200021 -> **200025**
+(the /review round added 4 one-sided inf±finite witnesses), int_to_bf16 32312 ->
+32360. Sentinels were later PINNED to exact counts (review-round hardening below) —
+update the script numbers whenever vectors are added.
 
 ## 5. File changes
 
@@ -231,9 +233,36 @@ AddRecFN's generated netlist) is **obsolete — its target block was deleted**.
 
 **Notes for future sessions:**
 - Gate counts changed (oracle strengthened, never weakened): bf16_adder 200005 ->
-  200021, int_to_bf16 32312 -> 32360. All sentinels count-agnostic.
-- `fp32_to_bf16_rne.v` demoted ACTIVE -> PRESERVED (3rd preserved fp32 unit).
+  200025, int_to_bf16 32312 -> 32360.
+- `fp32_to_bf16_rne.v` demoted ACTIVE -> PRESERVED (3rd preserved fp32 unit);
+  `fp32_adder.v` header likewise corrected to PRESERVED in the review round.
 - Every bf16-datapath compile list is HardFloat-free; the bundles remain vendored
   solely for the preserved fp32 unit TBs + `fp32-rmw-final` recovery line.
 - `work/synth_rmw/synth.tcl` is untracked (work/ gitignored) — bf16 mode file list
   was trimmed on disk to the 3 native files.
+
+**Review convergence record (T6):**
+1. Round 1 (2 domain reviewers, both opus): comprehensive = READY TO MERGE;
+   adversarial = NOT READY on one Important finding — the RTL/oracle comments
+   overclaimed full-INT32 golden equality (r8 is a SINGLE int->bf16 RNE, same as
+   v2's INToRecFN; golden double-rounds via fp32; they provably agree for
+   |int| < 2^24 which covers golden's |block_int| < 2^20 contract; rare
+   |int| >= 2^25 ties put golden 1 ULP off — RTL is the correctly-rounded side).
+   Fix = narrow the claim (RTL untouched; "do not fix RTL toward the oracle"
+   warning added). Re-review: RESOLVED — READY TO MERGE. Both reviewers
+   independently fuzzed the RTL vs ml_dtypes (5.5M and 4.1M+ vectors incl.
+   exhaustive subnormal bands): 0 mismatches.
+2. Round 2 (/review skill): testing + maintainability specialists + fresh
+   adversarial + red-team (all opus; Codex cross-model unavailable — account
+   model config error, non-blocking). New findings, all INFORMATIONAL, all fixed:
+   one-sided inf±finite adder path unexercised (+4 vectors -> 200025 + all-comb
+   third DUT); fp32_adder.v stale ACTIVE header -> PRESERVED; count-blind
+   sentinels ("ALL 0 PASSED" false-green hole) -> exact-count pins on the 3 bf16
+   gates; run_rmw.sh stale-vector trap -> rmw-gen embedded (--n 64 <-> 113 <->
+   MAX_N=128 coupling documented); bf16_vectors.py errstate(invalid) for the
+   (inf,-inf) edge (warnings-as-errors mid-write truncation); PRIME_CYC comment
+   referenced deleted fp32 internals -> rewritten; run_rmw_smoke.sh rescoped as
+   vendoring sanity check; stale v2-datapath candidate bullet in CLAUDE.md marked
+   superseded. Accepted (documented, no code change): sim-only RMW param guard;
+   comment-asserted shift-clamp invariants; fp32_to_bf16_rne.sh sentinel remains
+   count-agnostic (preserved unit, out of scope).

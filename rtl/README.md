@@ -50,9 +50,9 @@ GEMM ──INT32 psum──► RMW ──┬─ int_to_bf16 ──fp_a(bf16)─�
 | 대상 | 명령 | 기대 |
 |---|---|---|
 | 전체 (end-to-end) | `bash sim/run_integration_sweep.sh` | `ALL 9 MODES PASSED` (bf16 golden bit-exact) |
-| RMW 유닛 | `bash sim/run_rmw.sh` | `ALL 113 TESTS PASSED` |
+| RMW 유닛 | `bash sim/run_rmw.sh` (rmw-gen 자동 수행) | `ALL 113 TESTS PASSED` |
 | int_to_bf16 | `bash sim/run_int_to_bf16.sh` | `ALL 32360 TESTS PASSED` |
-| bf16_adder / narrower | `run_bf16_adder.sh` / `run_fp32_to_bf16_rne.sh` | 200021 / 70012 |
+| bf16_adder / narrower | `run_bf16_adder.sh` / `run_fp32_to_bf16_rne.sh` | 200025 / 70012 |
 | top elab | `bash sim/run_top_elab.sh` | elab clean |
 
 ## 합성 실측 (OOC, Kintex-7 160T-1, 250MHz 제약 — V7 라이선스 부재로 대체 측정)

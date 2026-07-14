@@ -71,10 +71,11 @@
 // 인스턴스: 없음 (leaf, HardFloat 미사용). 인스턴스되는 곳: RMW.
 // 상태: ACTIVE (RMW 덧셈단 본선, native v3).
 //
-// 검증: `bash sim/run_bf16_adder.sh` → 기대 "ALL 200021 TESTS PASSED"
+// 검증: `bash sim/run_bf16_adder.sh` → 기대 "ALL 200025 TESTS PASSED"
 //   (ml_dtypes 크로스체크 + directed edges: 유한 overflow→inf, min-normal −
 //    min-subnormal 경계 상쇄, d=24 sticky 붕괴 ± (round-carry 포함), x+(-x),
-//    -0+-0, RNE tie. 듀얼 DUT 로 기본단/RMW 재배치단 동시 검증.)
+//    -0+-0, RNE tie, one-sided inf±finite. 트리플 DUT 로 기본단(0,3,0,0)/
+//    RMW 재배치단(1,1,1,1)/전조합(0,0,0,0) 동시 검증.)
 //////////////////////////////////////////////////////////////////////////////////
 
 module bf16_adder #(

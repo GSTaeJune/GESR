@@ -142,11 +142,22 @@ def gen_bf16_add(path, seed=2):
         (bp(0x0003), bp(0x0005)),        # subnormal + subnormal (exact grid)
         (bp(0x00FF), bp(0x0001)),        # max subnormal + min subnormal -> min normal
         (bp(0x0100), bp(0x8080)),        # 2^-125 - 2^-126 -> 2^-126 (d=1 borrow)
+        # One-sided inf +- finite (review round 2): witnesses inf_sgn operand
+        # selection on BOTH ports and the r_inf mux overriding a nonzero finite
+        # datapath value (both-inf edges above cannot catch a select bug here).
+        (bp(0x7F80), bp(0x4321)),        # +inf + finite -> +inf (inf on a)
+        (bp(0x4321), bp(0x7F80)),        # finite + +inf -> +inf (inf on b)
+        (bp(0xFF80), bp(0x4321)),        # -inf + finite -> -inf (inf sign wins)
+        (bp(0xC321), bp(0x7F80)),        # -finite + +inf -> +inf (datapath override)
     ]
     for a, b in edges:
         A.append(a); B.append(b)
     with open(path, "w") as f:
-        with np.errstate(over="ignore"):  # (max+max) legitimately overflows fp32 -> inf
+        # over: (max+max) legitimately overflows fp32 -> inf.
+        # invalid: the (inf,-inf) edge raises numpy's 'invalid' warning for its
+        # NaN result -- without suppressing it, a warnings-as-errors python run
+        # aborts MID-WRITE and leaves a truncated vector file (red-team R2).
+        with np.errstate(over="ignore", invalid="ignore"):
             for a, b in zip(A, B):
                 s = (np.float32(a) + np.float32(b)).astype(bfloat16)  # ml_dtypes-equivalent bf16 add
                 a16 = int(np.float32(a).astype(bfloat16).view(np.uint16))

@@ -59,7 +59,7 @@
 //   조합은 태그 `fp32-rmw-final` 로 보존 (README 참고).
 //
 // 검증: `bash sim/run_rmw.sh` → 기대 "rmw_tb: ALL 113 TESTS PASSED".
-//   (벡터 생성 선행: cd MXP_Tools && python -m mxp_tools rmw-gen ...)
+//   (rmw-gen 벡터 생성은 스크립트가 자동 수행 — 수동 선행 불필요)
 //
 // Spec: docs/superpowers/specs/2026-07-08-rmw-bf16-design.md
 //////////////////////////////////////////////////////////////////////////////////

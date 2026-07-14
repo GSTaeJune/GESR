@@ -29,6 +29,8 @@ out=$( { case "$(uname -s)" in
 esac; } 2>&1 )
 echo "$out"
 
-# 5) pass-sentinel gate — no false green
-echo "$out" | grep -qE 'int_to_bf16_tb: ALL .* TESTS PASSED' \
-    || { echo 'run_int_to_bf16.sh: int_to_bf16 TB FAILED' >&2; exit 1; }
+# 5) pass-sentinel gate — no false green. 카운트까지 고정: 이 유닛 oracle 이
+#    subnormal/flush 의 유일한 영구 게이트라 벡터 수 감소는 커버리지 손실이다
+#    (벡터 추가 시 이 숫자도 함께 갱신할 것).
+echo "$out" | grep -qF 'int_to_bf16_tb: ALL 32360 TESTS PASSED' \
+    || { echo 'run_int_to_bf16.sh: int_to_bf16 TB FAILED (or vector count changed)' >&2; exit 1; }

@@ -30,6 +30,8 @@ out=$( { case "$(uname -s)" in
 esac; } 2>&1 )
 echo "$out"
 
-# 5) pass-sentinel gate — no false green
-echo "$out" | grep -qE 'bf16_adder_tb: ALL .* TESTS PASSED' \
-    || { echo 'run_bf16_adder.sh: bf16_adder TB FAILED' >&2; exit 1; }
+# 5) pass-sentinel gate — no false green. 카운트까지 고정: 벡터 파일이 잘리거나
+#    비어도 "ALL 0 TESTS PASSED" 로 green 이 되는 구멍을 막는다 (벡터 추가 시
+#    이 숫자도 함께 갱신할 것 — bf16_vectors.py gen_bf16_add 의 200000+5+20).
+echo "$out" | grep -qF 'bf16_adder_tb: ALL 200025 TESTS PASSED' \
+    || { echo 'run_bf16_adder.sh: bf16_adder TB FAILED (or vector count changed)' >&2; exit 1; }

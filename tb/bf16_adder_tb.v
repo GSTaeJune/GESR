@@ -11,12 +11,14 @@
 // 검증 내용 (sim/bf16_vectors.py 생성 work/bf16_vec/bf16_add.mem):
 //   - random bf16 x 다양한 크기 (200k)
 //   - directed edges: inf+(-inf)->NaN, inf+inf, 1.0+(-1.0), subnormal 합,
-//     +0 + (-0) 상쇄 + native 재작성 witness 16종 (유한 overflow->inf,
+//     +0 + (-0) 상쇄 + native 재작성 witness 20종 (유한 overflow->inf,
 //     min-normal - min-subnormal 경계 상쇄, d=24 sticky 붕괴 ± (round-carry),
-//     x+(-x) 정확 0 부호, -0+-0, RNE tie 짝수/홀수).
-//   - 듀얼 DUT (Phase 2c 재배치): 기본단 dut (L_ADD=3) + RMW 실배치 dut_rmw
-//     (L_IN=L_ADD=L_SUM=L_OUT=1) 를 같은 벡터로 동시 검증 -> 재배치된 레지스터
-//     배열도 200021 전 벡터를 통과. nfail 은 두 DUT 공유(OR), ntot 은 벡터당 1회.
+//     x+(-x) 정확 0 부호, -0+-0, RNE tie 짝수/홀수, one-sided inf±finite
+//     — inf_sgn 포트 선택 + r_inf mux 의 datapath 덮어쓰기 witness).
+//   - 트리플 DUT: 기본단 dut (L_ADD=3) + RMW 실배치 dut_rmw (L_IN=L_ADD=
+//     L_SUM=L_OUT=1) + 전조합 dut_comb (0,0,0,0 — 레지스터 배치 불변성의 극단
+//     witness) 를 같은 벡터로 동시 검증 -> 세 구성 모두 200025 전 벡터를 통과.
+//     nfail 은 세 DUT 공유(OR), ntot 은 벡터당 1회.
 //     주의: 대기는 settle-tolerant (입력 유지 후 샘플) — 이 TB 는 dut_rmw 의
 //     "기능"을 검증하며 latency 는 고정하지 않는다. RMW 구성의 latency(총 5cy)
 //     는 rmw_tb 의 스트리밍 캡처가 고정한다.
@@ -71,6 +73,17 @@ module bf16_adder_tb;
         .sum (sum_rmw)
     );
 
+    // 전조합 구성 (0,0,0,0): [A][B][C] 세 블록이 한 조합 콘으로 붕괴하는 극단.
+    // 파라미터 = 절단점 레지스터 깊이일 뿐 기능 불변이라는 계약의 witness.
+    wire [15:0] sum_comb;
+    bf16_adder #(.L_IN(0), .L_ADD(0), .L_SUM(0), .L_OUT(0)) dut_comb (
+        .clk (clk),
+        .rst (rst),
+        .a   (a),
+        .b   (b),
+        .sum (sum_comb)
+    );
+
     // free-running clock
     initial clk = 1'b0;
     always #5 clk = ~clk;
@@ -119,6 +132,12 @@ module bf16_adder_tb;
                 if (nfail < 10)
                     $display("MISMATCH(dut_rmw) a=%04x b=%04x got=%04x exp=%04x",
                              a_w, b_w, sum_rmw, exp_w);
+                nfail = nfail + 1;
+            end
+            if (!(is_bf16_nan(sum_comb) && is_bf16_nan(exp_w)) && (sum_comb !== exp_w)) begin
+                if (nfail < 10)
+                    $display("MISMATCH(dut_comb) a=%04x b=%04x got=%04x exp=%04x",
+                             a_w, b_w, sum_comb, exp_w);
                 nfail = nfail + 1;
             end
             ntot = ntot + 1;

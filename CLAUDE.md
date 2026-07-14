@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **무엇/왜 (사용자 지시: "다시 BF16 계산기로 RTL 짜. 주석 잘 달아놔 — 내가 읽어볼 거니까")**: Phase 2c 정직 측정이 병목 = monolithic fp32 `AddRecFN`(24b significand 로 8b 일 하는 구조, est 12.4ns)임을 확정 → T3(생성물 내부 분할) 대신 **A6 승격**: `bf16_adder.v` + `int_to_bf16.v` 를 진짜 bf16 폭(내부 11~12b GRS 그리드)의 단일-라운딩 native 산술로 재작성. **주석이 1급 산출물** — 각 파일 헤더가 알고리즘(정렬/GRS/정규화 클램프/RNE/subnormal/0 부호 규칙)을 한글로 상술, 사용자 직독 대상. plan+outcome: `docs/superpowers/plans/2026-07-13-bf16-native-datapath.md`. 브랜치 `feat/bf16-native`.
 
 - **계약 전부 불변**: 포트/파라미터 표면(L_IN/L_ADD/L_SUM/L_OUT = 절단점 깊이, L_CONV), RMW 5cy(내부 분배 S1..S5 블록당 1단 — 블록명만 native 로: S1 i2b[F] LZC32+8b RNE / S2 i2b[B] scale·denorm / S3 adder[A] 정렬·가감산 / S4 adder[B] 정규화 / S5 adder[C] RNE·패킹), out_RMW 레지스터 출력, TB 로직 무수정(헤더만 갱신).
-- **게이트 전부 green(실측, 두 유닛 다 첫 실행에 통과)**: bf16_adder **200021**(oracle +16 directed: 유한 overflow→inf, min-normal−min-subnormal 경계, d=24 sticky+round-carry, x+(−x) 0 부호, tie) / int_to_bf16 **32360**(+48 full-range INT32) / rmw **113** / top elab / 통합 **ALL 9 MODES PASSED**(bit-exact) / mixed **ALL 3 PASSED** / preserved fp32 유닛 70012·PASS·PASS. 카운트 변경은 oracle 강화(약화 아님).
+- **게이트 전부 green(실측, 두 유닛 다 첫 실행에 통과)**: bf16_adder **200025**(oracle +20 directed: 유한 overflow→inf, min-normal−min-subnormal 경계, d=24 sticky+round-carry, x+(−x) 0 부호, tie, one-sided inf±finite; **트리플 DUT** = 기본/RMW/전조합) / int_to_bf16 **32360**(+48 full-range INT32) / rmw **113** / top elab / 통합 **ALL 9 MODES PASSED**(bit-exact) / mixed **ALL 3 PASSED** / preserved fp32 유닛 70012·PASS·PASS. 카운트 변경은 oracle 강화(약화 아님). **게이트 인프라 경화(/review 라운드)**: 3개 bf16 유닛 sentinel 이 정확-카운트 고정(빈/잘린 벡터파일의 "ALL 0 PASSED" false-green 차단, 벡터 추가 시 스크립트 숫자도 갱신), run_rmw.sh 가 rmw-gen 자동 수행(stale-vector 함정 제거), bf16_vectors.py errstate 에 invalid 추가(warnings-as-errors 환경서 mid-write 잘림 방지).
 - **합성 실측(OOC K7, 4ns, pre-place)**: LUT-cell 744→**505**(-32%; 동일 metric 시리즈, Slice LUT 는 404), FF 148→139, WNS -8.79→**-1.64**. 최악 = S3 정렬·가감산 5.64ns = **logic 2.28**(13lvl) + route 추정 3.36 — 구 병목 로직(4.09ns) 절반 이하, 잔여 위반은 pre-place route 추정이 지배. 백엔드 = ASIC PNR(Vivado 는 상대 프록시)이라 **250MHz 가시권, T3 는 대상 블록 소멸로 폐기**.
 - **HardFloat-free**: 전 bf16 컴파일 리스트(rmw/top/integration/smoke/mixed/synth)에서 번들·fp32_adder·fp32_to_bf16_rne 제거(elab 이 자립성 증명). 번들은 preserved fp32 유닛 TB + `fp32-rmw-final` 복구 전용. `fp32_to_bf16_rne.v` ACTIVE→PRESERVED(자체 70012 게이트 유지).
 - **커버리지 유의**: rmw_tb 스트리밍이 여전히 유일한 skew/latency 게이트(약화 금지). 단위 oracle 이 subnormal/tie/overflow 의 유일한 영구 게이트라는 Phase 2b 원칙 그대로 — red 면 RTL 을 고칠 것(벡터 약화 금지, 추가만 허용).
@@ -39,7 +39,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### 다음 후보
 1. **SRAM 실이득 정량화**: psum word 32->16 = SRAM psum 저장 절반; buffer_sweep 의 O-buffer(binding constraint, best 1:1:6) 유효 용량 2x. cap 별 재-sweep 또는 CACTI 실측.
-2. **Vivado timing closure**: bf16 데이터패스(int_to_bf16 v2 = fp32 도메인 shift + FNFromRecFN + fp32_to_bf16_rne; bf16_adder 내부 fp32_adder) 합성/timing. `.xpr` 소스 목록이 Phase 2a 이전이라 stale — GUI flow 는 `.xpr` 재정비 전까지 미지원, bash `sim/run_*.sh` 가 authoritative.
+2. **Vivado timing closure**: (대체됨 — 2026-07-13 native 재작성으로 데이터패스는 HardFloat-free 손코딩이며 합성 실측은 맨 위 섹션 참조) `.xpr` 소스 목록이 Phase 2a 이전이라 stale — GUI flow 는 `.xpr` 재정비 전까지 미지원, bash `sim/run_*.sh` 가 authoritative.
 3. **필요 시 fp32 fallback 경로**: bf16 정확도가 특정 워크로드에 부족하면 태그 `fp32-rmw-final` 로 복구(전 fp32 통합 상태 검증됨). golden 은 `accum_dtype={fp32,bf16}` 로 이미 양쪽 지원.
 
 **재현/복구**: 복구 태그 `fp32-rmw-final`(local, 태그 시점 green 검증: pytest 69 + 전 단위 TB + 9-mode fp32 sweep + mixed fp32 sweep). `git checkout fp32-rmw-final && bash sim/run_integration_sweep.sh` -> `ALL 9 MODES PASSED`. bf16 재검증: `bash sim/run_int_to_bf16.sh`(32312) / rmw-gen 선행 후 `bash sim/run_rmw.sh`(113) / `bash sim/run_integration_sweep.sh`(9, --accum bf16 내장) / `python sim/runner.py mixed-sweep`(3). **주의**: `rmw_gen.py` 가 이제 bf16-semantics = MXP_Tools 업스트림 동기화 시 보존할 project-only 분기.
@@ -405,7 +405,8 @@ Three ways to run sim:
    bash sim/run_fp32_to_bf16_rne.sh  # fp32->bf16 RNE narrow (70012 vectors; preserved unit)
    bash sim/run_int_to_bf16.sh       # int_to_bf16 v3 native (32360 vectors: neg scales +
                                      #   subnormal boundary + full-range INT32)
-   bash sim/run_bf16_adder.sh        # bf16 adder v3 native (200021 vectors vs ml_dtypes)
+   bash sim/run_bf16_adder.sh        # bf16 adder v3 native (200025 vectors vs ml_dtypes,
+                                     #   triple-DUT: default/RMW/all-comb)
    bash sim/run_rmw.sh               # full RMW vector TB (113 cases, bf16)
    bash sim/run_top_elab.sh          # gemm_sram_top elab-only smoke
    bash sim/run_integration_smoke.sh # TB zero-prime + dump (no GEMM driving)
@@ -419,11 +420,12 @@ Three ways to run sim:
    bash sim/run_integration_parallel.sh                         # print parallel dispatch guide
    ```
 
-   **Full RMW vector test** requires `MXP_Tools` to generate the vector files first:
+   **Full RMW vector test** — `run_rmw.sh` 가 rmw-gen 을 자동 수행하므로 수동 선행
+   불필요 (2026-07-13 /review 라운드에서 stale-vector 함정 제거):
 
    ```bash
-   cd MXP_Tools && python -m mxp_tools rmw-gen --out work/rmw --n 64 --seed 0 && cd ..
    bash sim/run_rmw.sh             # expect: rmw_tb: ALL 113 TESTS PASSED
+   # (내부적으로: cd MXP_Tools && python -m mxp_tools rmw-gen --out work/rmw --n 64 --seed 0)
    ```
 
    **Integration sweep** is self-contained — invokes `gen / emit / ref` internally then `run_integration_one.sh` + `compare`. Last line on success: `ALL 9 MODES PASSED`. Runtime **633s ≈ 10.5 min** for the full 9-mode sweep (32-RMW col-parallel; 이전 1-RMW sweep ~20–25 min 대비 약 2× 단축).

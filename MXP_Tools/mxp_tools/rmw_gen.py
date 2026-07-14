@@ -1,9 +1,10 @@
 """RMW test vector generator (bf16 accumulator datapath). Dumps
 (in_GEMM, scale, in_SRAM, expected_out) as hex files.
 
-Semantics mirror RMW.v after the Phase-2b bf16 hard-swap:
-  dq  = bf16( bf16(in_GEMM) * 2^(scale-127) )      # int_to_bf16 v2 (single RNE + flush)
-  out = bf16( fp32(in_SRAM) + fp32(dq) )           # bf16_adder (fp32-domain add + RNE narrow)
+Semantics mirror RMW.v after the Phase-2b bf16 hard-swap (unchanged by the
+2026-07-13 native rewrite -- v3 implements the same numeric contract natively):
+  dq  = bf16( bf16(in_GEMM) * 2^(scale-127) )      # int_to_bf16 (r8 + exp shift + flush)
+  out = bf16_RNE( in_SRAM + dq )                   # bf16_adder (true bf16 add, RNE)
 
 in_SRAM.hex / expected_out.hex hold 16-bit bf16 words; in_GEMM stays INT32;
 scale is the 9-bit signed combined scale. Requires ml_dtypes (same optional
